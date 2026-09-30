@@ -403,12 +403,16 @@ async def update_conversation_ai_sdk(
     ),
 )
 @AppAutoInjector.auto_inject()
-async def delete_conversation_ai_sdk(
+def delete_conversation_ai_sdk(
     conversation_id: UUID,
     conversation_service: IConversationService,
     current_user_id: UUID,
 ) -> ApiResponse[Any]:
-    """Delete conversation for AI SDK client."""
+    """Delete conversation for AI SDK client.
+
+    A plain ``def``: the service is synchronous DB code, so FastAPI runs it in
+    the threadpool instead of on the event loop.
+    """
     conversation_service.delete_conversation(conversation_id, current_user_id)
     return ApiResponse(success=True, message="Conversation deleted successfully")
 

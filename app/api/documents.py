@@ -381,17 +381,17 @@ async def get_task_status(
     """Get sanitized background task status by task ID.
 
     Enforces document ownership: only the user who uploaded the document
-    associated with this task may query its status.
+    associated with this task may query its status. A task with no linked
+    document has no owner to check, so it is not found for everyone.
     """
-    # Ownership check: look up the document by Celery task ID.
     doc_repo = DocumentRepository(document_service.repository.session_factory)
     document = doc_repo.get_by_processing_task_id(task_id)
-    if document is not None:
-        # Verify that the requesting user owns the conversation this document
-        # belongs to.  Raises AuthorizationException on mismatch.
-        DocumentValidationUtils(
-            document_service.repository.session_factory
-        ).validate_document_access(current_user_id, document.id)
+    if document is None:
+        raise ResourceNotFoundException(detail="Task not found")
+    # Raises AuthorizationException unless the caller owns the document's conversation.
+    DocumentValidationUtils(
+        document_service.repository.session_factory
+    ).validate_document_access(current_user_id, document.id)
 
     task_status = await document_processing_service.get_processing_status(task_id)
 

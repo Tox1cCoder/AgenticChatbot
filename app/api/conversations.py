@@ -164,11 +164,15 @@ async def update_conversation(
 
 @router.delete("/{conversation_id}", response_model=ApiResponse[Any])
 @AppAutoInjector.auto_inject()
-async def delete_conversation(
+def delete_conversation(
     conversation_id: UUID,
     conversation_service: IConversationService,
     user_id: UUID,
 ) -> ApiResponse[Any]:
-    """Delete conversation (requires user ownership)"""
+    """Delete conversation (requires user ownership).
+
+    A plain ``def``: the service is synchronous DB code, so FastAPI runs it in
+    the threadpool instead of on the event loop.
+    """
     conversation_service.delete_conversation(conversation_id, user_id)
     return ApiResponse(success=True, message="Conversation deleted successfully")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocketDisconnect, status
 from fastapi.testclient import TestClient
 
 qdrant_client_stub = types.ModuleType("qdrant_client")
@@ -353,3 +354,188 @@ def test_widget_websocket_sync_and_user_patch(widget_test_client):
     assert persisted is not None
     assert persisted.version == 2
     assert persisted.state["selection"] == "alpha"
+
+
+# ---------------------------------------------------------------------------
+# Cross-user adoption (2026-09 audit, Task 9)
+# ---------------------------------------------------------------------------
+
+OWNER_SESSION_ID = TEST_SESSION_ID
+CALLER_SESSION_ID = TEST_SESSION_ID_2
+
+
+def _callers_message(*artifacts: dict) -> list[SimpleNamespace]:
+    return [
+        SimpleNamespace(
+            conversation_id=UUID(CALLER_SESSION_ID),
+            message_metadata={"tool_artifacts": list(artifacts)},
+        )
+    ]
+
+
+def _quoting_artifact(widget_id: str) -> dict:
+    """A tool output of the caller that merely quotes someone else's widget id."""
+    return {"tool": "web_fetch", "status": "success", "output": f"notes about {widget_id}"}
+
+
+def _foreign_update_artifact(widget_id: str, session_id: str) -> dict:
+    """``widget_update`` accepts any id, so its output can name a foreign widget."""
+    output = json.dumps(
+        {"widget_id": widget_id, "session_id": session_id, "status": "active", "version": 2}
+    )
+    return {
+        "tool": "widget_update",
+        "status": "success",
+        "args": {"widget_id": widget_id, "state": {"html": "<div>Mine now</div>", "height": 540}},
+        "output": output,
+    }
+
+
+def _only_caller_session_is_accessible(monkeypatch) -> None:
+    monkeypatch.setattr(
+        widgets_api,
+        "_user_can_access_widget_session",
+        lambda _user_id, session_id: session_id == CALLER_SESSION_ID,
+    )
+
+
+def test_a_foreign_widget_is_not_adopted_through_a_quoting_message(
+    widget_test_client, monkeypatch
+):
+    client, store, _token_service = widget_test_client
+    created = asyncio.run(
+        store.create(OWNER_SESSION_ID, {"html": "<div>Owner</div>", "height": 540})
+    )
+    _only_caller_session_is_accessible(monkeypatch)
+    monkeypatch.setattr(
+        widgets_api,
+        "_iter_widget_messages_for_user",
+        lambda *_args: _callers_message(_quoting_artifact(created.widget_id)),
+    )
+
+    response = client.post(f"/widgets/{created.widget_id}/connection")
+
+    assert response.status_code == 403
+    assert "token" not in response.json()
+
+
+def test_a_placeholder_widget_is_not_adopted_through_a_quoting_message(
+    widget_test_client, monkeypatch
+):
+    client, store, _token_service = widget_test_client
+    created = asyncio.run(
+        store.create("current_session", {"html": "<div>Owner</div>", "height": 540})
+    )
+    _only_caller_session_is_accessible(monkeypatch)
+    monkeypatch.setattr(
+        widgets_api,
+        "_iter_widget_messages_for_user",
+        lambda *_args: _callers_message(
+            _quoting_artifact(created.widget_id),
+            _foreign_update_artifact(created.widget_id, "current_session"),
+        ),
+    )
+
+    response = client.post(f"/widgets/{created.widget_id}/connection")
+
+    assert response.status_code == 403
+
+
+def test_a_placeholder_widget_recovers_from_the_callers_own_create(
+    widget_test_client, monkeypatch
+):
+    client, store, _token_service = widget_test_client
+    created = asyncio.run(
+        store.create("current_session", {"html": "<div>Mine</div>", "height": 540})
+    )
+    _only_caller_session_is_accessible(monkeypatch)
+    create_artifact = {
+        "tool": "widget_create",
+        "status": "success",
+        "output": json.dumps({"widget_id": created.widget_id, "session_id": "current_session"}),
+    }
+    monkeypatch.setattr(
+        widgets_api,
+        "_iter_widget_messages_for_user",
+        lambda *_args: _callers_message(create_artifact),
+    )
+
+    response = client.post(f"/widgets/{created.widget_id}/connection")
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == CALLER_SESSION_ID
+
+
+def test_an_expired_foreign_widget_is_not_restored_from_an_update(
+    widget_test_client, monkeypatch
+):
+    client, store, _token_service = widget_test_client
+    widget_id = "expired-foreign-widget"
+    monkeypatch.setattr(
+        widgets_api,
+        "_iter_widget_messages_for_user",
+        lambda *_args: _callers_message(_foreign_update_artifact(widget_id, OWNER_SESSION_ID)),
+    )
+
+    response = client.post(f"/widgets/{widget_id}/connection")
+
+    assert response.status_code == 404
+    assert asyncio.run(store.get(widget_id)) is None
+
+
+def _connect(client, widget_id: str, session_id: str, token: str):
+    return client.websocket_connect(
+        f"/widgets/{widget_id}/connect?session_id={session_id}&token={token}"
+    )
+
+
+def test_a_token_for_another_session_cannot_connect(widget_test_client):
+    client, store, token_service = widget_test_client
+    created = asyncio.run(
+        store.create(OWNER_SESSION_ID, {"html": "<div>Owner</div>", "height": 540})
+    )
+    token, _expires_at = token_service.mint(
+        widget_id=created.widget_id,
+        session_id=CALLER_SESSION_ID,
+        user_id=str(TEST_USER_ID),
+    )
+
+    with (
+        pytest.raises(WebSocketDisconnect) as closed,
+        _connect(client, created.widget_id, CALLER_SESSION_ID, token) as websocket,
+    ):
+        websocket.receive_json()
+
+    assert closed.value.code == status.WS_1008_POLICY_VIOLATION
+
+
+@pytest.mark.parametrize(
+    ("recovered", "connects"), [(CALLER_SESSION_ID, True), (None, False)], ids=["own", "none"]
+)
+def test_a_placeholder_widget_token_is_bound_by_recovery(
+    widget_test_client, monkeypatch, recovered, connects
+):
+    client, store, token_service = widget_test_client
+    created = asyncio.run(
+        store.create("current_session", {"html": "<div>Legacy</div>", "height": 540})
+    )
+    monkeypatch.setattr(
+        widgets_api, "_recover_widget_session_id_from_messages", lambda *_args: recovered
+    )
+    token, _expires_at = token_service.mint(
+        widget_id=created.widget_id,
+        session_id=CALLER_SESSION_ID,
+        user_id=str(TEST_USER_ID),
+    )
+
+    if connects:
+        with _connect(client, created.widget_id, CALLER_SESSION_ID, token) as websocket:
+            assert websocket.receive_json()["type"] == "widget_state_sync"
+        return
+
+    with (
+        pytest.raises(WebSocketDisconnect) as closed,
+        _connect(client, created.widget_id, CALLER_SESSION_ID, token) as websocket,
+    ):
+        websocket.receive_json()
+    assert closed.value.code == status.WS_1008_POLICY_VIOLATION

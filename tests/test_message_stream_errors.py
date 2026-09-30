@@ -62,3 +62,19 @@ async def test_internal_stream_exception_retains_custom_http_metadata():
             "error_code": "INTERRUPT_ALREADY_RESOLVED",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_internal_stream_exception_hides_raw_exception_text():
+    """A provider error can carry a key in its URL; only the type reaches the client."""
+    secret_text = "GET https://provider.test/v1?key=sk-live-123 failed"
+
+    async def source():
+        raise RuntimeError(secret_text)
+        yield  # pragma: no cover
+
+    response = _internal_event_stream_response(lambda: source(), _ConnectedRequest())
+    payloads = await _sse_payloads(response)
+
+    assert payloads == [{"type": "error", "error": "Response generation failed (RuntimeError)."}]
+    assert "sk-live-123" not in json.dumps(payloads)

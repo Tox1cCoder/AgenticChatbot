@@ -11,6 +11,7 @@ Each test here failed before its fix:
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -32,6 +33,7 @@ from app.schemas.feedback import FeedbackRead
 from app.services.jwt_service import JwtService
 from app.services.widget_runtime import WidgetTokenService
 from app.utils.exception_handler import register_exception_handlers
+from tests.token_state_stub import stub_token_states
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +41,12 @@ def _restore_wiring():
     setup_auto_injection(Container)
     yield
     setup_auto_injection(Container)
+
+
+@pytest.fixture(autouse=True)
+def _live_token_users(monkeypatch):
+    """Every made-up user here is live at token version 0; no users table."""
+    stub_token_states(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +297,78 @@ def test_document_listing_page_bounds_are_client_errors():
 
     assert zero_size.status_code == 422
     assert zero_page.status_code == 422
+
+
+def test_a_task_with_no_linked_document_is_not_found(monkeypatch):
+    """Such a task has no owner to check, so its status used to go to any caller."""
+    import app.api.documents as documents_api
+
+    status_calls: list[str] = []
+
+    class _Processing:
+        async def get_processing_status(self, task_id):
+            status_calls.append(task_id)
+            return {"task_id": task_id, "state": "SUCCESS"}
+
+    class _NoDocuments:
+        def __init__(self, _session_factory):
+            pass
+
+        def get_by_processing_task_id(self, _task_id):
+            return None
+
+    monkeypatch.setattr(documents_api, "DocumentRepository", _NoDocuments)
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(documents_router)
+    app.dependency_overrides[get_current_user_id] = lambda: uuid4()
+    document_service = SimpleNamespace(repository=SimpleNamespace(session_factory=None))
+
+    with (
+        Container.document_service.override(providers.Object(document_service)),
+        Container.document_processing_service.override(providers.Object(_Processing())),
+    ):
+        response = TestClient(app, raise_server_exceptions=False).get("/documents/task/t-1")
+
+    assert response.status_code == 404
+    assert "SUCCESS" not in response.text
+    assert status_calls == []
+
+
+@pytest.mark.parametrize(
+    "path", ["/conversations/{id}", "/ai/conversations/{id}"], ids=["canonical", "ai_sdk"]
+)
+def test_deleting_a_conversation_runs_the_sync_service_off_the_event_loop(path):
+    """An ``async def`` route calling sync DB code blocked every other request."""
+    from app.api.ai_sdk import router as ai_sdk_router
+
+    service_threads: list[int] = []
+
+    class _Conversations:
+        def delete_conversation(self, conversation_id, user_id):
+            service_threads.append(threading.get_ident())
+
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(conversations_router)
+    app.include_router(ai_sdk_router)
+    app.dependency_overrides[get_current_user_id] = lambda: uuid4()
+
+    @app.get("/loop-thread")
+    async def loop_thread():
+        return {"ident": threading.get_ident()}
+
+    with (
+        Container.conversation_service.override(providers.Object(_Conversations())),
+        TestClient(app) as client,
+    ):
+        loop_ident = client.get("/loop-thread").json()["ident"]
+        response = client.delete(path.format(id=uuid4()))
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Conversation deleted successfully"
+    assert len(service_threads) == 1
+    assert service_threads[0] != loop_ident
 
 
 @pytest.mark.parametrize("latest", [-1, 101])

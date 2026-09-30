@@ -214,11 +214,12 @@ class HITLInterruptRepository:
             db.commit()
             expired_count = result.rowcount if hasattr(result, "rowcount") else 0
             if expired_count:
+                # The device runtime WebSocket connects with this session id,
+                # so it stays out of logs.
                 logger.info(
-                    "Expired %d stale client-tool interrupt(s) for device=%s new_session=%s",
+                    "Expired %d stale client-tool interrupt(s) for device=%s",
                     expired_count,
                     device_id,
-                    current_session_id,
                 )
             return expired_count
 

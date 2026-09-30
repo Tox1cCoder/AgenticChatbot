@@ -24,6 +24,7 @@ from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.services.event_streaming.events import V3StreamEvent
 from app.services.event_streaming.internal_sse import legacy_event_from_v3
+from app.services.message_service import _client_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +46,21 @@ def _to_internal_sse_event(event: dict | V3StreamEvent) -> dict | None:
 
 
 def _stream_error_event(exc: Exception) -> dict:
-    """Project known stream exceptions to the internal SSE error shape."""
-    error_event: dict = {"type": "error", "error": str(exc)}
-    if isinstance(exc, CustomHTTPException):
-        error_event["error"] = str(exc.detail)
-        error_event["status_code"] = exc.status_code
-        if exc.error_code is not None:
-            error_event["error_code"] = exc.error_code
+    """Project known stream exceptions to the internal SSE error shape.
+
+    Only a ``CustomHTTPException`` detail is written for the client; any other
+    exception's text can carry a key, SQL or a path, so it gets the service's
+    type-only text.
+    """
+    if not isinstance(exc, CustomHTTPException):
+        return {"type": "error", "error": _client_error_text(exc)}
+    error_event: dict = {
+        "type": "error",
+        "error": str(exc.detail),
+        "status_code": exc.status_code,
+    }
+    if exc.error_code is not None:
+        error_event["error_code"] = exc.error_code
     return error_event
 
 

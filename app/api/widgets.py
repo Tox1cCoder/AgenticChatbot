@@ -80,29 +80,31 @@ def _user_can_access_widget_session(user_id: UUID, session_id: str) -> bool:
         return False
 
 
-def _message_metadata_contains_widget(metadata: Any, widget_id: str) -> bool:
+def _artifact_failed(artifact: dict[str, Any]) -> bool:
+    status_text = str(artifact.get("status") or "").strip().lower()
+    return bool(artifact.get("error")) or status_text in {"error", "failed", "rejected"}
+
+
+def _message_created_widget(metadata: Any, widget_id: str) -> bool:
+    """True when this message's own successful ``widget_create`` produced ``widget_id``.
+
+    The store mints widget ids, so only the turn that created a widget has a
+    ``widget_create`` output carrying it. Any weaker match lets a caller adopt
+    someone else's widget: a substring match accepted any tool output that
+    merely quoted the id, and ``widget_update``/``widget_close`` accept a
+    foreign id.
+    """
     if not isinstance(metadata, dict):
         return False
 
-    live_widgets = metadata.get("live_widgets")
-    if isinstance(live_widgets, list):
-        for widget in live_widgets:
-            if isinstance(widget, dict) and str(widget.get("widget_id") or "") == widget_id:
-                return True
-
-    tool_artifacts = metadata.get("tool_artifacts")
-    if not isinstance(tool_artifacts, list):
-        return False
-
-    for artifact in tool_artifacts:
-        if not isinstance(artifact, dict):
+    for artifact in metadata.get("tool_artifacts") or []:
+        if not isinstance(artifact, dict) or _artifact_failed(artifact):
             continue
-
+        if (artifact.get("tool") or artifact.get("tool_name")) != "widget_create":
+            continue
         for key in ("output", "tool_output", "result"):
-            value = artifact.get(key)
-            if isinstance(value, dict) and str(value.get("widget_id") or "") == widget_id:
-                return True
-            if isinstance(value, str) and widget_id in value:
+            output_payload = _parse_json_dict(artifact.get(key))
+            if output_payload and str(output_payload.get("widget_id") or "") == widget_id:
                 return True
 
     return False
@@ -143,10 +145,10 @@ def _recover_widget_session_id_from_messages(
     user_id: UUID,
     widget_id: str,
 ) -> str | None:
-    """Recover a widget's conversation ID from persisted assistant message metadata."""
+    """Recover a widget's conversation ID from the caller's message that created it."""
     try:
         for message in _iter_widget_messages_for_user(user_id, widget_id):
-            if _message_metadata_contains_widget(
+            if _message_created_widget(
                 getattr(message, "message_metadata", None),
                 widget_id,
             ):
@@ -201,11 +203,7 @@ def _extract_widget_snapshot_from_metadata(
     for artifact in metadata.get("tool_artifacts") or []:
         if not isinstance(artifact, dict):
             continue
-        if artifact.get("error") or str(artifact.get("status") or "").strip().lower() in {
-            "error",
-            "failed",
-            "rejected",
-        }:
+        if _artifact_failed(artifact):
             continue
 
         tool_name = artifact.get("tool") or artifact.get("tool_name")
@@ -259,11 +257,22 @@ async def _restore_widget_record_from_messages(
     user_id: UUID,
     widget_id: str,
 ) -> Any | None:
-    """Rehydrate an expired widget from persisted assistant message metadata."""
+    """Rehydrate an expired widget from persisted assistant message metadata.
+
+    Only a conversation of the caller that created the widget can restore it,
+    so a ``widget_update`` naming a foreign id cannot re-home that widget.
+    """
     try:
         messages = _iter_widget_messages_for_user(user_id, widget_id)
+        creating_conversations = {
+            str(message.conversation_id)
+            for message in messages
+            if _message_created_widget(getattr(message, "message_metadata", None), widget_id)
+        }
         store = get_widget_store()
         for message in messages:
+            if str(message.conversation_id) not in creating_conversations:
+                continue
             snapshot = _extract_widget_snapshot_from_metadata(
                 metadata=getattr(message, "message_metadata", None),
                 widget_id=widget_id,
@@ -306,13 +315,16 @@ def _resolve_widget_session_id(
 
     This covers both the normal case (widget store already has a valid
     conversation UUID) and legacy/broken widgets created with placeholders like
-    ``current_session``.
+    ``current_session``. A widget stored with a real conversation belongs to
+    that conversation alone: recovery is only for placeholders, otherwise a
+    caller denied the stored conversation could re-home the widget into one of
+    their own.
     """
     stored_conversation_id = _parse_conversation_uuid(stored_session_id)
-    if stored_conversation_id and _user_can_access_widget_session(
-        user_id, str(stored_conversation_id)
-    ):
-        return str(stored_conversation_id)
+    if stored_conversation_id is not None:
+        if _user_can_access_widget_session(user_id, str(stored_conversation_id)):
+            return str(stored_conversation_id)
+        return None
 
     recovered_session_id = _recover_widget_session_id_from_messages(user_id, widget_id)
     if recovered_session_id and _user_can_access_widget_session(user_id, recovered_session_id):
@@ -324,10 +336,31 @@ def _resolve_widget_session_id(
         )
         return recovered_session_id
 
-    if stored_conversation_id is None:
-        logger.warning("Widget session_id is not a valid conversation UUID: %s", stored_session_id)
-
+    logger.warning("Widget session_id is not a valid conversation UUID: %s", stored_session_id)
     return None
+
+
+def _token_bound_to_widget(claims: dict[str, Any], record: Any) -> bool:
+    """Whether a widget token's ``sid`` is the session this widget belongs to.
+
+    The token is checked against the query string on connect; this checks it
+    against the widget itself. A placeholder-session widget has no stored
+    conversation to compare, so the token user's recovery is re-run instead.
+    """
+    token_session_id = str(claims.get("sid") or "")
+    stored_conversation_id = _parse_conversation_uuid(record.session_id)
+    if stored_conversation_id is not None:
+        return token_session_id == str(stored_conversation_id)
+
+    token_user_id = _parse_conversation_uuid(claims.get("sub"))
+    if token_user_id is None:
+        return False
+    resolved = _resolve_widget_session_id(
+        user_id=token_user_id,
+        widget_id=str(record.widget_id),
+        stored_session_id=record.session_id,
+    )
+    return resolved is not None and resolved == token_session_id
 
 
 def _widget_record_signature(record: Any | None) -> tuple[int, str, float]:
@@ -623,7 +656,7 @@ async def widget_connect(
 
     store = get_widget_store()
     record = await store.get(widget_id)
-    if record is None:
+    if record is None or not await asyncio.to_thread(_token_bound_to_widget, claims, record):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
