@@ -17,6 +17,35 @@ LangGraph, Streamlit (`demo.py`), local sidecar `client_backend/` on :8100.
 **Spec:** the audit reports, summarised in the Appendix. The session note is at
 `~/claude-assistant/state/sessions/2026-09-25-codebase-audit.md`.
 
+## Status (2026-09-30)
+
+Full suite after this round: 5975 passed, 314 skipped, 0 failed. `ruff check .` is clean.
+
+| Task | State | Commit / note |
+|---|---|---|
+| 1 bundle ships project schemas | done | `cf4d4636` (both builders; the `.ps1` twin was missing from the plan) |
+| 2 DB tests off the app database | done | `762e9c5b`, `02c8ce3a` |
+| 3 CORS | done | `fcd46dfa`. Thai's `.env` origins are now enforced |
+| 4 dead Celery shim | done | `fcd46dfa` |
+| 5 sidecar launch token | done | `0c7413cf`. Needs `CLIENT_TRUST_CHECKS_ENABLED=true` in `.env.client.example` (Thai) |
+| 6 server MCP admin gate | **deferred by Thai** | leave as is for now |
+| 7 token_version revocation | done | `67f128f2`, migration `60adc43e534e` (the API lifespan applies it at startup). No password-change route or logout-all route exists yet |
+| 8 tool recovery scope | done | `eda376e6`. Custom agents keep `allow_all_server_tools` by design |
+| 9 widget owner/session binding | done | `00bcfa0a` |
+| 10 skill-file passwords | open | Thai's untracked files |
+| 11 production-safe defaults | done | `fcd46dfa`. Non-dev needs `SECRET_KEY` ≥32 chars and explicit `CORS_ORIGINS`; add both to `.env.example` (Thai). `api_host` still defaults to `0.0.0.0` |
+| 12 smaller leaks | mostly done | `fcd46dfa`, `9736dff3`, `00bcfa0a`, `eda376e6`. Open: sandbox launcher's second hop (`cmd.exe /c set`), `rag_agent.get_status` `str(e)`, the demo token in the URL/localStorage, the remaining sidecar routes with dot-segment path params (`common.proxy_server_request`) |
+| 13 SpecialistFactory leak | open | needs its own plan |
+| 14 close singletons on shutdown | done | `fcd46dfa`. Gap: a checkpoint pool built lazily by `ConversationService` with checkpoints disabled |
+| 15 RAG tool scope | done | `eda376e6` |
+| 16 deferred state empty key | done | `eda376e6` |
+| 17, 18 | open | |
+| 19 small correctness | partly done | `00bcfa0a`: task-status 404, conversation delete off the loop. Open: other sync-in-async routes, widget WATCH, dead resume chain, event listeners, planning call budget, document upload size limit (needs a new client setting), key_preview, MCP URL masking |
+| 20, 21, 23 migrations | open | |
+| 22 project memories | done | `cab22e26`, decided: soft-deleted with the project |
+| 24–28 debloat | open | 24 needs Thai to run the `git rm` |
+| Phase 5 | open | |
+
 ## Global Constraints
 
 - Python: run everything with `./.venv/Scripts/python.exe` (3.13). The conda `agents` env is 3.11 and cannot run the suite.
