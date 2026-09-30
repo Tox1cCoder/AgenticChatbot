@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, DateTime, String, Text, func
+from sqlalchemy import Column, DateTime, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -21,6 +21,9 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(Text, nullable=False)
     avatar_url = Column(String(2048), nullable=True)
+    # Issued access and refresh tokens carry this as ``ver``; bumping it
+    # revokes every token issued before the bump (see app.core.auth).
+    token_version = Column(Integer, nullable=False, default=0, server_default=text("0"))
 
     # Relationships
     conversations = relationship("Conversation", back_populates="user")

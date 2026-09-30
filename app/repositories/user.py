@@ -1,8 +1,10 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from app.core.security import token_version
+from app.core.security.token_version import TokenState
 from app.models.user import User
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
@@ -107,9 +109,25 @@ class UserRepository:
             return self._crud_strategy.update(session, db_obj, input_schema)
 
     def delete(self, id: UUID) -> bool:
-        """Delete user by ID"""
+        """Soft-delete the user and revoke every token issued to them."""
         with self.session_factory() as session:
-            return self._crud_strategy.delete(session, id)
+            result = session.execute(
+                update(User)
+                .where(User.id == id, User.deleted_at.is_(None))
+                .values(deleted_at=func.now(), token_version=User.token_version + 1)
+            )
+            session.commit()
+        token_version.token_state_cache.invalidate(id)
+        return result.rowcount > 0
+
+    def get_token_state(self, id: UUID) -> TokenState | None:
+        """The user's token version and soft-delete state, None if no such user."""
+        statement = select(User.token_version, User.deleted_at).where(User.id == id)
+        with self.session_factory() as session:
+            row = session.execute(statement).one_or_none()
+        if row is None:
+            return None
+        return TokenState(version=row.token_version, deleted=row.deleted_at is not None)
 
     def exists(self, id: UUID) -> bool:
         """Check if user exists"""

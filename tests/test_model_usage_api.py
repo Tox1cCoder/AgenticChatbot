@@ -28,6 +28,7 @@ from app.schemas.model_usage import (
     UsageTotals,
 )
 from app.services.model_usage_service import ModelUsageService
+from tests.token_state_stub import stub_token_states
 
 # Importing app.main builds the global application and temporarily points the
 # injector maps at the container instance. API routes have already captured
@@ -49,6 +50,12 @@ def _isolate_injector_wiring() -> Iterator[None]:
         yield
     finally:
         setup_auto_injection(Container)
+
+
+@pytest.fixture(autouse=True)
+def _live_token_users(monkeypatch) -> None:
+    """_USER_A and _USER_B are live at token version 0; no users table."""
+    stub_token_states(monkeypatch)
 
 
 def _usage_range() -> UsageRange:

@@ -26,9 +26,12 @@ class _Users:
         return self.user
 
 
-def _user(deleted_at=None):
+def _user(deleted_at=None, token_version=0):
     return SimpleNamespace(
-        id=uuid4(), password_hash=hash_password(PASSWORD), deleted_at=deleted_at
+        id=uuid4(),
+        password_hash=hash_password(PASSWORD),
+        deleted_at=deleted_at,
+        token_version=token_version,
     )
 
 
@@ -43,6 +46,16 @@ def test_a_live_user_with_the_right_password_logs_in():
     tokens = _login(user)
 
     assert tokens["user_id"] == str(user.id)
+
+
+def test_login_stamps_both_tokens_with_the_users_token_version():
+    user = _user(token_version=3)
+
+    tokens = _login(user)
+
+    jwt_service = JwtService()
+    assert jwt_service.decode_token(tokens["access_token"])["ver"] == 3
+    assert jwt_service.verify_refresh_token(tokens["refresh_token"])["ver"] == 3
 
 
 def test_an_unknown_email_still_runs_a_password_check(monkeypatch):

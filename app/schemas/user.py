@@ -58,3 +58,4 @@ class UserInDB(BaseModel):
     email: EmailStr = Field(..., description="User email address")
     avatar_url: str | None = None
     password_hash: str
+    token_version: int = 0

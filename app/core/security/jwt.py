@@ -14,8 +14,8 @@ def create_access_token(
     return jwt_service.create_access_token(data, expires_delta)
 
 
-def get_user_id_from_token(token: str, jwt_service: JwtService) -> str:
-    """Return the ``sub`` of an access token, refusing every other token kind.
+def decode_access_token(token: str, jwt_service: JwtService) -> dict:
+    """Return the claims of an access token, refusing every other token kind.
 
     Refresh tokens and widget WebSocket tokens are signed with the same key and
     carry the same ``sub``. Without the ``type`` check a refresh token (valid
@@ -28,13 +28,12 @@ def get_user_id_from_token(token: str, jwt_service: JwtService) -> str:
         raise AuthenticationException(
             detail="Invalid token type", error_code="INVALID_TOKEN_TYPE"
         )
-    user_id = payload.get("sub")
-    if user_id is None:
+    if payload.get("sub") is None:
         raise AuthenticationException(
             detail="Invalid authentication credentials",
             error_code="INVALID_CREDENTIALS",
         )
-    return user_id
+    return payload
 
 
 def create_refresh_token(data: dict, jwt_service: JwtService) -> str:

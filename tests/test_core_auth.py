@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.core import auth
 from app.services.jwt_service import JwtService
+from tests.token_state_stub import stub_token_states
 
 
 def test_current_user_lookup_does_not_block_the_event_loop(monkeypatch):
@@ -33,6 +34,7 @@ def test_current_user_lookup_does_not_block_the_event_loop(monkeypatch):
             avatar_url=None,
         )
 
+    stub_token_states(monkeypatch)
     monkeypatch.setattr(auth, "get_user_service", lambda: SimpleNamespace(get_by_id=get_by_id))
     app = FastAPI()
 
