@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import sys
 from contextlib import asynccontextmanager, suppress
@@ -53,6 +54,37 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 _client_runtime_cleanup_task: asyncio.Task | None = None
 
+# Process-wide clients startup resolved from the container, closed at shutdown
+# in this order. Recorded as startup resolves them because the container cannot
+# say whether a Singleton was built without building it, and building one at
+# exit (a Qdrant client checks the server version on construction) is worse
+# than leaving it alone.
+_SHUTDOWN_CLOSE_METHODS = (
+    ("generation_control_bus", "close"),
+    ("checkpoint_manager", "cleanup"),
+    ("qdrant_client", "close"),
+)
+_startup_clients: dict[str, Any] = {}
+
+
+def _remember_for_shutdown(name: str, client: Any) -> Any:
+    _startup_clients[name] = client
+    return client
+
+
+async def _close_startup_clients() -> None:
+    """Close each remembered client; one failure never skips the rest."""
+    for name, method in _SHUTDOWN_CLOSE_METHODS:
+        client = _startup_clients.pop(name, None)
+        if client is None:
+            continue
+        try:
+            result = getattr(client, method)()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # noqa: BLE001 - shutdown proceeds regardless
+            logger.warning("%s did not close cleanly at shutdown: %s", name, type(exc).__name__)
+
 
 async def init_database_migrations():
     """Apply pending Alembic migrations before serving requests."""
@@ -67,7 +99,9 @@ async def init_checkpoint_tables():
 
     try:
         container = get_container()
-        checkpoint_manager = container.checkpoint_manager()
+        checkpoint_manager = _remember_for_shutdown(
+            "checkpoint_manager", container.checkpoint_manager()
+        )
         await checkpoint_manager.setup()
     except Exception as e:
         logger.warning(f"Checkpoint table setup failed (non-fatal): {e}")
@@ -112,7 +146,10 @@ def _ensure_qdrant_collection():
     deployment surfaces immediately at startup.
     """
     try:
-        index_service = get_container().document_index_service()
+        container = get_container()
+        # The same Singleton the index service below is built with.
+        _remember_for_shutdown("qdrant_client", container.qdrant_client())
+        index_service = container.document_index_service()
         index_service.ensure_collection()
         logger.info(
             "Qdrant collection ready: %s (dim=%d)",
@@ -221,7 +258,8 @@ async def _subscribe_generation_stop_signals() -> None:
 
     try:
         container = get_container()
-        await install_generation_stop_subscriber(container.generation_control_bus())
+        bus = _remember_for_shutdown("generation_control_bus", container.generation_control_bus())
+        await install_generation_stop_subscriber(bus)
     except Exception as exc:  # noqa: BLE001 - degrades to the durable path
         logger.warning(
             "Generation stop signals are not subscribed on this worker: %s",
@@ -319,6 +357,7 @@ async def lifespan(app: FastAPI):
         await close_client_runtime_store()
     except Exception as e:
         logger.debug(f"Client runtime store cleanup during shutdown (non-fatal): {e}")
+    await _close_startup_clients()
     try:
         from app.database.async_session import dispose_async_engine
 
@@ -364,28 +403,22 @@ def create_app() -> FastAPI:
     # Attach container to app for dependency injection
     app.container = container
 
-    # Add CORS middleware
-    _cors_origins = settings.cors_origins
-    if "*" in _cors_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_origin_regex=".*",
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-            allow_private_network=True,
-            expose_headers=["x-vercel-ai-ui-message-stream"],
-        )
-    else:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-            allow_private_network=True,
-            expose_headers=["x-vercel-ai-ui-message-stream"],
-        )
+    # Bearer tokens travel in a header, so "*" never needs credentials; only an
+    # explicit origin list is trusted with them. An empty list is the local-dev
+    # default and keeps any-origin without credentials (production is refused
+    # an empty or wildcard list by the settings validator).
+    configured = [origin for origin in settings.cors_origins if origin]
+    explicit = [origin for origin in configured if origin != "*"]
+    use_explicit = bool(explicit) and "*" not in configured
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=explicit if use_explicit else ["*"],
+        allow_credentials=use_explicit,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_private_network=True,
+        expose_headers=["x-vercel-ai-ui-message-stream"],
+    )
 
     # Register centralized exception handlers
     register_exception_handlers(app)
@@ -462,7 +495,9 @@ async def health_check():
 
 # The three dependency probes below are synchronous network clients. They run
 # in a worker thread: on the event loop, Celery's inspect broadcast alone
-# stalled every other request for its whole reply timeout.
+# stalled every other request for its whole reply timeout. The routes are
+# unauthenticated, so a failure reports the exception class only: connection
+# errors carry hosts, ports and sometimes credentialed URLs.
 
 
 def _probe_celery() -> dict[str, Any]:
@@ -471,7 +506,7 @@ def _probe_celery() -> dict[str, Any]:
     except Exception as e:
         return {
             "status": "unhealthy",
-            "error": str(e),
+            "error": type(e).__name__,
             "message": "Failed to connect to Celery",
         }
     if not active_workers:
@@ -500,7 +535,7 @@ def _probe_redis() -> dict[str, Any]:
     except Exception as e:
         return {
             "status": "unhealthy",
-            "error": str(e),
+            "error": type(e).__name__,
             "message": "Failed to connect to Redis",
         }
     finally:
@@ -536,7 +571,7 @@ def _probe_qdrant() -> dict[str, Any]:
     except Exception as e:
         return {
             "status": "unhealthy",
-            "error": str(e),
+            "error": type(e).__name__,
             "message": "Failed to connect to Qdrant",
         }
     finally:
@@ -594,4 +629,4 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app.main:app", host=settings.api_host, port=settings.api_port, reload=True)

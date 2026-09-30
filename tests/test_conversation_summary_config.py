@@ -151,6 +151,9 @@ def test_production_requires_explicit_stable_compaction_model(provider, model, m
     with pytest.raises(ValidationError, match=message):
         _settings(
             environment="production",
+            # Production refuses an any-origin CORS list; set explicitly so the
+            # developer's `.env` cannot decide which check fires first.
+            cors_origins=["https://chat.example.com"],
             conversation_summary_provider=provider,
             conversation_summary_model=model,
         )

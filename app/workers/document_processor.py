@@ -496,37 +496,6 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Backward compatibility shim
-# ---------------------------------------------------------------------------
-
-
-@celery_app.task(
-    bind=True,
-    base=CallbackTask,
-    max_retries=3,
-    default_retry_delay=60,
-    name="app.workers.document_processor.process_document_task",
-)
-def process_document_task(self, document_id: str, temp_file_path: str, filename: str) -> str:
-    """Compatibility shim: enqueues the parse→index chain.
-
-    Handles any tasks already in the queue at deploy time that reference
-    the old monolithic task name.
-    """
-    from celery import chain as celery_chain
-
-    parse_sig = celery_app.signature(
-        "app.workers.document_processor.parse_document_task",
-        args=[document_id, temp_file_path, filename],
-    )
-    index_sig = celery_app.signature(
-        "app.workers.document_processor.index_document_task",
-    )
-    chain_result = celery_chain(parse_sig, index_sig).apply_async()
-    return chain_result.id
-
-
-# ---------------------------------------------------------------------------
 # Periodic cleanup task
 # ---------------------------------------------------------------------------
 

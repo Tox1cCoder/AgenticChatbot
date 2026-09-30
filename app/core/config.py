@@ -2369,6 +2369,8 @@ class Settings(BaseSettings):
                 raise ValueError("secret_key must be set to a strong value outside development")
         if self.environment != "development" and self.api_debug:
             raise ValueError("api_debug must be disabled outside development")
+        if self.environment != "development":
+            self._check_deployment_hardening()
         if (
             self.conversation_summary_enabled
             and self.conversation_summary_trigger_messages == 0
@@ -2415,6 +2417,22 @@ class Settings(BaseSettings):
                     "LangSmith tracing is enabled"
                 )
         return self
+
+    def _check_deployment_hardening(self) -> None:
+        """Refuse the permissive local-development defaults in a deployment.
+
+        HS256 tokens signed with a short key are brute-forceable offline. An
+        empty or ``*`` CORS list makes the API answer any origin (see the CORS
+        block in ``app.main``), which is the development default only.
+        """
+        if len(self.secret_key) < 32:
+            raise ValueError("secret_key must be at least 32 characters outside development")
+        configured = [origin for origin in self.cors_origins if origin]
+        if not configured or "*" in configured:
+            raise ValueError(
+                "cors_origins must list the allowed origins explicitly outside development; "
+                "an empty or '*' list allows any origin"
+            )
 
 
 def _log_startup_warnings(s: "Settings") -> None:

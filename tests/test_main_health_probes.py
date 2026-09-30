@@ -85,3 +85,64 @@ def test_the_redis_probe_closes_its_client_when_ping_raises(monkeypatch):
 
     assert result["status"] == "unhealthy"
     assert clients and clients[0].closed is True
+
+
+# The probes are unauthenticated, so a failure names the exception class and
+# nothing else: connection errors carry hosts, ports and credentialed URLs.
+_SECRET_DETAIL = "redis://:hunter2@10.0.0.5:6379 refused"
+
+
+def test_the_redis_probe_reports_only_the_error_class(monkeypatch):
+    class _FailingRedis:
+        def ping(self):
+            raise ConnectionError(_SECRET_DETAIL)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(main.Redis, "from_url", staticmethod(lambda *_a, **_k: _FailingRedis()))
+
+    result = main._probe_redis()
+
+    assert result == {
+        "status": "unhealthy",
+        "error": "ConnectionError",
+        "message": "Failed to connect to Redis",
+    }
+
+
+def test_the_qdrant_probe_reports_only_the_error_class(monkeypatch):
+    class _FailingQdrant:
+        def __init__(self, url: str) -> None:
+            return None
+
+        def get_collections(self):
+            raise RuntimeError(_SECRET_DETAIL)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(qdrant_client, "QdrantClient", _FailingQdrant)
+
+    result = main._probe_qdrant()
+
+    assert result == {
+        "status": "unhealthy",
+        "error": "RuntimeError",
+        "message": "Failed to connect to Qdrant",
+    }
+
+
+def test_the_celery_probe_reports_only_the_error_class(monkeypatch):
+    def _inspect():
+        raise OSError(_SECRET_DETAIL)
+
+    monkeypatch.setattr(main.celery_app.control, "inspect", _inspect)
+
+    result = main._probe_celery()
+
+    assert result == {
+        "status": "unhealthy",
+        "error": "OSError",
+        "message": "Failed to connect to Celery",
+    }
