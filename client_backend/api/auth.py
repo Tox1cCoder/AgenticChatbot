@@ -8,14 +8,16 @@ also maintaining the local runtime bridge and local-session support.
 import secrets
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict
 
 from client_backend.api.common import raise_server_error
+from client_backend.core.auth import require_local_session
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.security import (
     LocalSessionError,
+    LocalSessionPayload,
     create_local_session_token,
     verify_local_session_token,
 )
@@ -232,9 +234,14 @@ async def refresh(authorization: str | None = Header(default=None)) -> dict[str,
 
 
 @router.post("/logout")
-async def logout() -> dict[str, Any]:
+async def logout(
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> dict[str, Any]:
     """
     Logout from the upstream server and stop the local runtime bridge.
+
+    Requires the session it ends: logging out deletes the stored credentials,
+    and any local process can reach this port.
     """
     auth_service = get_upstream_auth_service()
 

@@ -406,3 +406,107 @@ def test_augment_auth_response_restores_user_context_for_refresh(monkeypatch):
     assert result["data"]["deviceId"] == "device-id-123"
     assert result["data"]["deviceIdentifier"] == "device-identifier-123"
     assert result["data"]["localSessionToken"]
+
+
+# ── Logout needs the session it ends ────────────────────────────────────────
+
+
+class _StoppableBridge:
+    def __init__(self) -> None:
+        self.stop_calls = 0
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+
+    def get_registered_device_id(self) -> None:
+        return None
+
+    def get_device_identifier(self) -> str:
+        return "device-identifier-123"
+
+
+@pytest.fixture
+def signed_in_sidecar(tmp_path, monkeypatch):
+    """The real auth service, signed in with credentials stored on disk."""
+    from datetime import datetime, timezone
+
+    import httpx
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from client_backend.core.config import client_settings
+    from client_backend.services.server_api import ServerAPIClient
+    from client_backend.services.upstream_auth import StoredCredentials, UpstreamAuthService
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "profile"))
+    upstream_calls: list[str] = []
+
+    def _upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(request.url.path)
+        return httpx.Response(200, json={"success": True, "message": "Logged out"})
+
+    server_client = ServerAPIClient(base_url="http://server.test")
+    server_client._client = httpx.AsyncClient(  # noqa: SLF001 - exercises the HTTP boundary
+        base_url=server_client.base_url,
+        transport=httpx.MockTransport(_upstream),
+    )
+    tokens = TokenPair(access_token="upstream-access", refresh_token="upstream-refresh")
+    server_client.set_tokens(tokens)
+    service = UpstreamAuthService(server_client=server_client)
+    service._credentials = StoredCredentials(
+        user_id="user-123",
+        username="user@example.com",
+        tokens=tokens,
+        stored_at=datetime.now(timezone.utc),
+        server_url=server_client.base_url,
+    )
+    service._current_user_id = "user-123"
+    service._save_credentials(service._credentials)
+    credentials_path = service._get_credentials_path("user-123")
+
+    bridge = _StoppableBridge()
+    monkeypatch.setattr(auth_api, "get_upstream_auth_service", lambda: service)
+    monkeypatch.setattr(auth_module, "get_upstream_auth_service", lambda: service)
+    monkeypatch.setattr(auth_api, "get_runtime_bridge", lambda: bridge)
+    monkeypatch.setattr(auth_module, "get_runtime_bridge", lambda: bridge)
+
+    app = FastAPI()
+    app.include_router(auth_api.router)
+    return TestClient(app), service, bridge, credentials_path, upstream_calls
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"Authorization": "Bearer not-the-session"}, {"Authorization": "Basic dXNlcg=="}],
+)
+def test_logout_without_the_session_is_refused_and_the_session_survives(
+    signed_in_sidecar, headers
+):
+    """Any local process can reach the port; only the session holder may end it."""
+    client, service, bridge, credentials_path, upstream_calls = signed_in_sidecar
+
+    response = client.post("/auth/logout", headers=headers)
+
+    assert response.status_code == 401
+    assert credentials_path.exists()
+    assert service.is_authenticated()
+    assert bridge.stop_calls == 0
+    assert upstream_calls == []
+
+
+def test_logout_with_the_local_session_ends_it(signed_in_sidecar):
+    client, service, bridge, credentials_path, upstream_calls = signed_in_sidecar
+    token = create_local_session_token(
+        user_id="user-123",
+        server_user_id="user-123",
+        device_identifier="device-identifier-123",
+    )
+
+    response = client.post("/auth/logout", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert not credentials_path.exists()
+    assert not service.is_authenticated()
+    assert bridge.stop_calls == 1
+    assert upstream_calls == ["/auth/logout"]

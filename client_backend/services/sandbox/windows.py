@@ -86,6 +86,7 @@ def run_elevated(arguments: list[str]) -> int:
 
 _LOGON_WITH_PROFILE = 0x00000001
 _CREATE_SUSPENDED = 0x00000004
+_CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _STARTF_USESHOWWINDOW = 0x00000001
 _STARTF_USESTDHANDLES = 0x00000100
 _STD_HANDLES = (-10, -11, -12)  # input, output, error
@@ -123,13 +124,89 @@ class _ProcessInformation(ctypes.Structure):
     ]
 
 
-def run_as_user(username: str, password: str, command_line: str, cwd: str) -> int:
+def account_environment(username: str, password: str) -> tuple[dict[str, str], str]:
+    """The environment Windows builds for the account's token, and its profile folder.
+
+    The account's registry hive is not loaded here, so the profile-derived
+    variables in it are the Default user's; the caller corrects them from the
+    folder (see ``launcher.profile_variables``).
+    """
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    userenv = _userenv()
+    token = wintypes.HANDLE()
+    if not advapi32.LogonUserW(
+        username,
+        ".",
+        password,
+        _LOGON32_LOGON_INTERACTIVE,
+        _LOGON32_PROVIDER_DEFAULT,
+        ctypes.byref(token),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return _token_environment(userenv, token), _profile_directory(userenv, token)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(token)
+
+
+def _userenv():
+    userenv = ctypes.WinDLL("userenv", use_last_error=True)
+    userenv.CreateEnvironmentBlock.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        wintypes.HANDLE,
+        wintypes.BOOL,
+    ]
+    userenv.DestroyEnvironmentBlock.argtypes = [ctypes.c_void_p]
+    userenv.GetUserProfileDirectoryW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    return userenv
+
+
+def _token_environment(userenv, token) -> dict[str, str]:
+    """``CreateEnvironmentBlock`` for ``token``, without this process's variables."""
+
+    block = ctypes.c_void_p()
+    if not userenv.CreateEnvironmentBlock(ctypes.byref(block), token, False):
+        raise ctypes.WinError(ctypes.get_last_error())
+    env: dict[str, str] = {}
+    try:
+        address = block.value
+        while entry := ctypes.wstring_at(address):
+            address += (len(entry) + 1) * ctypes.sizeof(ctypes.c_wchar)
+            # "=C:=C:\\..." entries are per-drive working directories, not variables.
+            if entry.startswith("="):
+                continue
+            name, separator, value = entry.partition("=")
+            if separator:
+                env[name] = value
+    finally:
+        userenv.DestroyEnvironmentBlock(block)
+    return env
+
+
+def _profile_directory(userenv, token) -> str:
+    size = wintypes.DWORD(0)
+    userenv.GetUserProfileDirectoryW(token, None, ctypes.byref(size))
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if not userenv.GetUserProfileDirectoryW(token, buffer, ctypes.byref(size)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return buffer.value
+
+
+def run_as_user(
+    username: str, password: str, command_line: str, cwd: str, environment: str
+) -> int:
     """Run a command line as another local account, on this process's stdio, and wait.
 
-    The child gets the account's own profile environment and this process's
-    standard handles, so whoever holds our pipes talks to it directly. It
-    starts suspended inside a kill-on-close job and only then runs: when this
-    process exits, for any reason, the child and everything it started go too.
+    The child gets exactly ``environment`` (a Unicode environment block) and
+    this process's standard handles, so whoever holds our pipes talks to it
+    directly. It starts suspended inside a kill-on-close job and only then
+    runs: when this process exits, for any reason, the child and everything it
+    started go too.
     """
 
     kernel32 = _kernel32()
@@ -145,6 +222,9 @@ def run_as_user(username: str, password: str, command_line: str, cwd: str) -> in
     )
     process = _ProcessInformation()
     command_buffer = ctypes.create_unicode_buffer(command_line)
+    # Raw UTF-16 bytes: a str buffer would stop at the first of the block's NULs.
+    block = environment.encode("utf-16-le")
+    environment_buffer = ctypes.create_string_buffer(block, len(block))
     if not advapi32.CreateProcessWithLogonW(
         username,
         ".",
@@ -152,13 +232,15 @@ def run_as_user(username: str, password: str, command_line: str, cwd: str) -> in
         _LOGON_WITH_PROFILE,
         None,
         command_buffer,
-        _CREATE_SUSPENDED,
-        None,
+        _CREATE_SUSPENDED | _CREATE_UNICODE_ENVIRONMENT,
+        environment_buffer,
         cwd,
         ctypes.byref(startup),
         ctypes.byref(process),
     ):
-        raise ctypes.WinError(ctypes.get_last_error())
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise ctypes.WinError(error)
     try:
         if not kernel32.AssignProcessToJobObject(job, process.hProcess):
             error = ctypes.get_last_error()

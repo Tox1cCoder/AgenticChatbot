@@ -247,7 +247,12 @@ def test_live_auth_refresh_restore_and_logout_flow(live_client_backend):
         )
         assert "skills" in local_skills_payload["data"]
 
-        logout_payload = _assert_api_success(restored_client.post("/auth/logout"))
+        logout_payload = _assert_api_success(
+            restored_client.post(
+                "/auth/logout",
+                headers=_auth_headers(restored_payload["data"]["localSessionToken"]),
+            )
+        )
         assert "logged out" in logout_payload["message"].lower()
 
         unauthorized_response = restored_client.get(

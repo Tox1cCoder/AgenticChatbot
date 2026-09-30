@@ -166,7 +166,9 @@ def test_an_opaque_origin_mutation_is_refused(trusted, client):
 def test_a_request_without_origin_passes_the_origin_check(trusted, client):
     response = client.post("/auth/logout", headers={"X-Kani-Client": trusted})
 
-    assert response.status_code == 200
+    # The route itself answered: logout needs the bearer session it ends.
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Missing local session bearer token"}
 
 
 def test_health_stays_open(trusted, client):

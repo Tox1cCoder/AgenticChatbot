@@ -276,6 +276,20 @@ def test_demo_session_never_sends_the_token_to_another_host(monkeypatch, token_f
     assert "X-Kani-Client" not in adapter.sent[0]
 
 
+def test_the_logout_request_carries_the_bearer_session(monkeypatch, token_file):
+    """The sidecar refuses a logout without the session it ends."""
+
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    streamlit_stub.session_state.auth_token = "local-session-token"
+    adapter = _RecordingAdapter([200])
+    session = _session_with(demo, adapter)
+    monkeypatch.setattr(demo, "get_http_session", lambda: session)
+
+    demo.make_api_request("POST", "/auth/logout")
+
+    assert adapter.sent[0]["Authorization"] == "Bearer local-session-token"
+
+
 def test_upload_support_uses_the_sidecar_session(monkeypatch):
     _import_demo_with_ui_stubs(monkeypatch)
     import upload_support

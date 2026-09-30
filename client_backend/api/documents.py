@@ -6,16 +6,43 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile, status
 
-from client_backend.api.common import proxy_server_request, raise_server_error
-from client_backend.api.proxy import refuse_dot_segment_path_params
+from client_backend.api.common import make_api_response, proxy_server_request, raise_server_error
+from client_backend.api.upload_limits import declared_size_route
 from client_backend.core.auth import require_local_session
+from client_backend.core.config import client_settings
 from client_backend.core.security import LocalSessionPayload
 from client_backend.services.server_api import get_server_client
 
-router = APIRouter(
-    prefix="/documents",
-    tags=["documents"],
-    dependencies=[Depends(refuse_dot_segment_path_params)],
+router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+def _refuse_document_upload(status_code: int) -> Response:
+    if status_code == 411:
+        return make_api_response(
+            success=False,
+            message="The upload must declare its Content-Length.",
+            code="DOCUMENT_UPLOAD_LENGTH_REQUIRED",
+            status_code=411,
+        )
+    return make_api_response(
+        success=False,
+        message=(
+            "The upload is larger than the allowed "
+            f"{client_settings.document_upload_max_bytes} bytes."
+        ),
+        code="DOCUMENT_UPLOAD_TOO_LARGE",
+        status_code=413,
+    )
+
+
+# Both upload routes read every file into memory to relay it, so they are
+# bounded by the declared length before the form is parsed. Their own router
+# only to give them the size-checking route class.
+_upload_router = APIRouter(
+    route_class=declared_size_route(
+        max_bytes=lambda: client_settings.document_upload_max_bytes,
+        refuse=_refuse_document_upload,
+    )
 )
 
 
@@ -32,7 +59,7 @@ async def _read_upload_items(files: list[UploadFile]) -> list[dict[str, Any]]:
     return items
 
 
-@router.post("/uploads")
+@_upload_router.post("/uploads")
 async def upload_documents(
     response: Response,
     files: list[UploadFile] = File(...),  # noqa: B008
@@ -57,7 +84,7 @@ async def upload_documents(
         raise_server_error(exc)
 
 
-@router.post("/upload", status_code=status.HTTP_201_CREATED)
+@_upload_router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload_document(
     response: Response,
     file: UploadFile = File(...),  # noqa: B008
@@ -76,6 +103,9 @@ async def upload_document(
         )
     except Exception as exc:
         raise_server_error(exc)
+
+
+router.include_router(_upload_router)
 
 
 @router.get("/task/{task_id}")

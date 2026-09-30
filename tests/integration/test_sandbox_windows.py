@@ -106,6 +106,61 @@ def test_variables_from_the_environment_reach_the_sandboxed_program(scratch):
     assert "KANI_SANDBOX_ENV" not in _as_sandbox("cmd", "/c", "set", cwd=scratch).stdout
 
 
+# Reports the probe variable, then the command lines of the sandboxed program
+# and of the process that started it as the account.
+_COMMAND_LINE_PROBE = """
+$self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
+$parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($self.ParentProcessId)"
+"ENV=$env:KANI_PROBE"
+"SELF=$($self.CommandLine)"
+"PARENT=$($parent.CommandLine)"
+"""
+
+
+@needs_account
+def test_no_variable_value_is_on_a_command_line_as_the_account(scratch):
+    """A command line is readable by administrators and recorded by process audit;
+    the values reach the program through its environment block instead."""
+    import base64
+
+    value = f"probe-{secrets.token_hex(8)}"
+    encoded = base64.b64encode(_COMMAND_LINE_PROBE.encode("utf-16-le")).decode("ascii")
+
+    shown = _as_sandbox(
+        "powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded,
+        cwd=scratch, variables={"KANI_PROBE": value},
+    )
+
+    assert shown.returncode == 0, shown.stderr
+    lines = shown.stdout.splitlines()
+    assert f"ENV={value}" in lines
+    command_lines = [line for line in lines if line.startswith(("SELF=", "PARENT="))]
+    assert len(command_lines) == 2
+    assert all(value not in line for line in command_lines), command_lines
+
+
+@needs_account
+def test_the_program_gets_the_accounts_own_profile_folders(scratch):
+    """The environment is built from the account's profile, not the Default user's."""
+    shown = _as_sandbox("cmd", "/c", "set", cwd=scratch, variables={})
+
+    assert shown.returncode == 0, shown.stderr
+    env = {
+        name.upper(): value
+        for name, _, value in (line.partition("=") for line in shown.stdout.splitlines())
+    }
+    profile = Path(env["USERPROFILE"])
+    assert profile.name.lower().startswith(_real_account_name().lower())
+    for name in ("APPDATA", "LOCALAPPDATA"):
+        assert Path(env[name]).is_relative_to(profile), (name, env[name])
+    # Windows may spell TEMP with the profile folder's 8.3 short name, which this
+    # user cannot resolve inside the account's profile; compare the shape instead.
+    for name in ("TEMP", "TMP"):
+        temp = Path(env[name])
+        assert [part.lower() for part in temp.parts[-3:]] == ["appdata", "local", "temp"], env[name]
+        assert temp.parents[3] == profile.parent, (name, env[name])
+
+
 @needs_account
 def test_a_clean_workspace_is_granted_and_usable(scratch):
     from client_backend.services.sandbox.runtime import ensure_workspace_access

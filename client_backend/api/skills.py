@@ -3,15 +3,13 @@ Local skills management endpoints with server-compatible response envelopes.
 """
 
 import asyncio
-from collections.abc import Callable, Coroutine
-from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from fastapi.routing import APIRoute
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 
 from client_backend.api.common import make_api_response
 from client_backend.api.skill_errors import response_for_exception, skill_error_response
+from client_backend.api.upload_limits import declared_size_route
 from client_backend.core.auth import require_local_session
 from client_backend.core.config import client_settings
 from client_backend.core.security import LocalSessionPayload
@@ -143,45 +141,28 @@ async def _session_user(session: LocalSessionPayload) -> str:
     return user_id
 
 
-# Room for the multipart boundary and part headers around the archive itself;
-# the staging service still enforces the exact archive size as it writes.
-_MULTIPART_ENVELOPE_BYTES = 64 * 1024
+def _refuse_archive_upload(status_code: int) -> Response:
+    if status_code == 411:
+        return skill_error_response(
+            "SKILL_ARCHIVE_INVALID",
+            "The upload must declare its Content-Length.",
+            status_code=411,
+        )
+    return skill_error_response(
+        "SKILL_ARCHIVE_TOO_LARGE",
+        "The archive is larger than the allowed upload size.",
+        status_code=413,
+    )
 
 
-class _DeclaredSizeRoute(APIRoute):
-    """Refuse an archive upload by its declared length, before the body is read.
-
-    FastAPI parses the multipart form -- Starlette spooling every byte to disk --
-    before any dependency or the endpoint runs, so a limit checked there comes too
-    late. A body with no declared length (chunked) could not be bounded here at
-    all, so it is refused; browsers and HTTP clients declare one for a file form.
-    """
-
-    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
-        handler = super().get_route_handler()
-
-        async def bounded_handler(request: Request) -> Response:
-            declared = request.headers.get("content-length", "")
-            if not declared.isdigit():
-                return skill_error_response(
-                    "SKILL_ARCHIVE_INVALID",
-                    "The upload must declare its Content-Length.",
-                    status_code=411,
-                )
-            limit = int(client_settings.skill_upload_max_bytes) + _MULTIPART_ENVELOPE_BYTES
-            if int(declared) > limit:
-                return skill_error_response(
-                    "SKILL_ARCHIVE_TOO_LARGE",
-                    "The archive is larger than the allowed upload size.",
-                    status_code=413,
-                )
-            return await handler(request)
-
-        return bounded_handler
-
-
-# Its own router only to give this one route the size-checking route class.
-_archive_upload_router = APIRouter(route_class=_DeclaredSizeRoute)
+# Its own router only to give this one route the size-checking route class. The
+# staging service still enforces the exact archive size as it writes.
+_archive_upload_router = APIRouter(
+    route_class=declared_size_route(
+        max_bytes=lambda: client_settings.skill_upload_max_bytes,
+        refuse=_refuse_archive_upload,
+    )
+)
 
 
 @_archive_upload_router.post("/uploads", status_code=201)

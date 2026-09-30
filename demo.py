@@ -10,14 +10,14 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
 from functools import lru_cache
 from html.parser import HTMLParser
 from math import isclose, isfinite
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import markdown as _markdown  # type: ignore
@@ -2441,8 +2441,9 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "usage_cache_version": lambda: 0,
     "usage_capability_enabled": lambda: False,
     "live_widget_mounts": dict,
-    # localStorage bridge
+    # Session cookie: a pending write/expiry, and whether this session read it
     "_ls_op": lambda: None,
+    "_session_cookie_checked": lambda: False,
 }
 
 
@@ -2655,7 +2656,7 @@ def sanitize_message_content(content: str) -> str:
         # Math is lifted out before sanitization, so it must be escaped on the
         # way back in: "$<img src=x onerror=...>$" would otherwise reach
         # st.markdown(unsafe_allow_html=True) as live markup and read the auth
-        # token from localStorage. Escaped text still reads the same to KaTeX.
+        # token from the session cookie. Escaped text still reads the same to KaTeX.
         latex_content = html.escape(math_info["content"])
         if math_info["type"] == "display":
             # Display math: use \[ \] delimiters
@@ -2705,62 +2706,89 @@ st.markdown(APP_STYLE, unsafe_allow_html=True)
 render_image_lightbox()
 initialize_session_state()
 
-# ── localStorage session-persistence bridge ──────────────────────────────────
-# Allows the auth token to survive F5 / browser refresh.
+# ── Session cookie: the sign-in survives F5 / browser refresh ─────────────────
+# The browser keeps the session token in a SameSite=Strict cookie; a reload
+# opens a new Streamlit session, whose handshake carries it to
+# ``st.context.cookies``. The token never travels in the URL, which would put
+# it in browser history and the server's request log.
 
-# Step 1: flush any pending localStorage write/clear from the previous run.
-_ls_op = st.session_state.get("_ls_op")
-if _ls_op is not None:
+_SESSION_COOKIE_TOKEN = "cbtoken"
+_SESSION_COOKIE_USER = "cbuid"
+# The sidecar's default local-session lifetime (CLIENT_LOCAL_SESSION_EXPIRE_MINUTES);
+# a longer-lived cookie would only carry an expired token.
+_SESSION_COOKIE_MAX_AGE_SECONDS = 24 * 60 * 60
+# Query parameters earlier versions put the token in; scrubbed from old URLs.
+_LEGACY_SESSION_QUERY_PARAMS = ("__t", "__u", "__restore")
+
+
+def _session_cookie_script(values: dict[str, str] | None) -> str:
+    """JS that sets both session cookies to ``values``, or expires them for ``None``."""
+    assignments = []
+    for name in (_SESSION_COOKIE_TOKEN, _SESSION_COOKIE_USER):
+        if values is None:
+            assignments.append(f"d.cookie='{name}=; Path=/; SameSite=Strict; Max-Age=0'+s;")
+        else:
+            value = json.dumps(quote(values.get(name, ""), safe=""))
+            assignments.append(
+                f"d.cookie='{name}='+{value}+'; Path=/; SameSite=Strict; "
+                f"Max-Age={_SESSION_COOKIE_MAX_AGE_SECONDS}'+s;"
+            )
+    # Earlier versions kept the token in localStorage; it must not outlive this.
+    return (
+        "<script>try{var d=window.parent.document;"
+        "var s=window.parent.location.protocol==='https:'?'; Secure':'';"
+        + "".join(assignments)
+        + f"localStorage.removeItem('{_SESSION_COOKIE_TOKEN}');"
+        f"localStorage.removeItem('{_SESSION_COOKIE_USER}');"
+        "}catch(e){}</script>"
+    )
+
+
+def _flush_session_cookie_op() -> None:
+    """Write or expire the session cookie queued by the previous run's sign-in or sign-out."""
+    pending = st.session_state.get("_ls_op")
+    if pending is None:
+        return
     st.session_state._ls_op = None
-    if isinstance(_ls_op, dict):  # save
-        _tok = json.dumps(_ls_op.get("token", ""))
-        _uid = json.dumps(_ls_op.get("uid", ""))
-        _stc.html(
-            f"<script>try{{localStorage.setItem('cbtoken',{_tok});"
-            f"localStorage.setItem('cbuid',{_uid});}}catch(e){{}}</script>",
-            height=0,
-        )
-    elif _ls_op == "clear":  # logout
-        _stc.html(
-            "<script>try{localStorage.removeItem('cbtoken');"
-            "localStorage.removeItem('cbuid');}catch(e){}</script>",
-            height=0,
-        )
+    if isinstance(pending, dict):
+        values = {
+            _SESSION_COOKIE_TOKEN: str(pending.get("token", "")),
+            _SESSION_COOKIE_USER: str(pending.get("uid", "")),
+        }
+        _stc.html(_session_cookie_script(values), height=0)
+    elif pending == "clear":
+        _stc.html(_session_cookie_script(None), height=0)
 
-# Step 2: if not authenticated, try to restore from localStorage.
-if not st.session_state.get("auth_token"):
-    _qp = st.query_params
-    if "__t" in _qp and "__u" in _qp:
-        # Bridge already fired and injected params — restore session.
-        st.session_state.auth_token = _qp["__t"]
-        st.session_state.current_user_id = _qp["__u"]
+
+def _restore_session_from_cookie() -> None:
+    """Sign in from the reload's session cookie, once per Streamlit session.
+
+    ``st.context.cookies`` holds the cookies of the request that opened this
+    session and never changes during it, so a second read after signing out
+    would sign the user straight back in.
+    """
+    for name in _LEGACY_SESSION_QUERY_PARAMS:
+        if name in st.query_params:
+            del st.query_params[name]
+    if st.session_state.get("_session_cookie_checked"):
+        return
+    st.session_state._session_cookie_checked = True
+    if st.session_state.get("auth_token"):
+        return
+    cookies = getattr(getattr(st, "context", None), "cookies", None)
+    if not isinstance(cookies, Mapping):
+        return
+    token = unquote(str(cookies.get(_SESSION_COOKIE_TOKEN) or ""))
+    user_id = unquote(str(cookies.get(_SESSION_COOKIE_USER) or ""))
+    if token and user_id:
+        st.session_state.auth_token = token
+        st.session_state.current_user_id = user_id
         st.session_state.show_login = False
-        # Remove sensitive params from URL; keep __restore=1 to stop the
-        # bridge from firing again on the next rerun.
-        del st.query_params["__t"]
-        del st.query_params["__u"]
-    elif "__restore" not in _qp:
-        # Inject the bridge that reads localStorage and redirects once.
-        _stc.html(
-            """<script>
-(function(){
-  try{
-    var u=new URL(window.parent.location.href);
-    if(u.searchParams.has('__restore'))return;
-    var t=localStorage.getItem('cbtoken');
-    var i=localStorage.getItem('cbuid');
-    if(t&&i){
-      u.searchParams.set('__restore','1');
-      u.searchParams.set('__t',t);
-      u.searchParams.set('__u',i);
-      window.parent.location.replace(u.toString());
-    }
-  }catch(e){}
-})();
-</script>""",
-            height=0,
-        )
-# ── end localStorage bridge ──────────────────────────────────────────────────
+
+
+_flush_session_cookie_op()
+_restore_session_from_cookie()
+# ── end session cookie ────────────────────────────────────────────────────────
 
 # Clear any old cached functions on first run
 if "cache_cleared_v2" not in st.session_state:
@@ -5838,8 +5866,6 @@ def render_sidebar():
                     st.session_state.current_project_id = None
                     st.session_state.project_delete_pending_id = None
                     st.session_state._ls_op = "clear"
-                    if "__restore" in st.query_params:
-                        del st.query_params["__restore"]
                     st.session_state.auth_token = None
                     st.session_state.show_login = True
                     st.session_state.active_view = "chat"

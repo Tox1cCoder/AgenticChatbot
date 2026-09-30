@@ -1,9 +1,10 @@
-"""The command line the launcher hands to the sandbox account.
+"""How the launcher starts a program as the sandbox account.
 
-It runs through ``cmd.exe`` so a few variables can be added on top of the
-account's own profile environment. These tests run the line through the real
-``cmd.exe`` as the current user; starting it as the sandbox account is
-verified on a machine where the account exists.
+The program is started directly, with no shell in between, and its variables
+travel in the environment block handed to ``CreateProcessWithLogonW``, never on
+a command line. Command lines here run as the current user through the real
+``CreateProcess``; starting one as the sandbox account is verified by
+``tests/integration/test_sandbox_windows.py`` on a machine where it exists.
 """
 
 from __future__ import annotations
@@ -17,48 +18,89 @@ import pytest
 
 from client_backend.services.sandbox import launcher
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe is Windows-only")
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows sandbox only")
+
+PROFILE = r"C:\Users\KaniSbTest"
+# What CreateEnvironmentBlock returns while the account's hive is not loaded.
+WINDOWS_ENV = {
+    "Path": r"C:\WINDOWS\system32;C:\WINDOWS",
+    "SystemRoot": r"C:\WINDOWS",
+    "USERPROFILE": r"C:\Users\Default",
+    "TEMP": r"C:\WINDOWS\TEMP",
+    "TMP": r"C:\WINDOWS\TEMP",
+    "USERNAME": "KaniSbTest",
+}
 
 
-def _run(command_line: str) -> str:
-    completed = subprocess.run(command_line, capture_output=True, text=True, check=True)
-    return completed.stdout.strip()
-
-
-def test_program_runs_with_its_arguments_and_the_added_variables(tmp_path):
-    script = tmp_path / "show env.py"
-    script.write_text(
-        "import os, sys\nprint(os.environ['KANI_PROBE'], os.environ['KANI_OTHER'], sys.argv[1:])\n",
-        encoding="utf-8",
-    )
+def test_program_runs_with_its_arguments_unchanged(tmp_path):
+    script = tmp_path / "show args.py"
+    script.write_text("import sys\nprint(sys.argv[1:])\n", encoding="utf-8")
 
     line = launcher.build_command_line(
-        [sys.executable, str(script), "two words", "--flag"],
-        {"KANI_PROBE": "0", "KANI_OTHER": "safe.directory"},
+        [sys.executable, str(script), "two words", "a&b", "%PATH%", 'say "hi"']
     )
+    completed = subprocess.run(line, capture_output=True, text=True, check=True)
 
-    assert _run(line) == "0 safe.directory ['two words', '--flag']"
-
-
-def test_the_programs_exit_code_comes_back(tmp_path):
-    line = launcher.build_command_line([sys.executable, "-c", "raise SystemExit(7)"], {})
-
-    completed = subprocess.run(line, capture_output=True, text=True)
-
-    assert completed.returncode == 7
+    assert completed.stdout.strip() == "['two words', 'a&b', '%PATH%', 'say \"hi\"']"
 
 
-def _run_main(monkeypatch, encoded: str | None) -> tuple[int, list[str]]:
+def test_the_programs_exit_code_comes_back():
+    line = launcher.build_command_line([sys.executable, "-c", "raise SystemExit(7)"])
+
+    assert subprocess.run(line, capture_output=True, text=True).returncode == 7
+
+
+def test_an_argument_with_a_nul_is_refused():
+    with pytest.raises(ValueError):
+        launcher.build_command_line(["node", "a\0b"])
+
+
+def test_profile_variables_come_from_the_accounts_own_folder():
+    assert launcher.profile_variables(PROFILE) == {
+        "USERPROFILE": PROFILE,
+        "HOMEDRIVE": "C:",
+        "HOMEPATH": r"\Users\KaniSbTest",
+        "APPDATA": PROFILE + r"\AppData\Roaming",
+        "LOCALAPPDATA": PROFILE + r"\AppData\Local",
+        "TEMP": PROFILE + r"\AppData\Local\Temp",
+        "TMP": PROFILE + r"\AppData\Local\Temp",
+    }
+
+
+def test_added_variables_replace_existing_ones_whatever_their_case():
+    merged = launcher.overlay_environment({"Path": "old", "KEEP": "1"}, {"PATH": "new"})
+
+    assert merged == {"PATH": "new", "KEEP": "1"}
+
+
+@pytest.mark.parametrize(
+    "added",
+    [{"BAD NAME": "1"}, {"A=B": "1"}, {"": "1"}, {"TOKEN": "a\0b"}],
+    ids=["space", "equals", "empty", "nul-value"],
+)
+def test_a_variable_windows_could_not_carry_is_refused(added):
+    with pytest.raises(ValueError):
+        launcher.overlay_environment({}, added)
+
+
+def test_the_environment_block_is_sorted_and_double_nul_terminated():
+    block = launcher.environment_block({"b": "2", "A": "1", "C": "x=y"})
+
+    assert block == "A=1\0b=2\0C=x=y\0\0"
+
+
+def _run_main(monkeypatch, encoded: str | None) -> tuple[int, list[tuple[str, str]]]:
     from client_backend.services.sandbox import account, windows
 
-    started: list[str] = []
+    started: list[tuple[str, str]] = []
 
-    def run_as_user(username, password, command_line, cwd):
-        started.append(command_line)
+    def run_as_user(username, password, command_line, cwd, environment):
+        started.append((command_line, environment))
         return 0
 
-    credentials = type("Credentials", (), {"username": "kani-sandbox", "password": "pw"})()
+    credentials = type("Credentials", (), {"username": "KaniSbTest", "password": "pw"})()
     monkeypatch.setattr(account, "load_credentials", lambda: credentials)
+    monkeypatch.setattr(windows, "account_environment", lambda *_: (dict(WINDOWS_ENV), PROFILE))
     monkeypatch.setattr(windows, "run_as_user", run_as_user)
     if encoded is None:
         monkeypatch.delenv(launcher.ENV_VARIABLE, raising=False)
@@ -68,30 +110,44 @@ def _run_main(monkeypatch, encoded: str | None) -> tuple[int, list[str]]:
     return code, started
 
 
-def test_the_programs_variables_come_from_the_environment_not_arguments(monkeypatch):
-    encoded = launcher.encode_environment({"GIT_TERMINAL_PROMPT": "0", "TOKEN": "${NOT_EXPANDED}"})
+def _variables(block: str) -> dict[str, str]:
+    assert block.endswith("\0\0")
+    return dict(entry.split("=", 1) for entry in block[:-2].split("\0"))
 
-    code, started = _run_main(monkeypatch, encoded)
+
+def test_the_programs_variables_travel_in_its_environment_block(monkeypatch):
+    added = {"GIT_TERMINAL_PROMPT": "0", "TOKEN": "${NOT_EXPANDED}&%PATH%\"quoted\""}
+
+    code, started = _run_main(monkeypatch, launcher.encode_environment(added))
 
     assert code == 0
-    assert started == [
-        'cmd.exe /d /s /c "set "GIT_TERMINAL_PROMPT=0"&&set "TOKEN=${NOT_EXPANDED}"&&node index.js"'
-    ]
-    # Consumed: the sandboxed program gets its variables through cmd.exe only.
+    [(command_line, block)] = started
+    assert command_line == "node index.js"
+    variables = _variables(block)
+    assert variables["GIT_TERMINAL_PROMPT"] == "0"
+    assert variables["TOKEN"] == added["TOKEN"]
+    # The account's own environment is kept, with its real profile folders.
+    assert variables["SystemRoot"] == r"C:\WINDOWS"
+    assert variables["USERPROFILE"] == PROFILE
+    assert variables["TEMP"] == PROFILE + r"\AppData\Local\Temp"
+    # Consumed: the payload is not handed on, and never reaches the program.
     assert launcher.ENV_VARIABLE not in os.environ
+    assert launcher.ENV_VARIABLE not in variables
 
 
-def test_without_variables_the_program_runs_with_none_added(monkeypatch):
+def test_without_variables_the_program_gets_the_accounts_environment(monkeypatch):
     code, started = _run_main(monkeypatch, None)
 
     assert code == 0
-    assert started == ['cmd.exe /d /s /c "node index.js"']
+    [(command_line, block)] = started
+    assert command_line == "node index.js"
+    assert _variables(block)["USERNAME"] == "KaniSbTest"
 
 
 @pytest.mark.parametrize(
     "payload",
-    [b"not json", b'["A=1"]', b'{"A": 1}'],
-    ids=["not-json", "not-a-map", "non-string-value"],
+    [b"not json", b'["A=1"]', b'{"A": 1}', b'{"BAD NAME": "1"}'],
+    ids=["not-json", "not-a-map", "non-string-value", "bad-name"],
 )
 def test_a_malformed_variable_payload_is_refused(monkeypatch, payload):
     code, started = _run_main(monkeypatch, base64.b64encode(payload).decode("ascii"))
@@ -105,17 +161,3 @@ def test_a_payload_that_is_not_base64_is_refused(monkeypatch):
 
     assert code == 126
     assert started == []
-
-
-@pytest.mark.parametrize(
-    ("argv", "env"),
-    [
-        (["node", "index.js"], {"TOKEN": "a&calc"}),
-        (["node", "index.js"], {"TOKEN": "%PATH%"}),
-        (["node", "index.js & calc"], {}),
-        (["node", "index.js"], {"BAD NAME": "1"}),
-    ],
-)
-def test_text_cmd_would_interpret_is_refused(argv, env):
-    with pytest.raises(ValueError):
-        launcher.build_command_line(argv, env)

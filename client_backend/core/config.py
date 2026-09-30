@@ -255,6 +255,15 @@ class ClientSettings(BaseSettings):
         description="How long a projected skill catalog may be reused without rescanning.",
     )
 
+    # Document Uploads. The default is the server's MAX_FILE_SIZE_MB (50) in bytes.
+    document_upload_max_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        description=(
+            "Maximum declared size of one document upload request, all files together, in "
+            "bytes. The sidecar holds the whole request in memory to relay it."
+        ),
+    )
+
     # Security. repr=False: tracebacks and test failures print the settings object.
     local_session_secret: str = Field(
         repr=False,
@@ -400,6 +409,7 @@ class ClientSettings(BaseSettings):
         "skill_upload_rate_limit_window_seconds",
         "skill_install_lock_timeout_seconds",
         "skill_catalog_freshness_seconds",
+        "document_upload_max_bytes",
         mode="after",
     )
     @classmethod

@@ -9,7 +9,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, TypeVar
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import unquote, urlencode, urlparse, urlunparse
 from uuid import UUID
 
 import httpx
@@ -42,6 +42,32 @@ class ServerConnectionError(ServerAPIError):
     """Raised when server is unreachable."""
 
     pass
+
+
+class UnforwardablePathError(ServerAPIError):
+    """Raised, before sending, for a path that would not reach the route it names."""
+
+    def __init__(self) -> None:
+        super().__init__("Not Found", status_code=404, detail="Not Found")
+
+
+def _refuse_unforwardable_path(path: str) -> None:
+    """Refuse a path whose segments would not arrive upstream as written.
+
+    Routes format caller-supplied path parameters into the upstream path, so
+    ``/conversations/%2E%2E`` becomes ``/conversations/..``, which httpx
+    normalises to a route the sidecar never exposed. A literal ``?`` or ``#``
+    would turn the rest of the path into a query or a dropped fragment. Each
+    segment is decoded once more, as the upstream server will decode it, to
+    catch double encoding of ``.``, ``/`` and ``\\``. Queries travel in
+    ``params``, never in the path.
+    """
+    if "?" in path or "#" in path:
+        raise UnforwardablePathError()
+    for segment in path.split("/"):
+        decoded = unquote(segment)
+        if decoded in {".", ".."} or "/" in decoded or "\\" in decoded:
+            raise UnforwardablePathError()
 
 
 class TokenPair(BaseModel):
@@ -157,6 +183,7 @@ class ServerAPIClient:
         **kwargs: Any,
     ) -> httpx.Response:
         """Make an authenticated request and return the raw HTTP response."""
+        _refuse_unforwardable_path(path)
         client = await self._get_client()
         headers = dict(kwargs.pop("headers", {}))
         include_auth_headers = bool(kwargs.pop("include_auth_headers", True))
@@ -287,6 +314,7 @@ class ServerAPIClient:
         endpoint does not emit heartbeats during tool execution.  The
         connection stays alive until the server sends ``[DONE]`` or closes.
         """
+        _refuse_unforwardable_path(path)
         client = await self._get_client()
         headers = dict(kwargs.pop("headers", {}))
         auth_headers = self._get_auth_headers()
@@ -362,6 +390,7 @@ class ServerAPIClient:
         The response context stays open for the duration of the ``async with``
         block (and any body iteration inside it) and is torn down on exit.
         """
+        _refuse_unforwardable_path(path)
         client = await self._get_client()
         request_headers = self._get_auth_headers()
         if headers:
