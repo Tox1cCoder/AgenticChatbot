@@ -15,6 +15,7 @@ from app.models.base import Base
 from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.message import Message
+from app.models.project import Project
 from app.models.user import User
 
 # Dedicated, dropped-and-recreated schema so this test never depends on (or
@@ -162,6 +163,8 @@ def test_migration_upgrades_and_downgrades_against_postgres():
                     connection,
                     tables=[
                         User.__table__,
+                        # conversations.project_id references projects.
+                        Project.__table__,
                         Conversation.__table__,
                         Message.__table__,
                         Document.__table__,
