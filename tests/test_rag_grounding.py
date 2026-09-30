@@ -138,7 +138,6 @@ def _tool_policy_snapshot() -> tuple[Any, ...]:
         tuple(settings.rag_agent_allowed_tools),
         getattr(settings, "tool_choice_mode", None),
         settings.agentic_max_iterations,
-        settings.enable_citation_verification,
         settings.min_citation_coverage,
     )
 

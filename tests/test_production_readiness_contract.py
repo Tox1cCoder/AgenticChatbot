@@ -16,7 +16,6 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
     import tomli as tomllib
 
 from app.ai import agent_config
-from app.ai.agents.router import Router
 from app.core.config import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -275,12 +274,7 @@ def test_model_usage_operator_constraints_are_documented() -> None:
         assert guidance in readme
 
 
-def test_router_uses_the_configured_runtime_model(monkeypatch) -> None:
-    """The router resolves its model through settings, never a hard-coded id."""
-    from app.core.config import settings as app_settings
-
-    monkeypatch.setattr(app_settings, "router_model", "configured-router")
-    assert Router(recorder=None).model_name == "configured-router"
+def test_router_has_a_configured_model() -> None:
     assert agent_config.AGENT_CONFIG["router"]["model"]
 
 
@@ -498,6 +492,31 @@ def test_core_frozen_manifests_omit_unused_gradio_ui_dependencies() -> None:
     for manifest in ("requirements.txt", "environment.yml"):
         lines = (ROOT / manifest).read_text(encoding="utf-8").lower().splitlines()
         assert not any(line.strip().lstrip("- ").startswith("gradio") for line in lines)
+
+
+def _requirement_name(entry: str) -> str:
+    name = re.split(r"[\s<>=!~\[;(]", entry.strip().lstrip("- "), maxsplit=1)[0]
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def test_manifests_omit_dependencies_nothing_imports() -> None:
+    """None of these is imported by the app, the sidecar, scripts or tests.
+
+    pypdf, python-docx and langchain-text-splitters stay pinned in the frozen
+    manifests only because mineru and langchain-classic, both in that freeze,
+    require them.
+    """
+    unused = {"langchain-tavily", "nltk", "docx2txt", "pdfplumber", "tabulate", "fastapi-radar"}
+    freeze_only = {"pypdf", "python-docx", "langchain-text-splitters"}
+    dependencies = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "dependencies"
+    ]
+
+    declared = {_requirement_name(entry) for entry in dependencies}
+    assert not declared & (unused | freeze_only)
+    for manifest in ("requirements.txt", "environment.yml"):
+        lines = (ROOT / manifest).read_text(encoding="utf-8").splitlines()
+        assert not {_requirement_name(line) for line in lines} & unused, manifest
 
 
 def test_frozen_manifests_declare_the_cuda_wheel_index() -> None:

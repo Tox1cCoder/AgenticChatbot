@@ -27,8 +27,6 @@ def _build_minimal_rag_agent(qdrant_stub, embedding_stub) -> RAGAgent:
     """
     agent = object.__new__(RAGAgent)
     agent.settings = MagicMock()
-    agent.settings.rerank_top_k = 5
-    agent.settings.enable_citation_verification = False
     agent.qdrant_client = qdrant_stub
     agent.embedding_service = embedding_stub
     agent.collection_name = "documents_gemini_embedding_2_3072"

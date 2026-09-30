@@ -1,4 +1,4 @@
-"""Bounds on the focused-web evidence settings.
+"""Bounds on the focused tool-result evidence settings.
 
 Each of these caps what reaches model context. A setting that silently accepted
 0 or a million would defeat the boundary it exists to enforce, so the range is
@@ -13,11 +13,6 @@ from pydantic import ValidationError
 from app.core.config import Settings, settings
 
 _EVIDENCE_BOUNDS = {
-    "web_search_max_results": (8, 1, 20),
-    "web_search_result_max_chars": (24_000, 2_000, 100_000),
-    "web_open_max_urls": (4, 1, 10),
-    "web_open_max_excerpts": (8, 1, 20),
-    "web_open_max_chars": (18_000, 2_000, 80_000),
     "tool_result_focus_max_excerpts": (8, 1, 20),
     "tool_result_focus_max_chars": (16_000, 2_000, 80_000),
 }

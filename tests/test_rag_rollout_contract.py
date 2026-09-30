@@ -85,18 +85,6 @@ def test_env_example_documents_default_off_rag_flags():
     }
 
 
-def test_citation_verification_ships_enabled_by_default(settings):
-    """Plan-defect reconciliation.
-
-    The plan's Task 10 Step 4 assumed ``enable_citation_verification``
-    started ``False`` and listed enabling it as a future rollout step. It has
-    shipped ``default=True`` since Task 10 -- it was never off. This pins the
-    actual state so a future change is a deliberate decision, not an
-    accidental "fix" of a bug that doesn't exist.
-    """
-    assert settings.enable_citation_verification is True
-
-
 def test_min_citation_coverage_is_pinned_pending_reselection(settings):
     """0.5 is an unqualified placeholder, not a value chosen from evaluation
     results, and it currently gates a different quantity (fraction of an
@@ -133,7 +121,7 @@ def _runbook_text() -> str:
 
 def test_runbook_documents_every_flag_by_name():
     text = _runbook_text()
-    for flag in _RISKY_FLAGS + ("enable_citation_verification", "min_citation_coverage"):
+    for flag in _RISKY_FLAGS + ("min_citation_coverage",):
         assert flag in text, f"runbook must name {flag} explicitly"
 
 

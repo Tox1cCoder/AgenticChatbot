@@ -110,4 +110,3 @@ def test_settings_expose_routing_bounds():
 
     assert settings.routing_timeout_seconds == 8.0
     assert settings.routing_max_attempts == 2
-    assert settings.workflow_graph_version == "routing-v2"

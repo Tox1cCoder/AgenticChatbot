@@ -133,7 +133,6 @@ def _graph(runtime, gate=None, **overrides) -> RagExecutionGraph:
         "grounded_answer_gate": gate or _gate(),
         "settings": SimpleNamespace(
             rag_evidence_max_tokens=0,
-            enable_citation_verification=True,
             rag_max_tool_iterations=8,
         ),
     }
@@ -301,7 +300,6 @@ async def test_the_tool_loop_has_a_backstop_ceiling():
         runtime,
         settings=SimpleNamespace(
             rag_evidence_max_tokens=0,
-            enable_citation_verification=True,
             rag_max_tool_iterations=2,
         ),
     )
@@ -547,7 +545,6 @@ async def test_worker_mode_result_is_private():
 def _budget_settings(**overrides) -> SimpleNamespace:
     values = {
         "rag_evidence_max_tokens": 0,
-        "enable_citation_verification": True,
         "rag_max_tool_iterations": 8,
         "generation_soft_tool_calls_per_epoch": 1,
         "generation_hard_tool_calls_per_epoch": 4,

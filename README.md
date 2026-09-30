@@ -190,7 +190,7 @@ At least one **LLM provider credential** is required for real AI execution:
 - `GEMINI_API_KEY` — the default provider, wired via `langchain-google-genai`
 - per-user OpenAI / Anthropic keys managed through [`/providers`](app/api/providers.py) once `MODEL_ENCRYPTION_KEY` is set
 
-Optional: `TAVILY_API_KEY` for web search agent, `BRAVE_SEARCH_API_KEY` for image search, `SMITHERY_API_KEY` for hosted MCP servers, `LANGSMITH_API_KEY` for tracing.
+Optional: `TAVILY_API_KEY` for web search agent, `BRAVE_SEARCH_API_KEY` for image search, `LANGSMITH_API_KEY` for tracing.
 
 ---
 
@@ -309,7 +309,6 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | `BRAVE_IMAGE_SEARCH_TIMEOUT_SECONDS` | `2.5` | Per-request timeout for image search |
 | `BRAVE_IMAGE_SEARCH_DEFAULT_SAFESEARCH` | `strict` | Brave safesearch level (`off` or `strict`) |
 | `REMOTE_IMAGE_ENRICHMENT_ENABLED` | `true` | Enables optional Brave-backed remote image enrichment for rich responses |
-| `SMITHERY_API_KEY` | — | Hosted MCP registry |
 | `MODEL_ENCRYPTION_KEY` | — | Fernet key for per-user provider credentials |
 | `RAG_AGENT_MODEL` | `gemini-3.1-pro-preview` | |
 | `CHAT_AGENT_MODEL` | `gemini-3-flash-preview` | |
@@ -321,7 +320,6 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | `TITLE_GENERATOR_MODEL` | `gemini-3-flash-preview` | Conversation titles |
 | `IMAGE_GENERATOR_MODEL` | `gemini-3-pro-image` | Image generation |
 | `IMAGE_CAPTION_MODEL` | `gemini-3-flash-preview` | |
-| `MEDIA_RESOLUTION` | `high` | `low` / `medium` / `high` (Gemini 3 per-part) |
 | `ENABLE_THINKING` | `true` | |
 | `THINKING_LEVEL` | `high` | `minimal` / `low` / `medium` / `high` (Gemini 3) |
 | `THINKING_BUDGET` | `-1` | Token budget for Gemini 2.5 (-1 dynamic, 0 off) |
@@ -391,7 +389,6 @@ calculate or track monetary cost. Frontend consumers should follow the
 | `RAG_SCORE_THRESHOLD` | `0.2` |
 | `ENABLE_RERANKING` | `true` |
 | `RAG_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
-| `RERANK_TOP_K` | `10` |
 | `RAG_CHUNK_TARGET_TOKENS` | `400` |
 | `RAG_CHUNK_OVERLAP_TOKENS` | `40` |
 | `RAG_CHUNK_MAX_TOKENS` | `800` |
@@ -406,7 +403,7 @@ embedding migration" below).
 
 ### Conversation memory & history budgets
 
-`MEMORY_MAX_MESSAGES`, `CHAT_HISTORY_MAX_MESSAGES` / `_TOKENS`, `RAG_HISTORY_MAX_*`, `SEARCH_HISTORY_MAX_*`, `PLANNING_HISTORY_MAX_*`.
+`CHAT_HISTORY_MAX_MESSAGES` / `_TOKENS`, `RAG_HISTORY_MAX_*`, `SEARCH_HISTORY_MAX_*`, `PLANNING_HISTORY_MAX_*`.
 
 ### Long-term user memory
 
@@ -477,7 +474,7 @@ Deployment, migration, rollback, backfill, monitoring, and credential-rotation p
 
 ### Document processing
 
-`MINERU_TIMEOUT`, `MINERU_API_URL`, `MINERU_BACKEND` (`pipeline` / `hybrid-*` / `vlm-*`), `MINERU_METHOD` (`auto` / `txt` / `ocr`), `MINERU_LANG`, `MINERU_EXTRA_ARGS`, `EXTRACT_FORMULAS_FROM_PDF`, `EXTRACT_TABLES_FROM_PDF`, `TABLE_FORMAT`, `MAX_FILE_SIZE_MB`, `TEMP_STORAGE_PATH`, `DOCUMENT_IMAGES_STORAGE_PATH`, `IMAGE_CAPTION_MODEL`, `IMAGE_CAPTION_MAX_RETRY_ATTEMPTS`, `IMAGE_CAPTION_RETRY_DELAY_SECONDS`.
+`MINERU_TIMEOUT`, `MINERU_API_URL`, `MINERU_BACKEND` (`pipeline` / `hybrid-*` / `vlm-*`), `MINERU_METHOD` (`auto` / `txt` / `ocr`), `MINERU_LANG`, `MINERU_EXTRA_ARGS`, `EXTRACT_FORMULAS_FROM_PDF`, `EXTRACT_TABLES_FROM_PDF`, `MAX_FILE_SIZE_MB`, `TEMP_STORAGE_PATH`, `DOCUMENT_IMAGES_STORAGE_PATH`, `IMAGE_CAPTION_MODEL`, `IMAGE_CAPTION_MAX_RETRY_ATTEMPTS`, `IMAGE_CAPTION_RETRY_DELAY_SECONDS`.
 
 ### MCP tool search
 
@@ -514,11 +511,9 @@ semantics, and the sole `dispatch_subagents` exception are documented in
 
 ### HITL & planning
 
-`ENABLE_HUMAN_IN_THE_LOOP`, `HITL_TOOLS_REQUIRE_APPROVAL`, `HITL_APPROVAL_TIMEOUT_MINUTES`, `MAX_AUTO_PLAN_TASKS`, `EXECUTION_CALL_BUDGET`, `PLANNING_MAX_ITERATIONS`, `PLANNING_CONSECUTIVE_ERRORS_LIMIT`.
+`ENABLE_HUMAN_IN_THE_LOOP`, `HITL_TOOLS_REQUIRE_APPROVAL`, `HITL_APPROVAL_TIMEOUT_MINUTES`, `PLANNING_MAX_ITERATIONS`.
 
 ### Planning-mode subagents
-
-`PLANNING_SUBAGENTS_ENABLED`.
 
 While Planning mode is active, the Planning Agent can call the internal `dispatch_subagents` tool to fan out independent worker tasks to other graph agents (`chat_agent`, `rag_agent`, `search_agent`, `image_generator_agent`, `canvas_agent`). Workers run concurrently in the same chat turn — there is no background queue and the dispatch call blocks until every worker completes, fails, or signals it needs human approval. Workers run with isolated message state, inherit scoped identifiers (`conversation_id`, `user_id`, `device_id`) and runtime model overrides, and return a full `answer` to the Planning Agent plus a compact `summary` for activity UI/metadata. The dispatcher does not apply `TOOL_RESULT_MAX_CHARS` or tool-result offload to the worker `answer`; workers are prompted to answer concisely but with enough detail for supervisor reconciliation. Workers cannot mutate todos directly: the Planning Agent reads each `answer` and reconciles the plan with `write_todos`. This is distinct from `hand_off`, which re-routes the entire turn to a single top-level agent rather than fanning out parallel research/build work.
 
@@ -539,7 +534,7 @@ While Planning mode is active, the Planning Agent can call the internal `dispatc
 
 ### Client runtime bridge
 
-`ENABLE_CLIENT_RUNTIME_BRIDGE`, `CLIENT_RUNTIME_WS_TIMEOUT_SECONDS`, `CLIENT_RUNTIME_CATALOG_CACHE_TTL_SECONDS`, `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS`, `CLIENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS`, `CLIENT_RUNTIME_MAX_TOOL_RESULT_SIZE_BYTES`.
+`ENABLE_CLIENT_RUNTIME_BRIDGE`, `CLIENT_RUNTIME_WS_TIMEOUT_SECONDS`, `CLIENT_RUNTIME_CATALOG_CACHE_TTL_SECONDS`, `CLIENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS`, `CLIENT_RUNTIME_MAX_TOOL_RESULT_SIZE_BYTES`.
 
 ### Redis
 
@@ -731,10 +726,6 @@ python scripts/evaluate_tool_search_accuracy.py
 python -m pytest tests/test_tool_search_accuracy.py tests/test_unified_tool_search.py -q
 ```
 
-### Confidence & hallucination controls
-
-`confidence_threshold_abstain`, `confidence_weight_tool_success` / `_completeness` / `_retrieval`, and `enable_citation_verification` gate RAG and tool-driven responses; see [`app/ai/schemas.py`](app/ai/schemas.py) and [`agents/rag_agent.py`](app/ai/agents/rag_agent.py).
-
 ---
 
 ## Document Pipeline & RAG
@@ -789,9 +780,7 @@ remain the primary image-retrieval path.
 them is code-complete but **unqualified: there is no evaluation evidence
 behind enabling any of them**, and all fourteen quality gates in
 `eval/rag/release_gates.json` are non-binding
-(`status: "unmeasured"`). `ENABLE_CITATION_VERIFICATION` is the one
-exception — it ships `true` and already runs shadow-only citation
-validation on the graph RAG path.
+(`status: "unmeasured"`).
 
 **[`docs/rag-rollout-runbook.md`](docs/rag-rollout-runbook.md)** documents,
 per flag, the evidence still missing, the health signals that would confirm
@@ -1033,7 +1022,7 @@ Conversations can be put into **planning mode** (`planning_mode_enabled`) to mat
 | `DELETE /task-plans/{task_id}` | Remove |
 | `GET /conversations/{id}/planning-status` | Plan lifecycle snapshot |
 
-Plan lifecycle: `draft` → `ready` → `executing` → `paused` / `completed`. The planning agent's execution-call budget is capped by `EXECUTION_CALL_BUDGET` and max tasks by `MAX_AUTO_PLAN_TASKS`.
+Plan lifecycle: `draft` → `ready` → `executing` → `paused` / `completed`.
 
 ### Planning Rubric Grading
 
@@ -1494,9 +1483,9 @@ Image candidates are **never** streamed transiently — they only surface in the
 
 Brave Image Search is the visual-discovery adapter behind `web_search`. Candidate URLs are fetched through the server's SSRF-safe transport, MIME-sniffed, decoded, dimension-checked, byte-bounded, and deduplicated. The answer model receives the validated pixels beside private `I#` labels. Only an `[[image:I#]]` selection becomes a protected public image reference; without a token, no web image is published. Provider payloads and unselected candidates never enter public tool events or message history.
 
-Candidate filtering is deterministic, but retrieval and presentation have separate bounds. `BRAVE_IMAGE_SEARCH_DEFAULT_COUNT` requests `6` raw provider results by default (with `BRAVE_IMAGE_SEARCH_MAX_COUNT=10` as the request ceiling). Provider-native discovery inspects that bounded response before confidence-tier selection and original-image deduplication; it intentionally does not use the generic raw-tool harvesting cap. `RICH_IMAGE_CANDIDATE_MAX_COUNT` (default `8`) bounds generic/raw tool-result candidate harvesting. Both paths apply `RICH_IMAGE_MIN_WIDTH_PX` (`320`) and `RICH_IMAGE_MIN_HEIGHT_PX` (`180`) when original dimensions are known.
+Candidate filtering is deterministic, but retrieval and presentation have separate bounds. `BRAVE_IMAGE_SEARCH_DEFAULT_COUNT` requests `6` raw provider results by default (with `BRAVE_IMAGE_SEARCH_MAX_COUNT=10` as the request ceiling). Provider-native discovery inspects that bounded response before confidence-tier selection and original-image deduplication. Selection applies `RICH_IMAGE_MIN_WIDTH_PX` (`320`) and `RICH_IMAGE_MIN_HEIGHT_PX` (`180`) when original dimensions are known.
 
-Presentation is bounded separately: `RICH_AUTO_PLACE_MAX_IMAGES` (default `2`) caps figure-mode image items per answer, while `RICH_IMAGE_GALLERY_MAX_ITEMS` (default `6`, hard maximum `8`) caps the ordered cells inside one provider-native `image_group`. The legacy raw-Brave grouping path remains capped by `RICH_IMAGE_GROUP_MAX_ITEMS=3`. An image group counts as one model-facing inventory item and one marker, but the renderer loads and displays every selected cell. An image the model did not place itself is anchored on its own image-search query — there is a single image-placement path, with no description-matching alternative and no rollback flag. `RICH_AUTO_PLACE_MIN_SCORE` governs widget auto-placement only; `RICH_IMAGE_ANCHOR_MIN_SCORE` (`0.34`) is the image-query threshold. See the [rich image rendering contract](docs/frontend/rich-image-rendering.md) for the per-origin anchoring rules.
+Presentation is bounded separately: `RICH_AUTO_PLACE_MAX_IMAGES` (default `2`) caps figure-mode image items per answer. An image group counts as one model-facing inventory item and one marker, but the renderer loads and displays every selected cell. An image appears only where the model placed its marker; `RICH_AUTO_PLACE_MIN_SCORE` governs widget auto-placement only. See the [rich image rendering contract](docs/frontend/rich-image-rendering.md) for the per-origin anchoring rules.
 
 Creating `/web-images/{id}` references is a persistence-time database-only operation. Upstream image bytes are fetched later, only when an authenticated client requests the media route, so the configured connect/read timeouts do not extend text time-to-first-token or assistant completion. A fetch failure affects only the optional figure; reference-registration failure removes the item and its exact marker while preserving the complete text answer.
 
@@ -1689,4 +1678,4 @@ If both runs show similar times, the service is restarting between requests
 | `consumer: Connection to broker lost` / Redis `WinError 10054` | Redis was restarted or the TCP connection was reset. Confirm `docker ps` shows `sample_chatbot_redis` healthy, then restart the worker. The worker config enables reconnects and cancels late-ack tasks on broker loss to avoid duplicate concurrent document processing after redelivery. |
 | Batch upload returns 207 | Mixed accepted/rejected response. Inspect `data.files` for per-file status and `error_code` (e.g. `DUPLICATE_FILENAME`). Do not treat 207 as a hard failure. |
 | Reranker download slow / `ReadTimeoutError` from `huggingface.co` | The reranker loads offline-first from the local HF cache, so a cached model never blocks on the hub. The error means the model isn't cached yet (first run) or the one-time download timed out. Pre-fetch it with `python scripts/download_reranker.py`, then it loads with no network. Or disable with `ENABLE_RERANKING=false`. |
-| Client-device tool calls fail | Device offline or `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS=true`. Inspect `GET /device-runtime/connected-devices`. |
+| Client-device tool calls fail | Device offline. Inspect `GET /device-runtime/connected-devices`. |

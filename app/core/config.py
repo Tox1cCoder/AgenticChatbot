@@ -302,11 +302,6 @@ class Settings(BaseSettings):
         default="",
         description="Tavily API Key for web search",
     )
-    smithery_api_key: str = Field(
-        repr=False,
-        default="",
-        description="Smithery API Key for MCP server access",
-    )
     brave_search_api_key: str = Field(
         repr=False,
         default="",
@@ -406,10 +401,6 @@ class Settings(BaseSettings):
         default="",
         description="LangSmith API Key for tracing and observability",
     )
-    langsmith_project: str = Field(
-        default="sample-chatbot",
-        description="LangSmith project name for organizing traces",
-    )
     langsmith_tracing: bool = Field(
         default=False,
         description="Enable LangSmith tracing (requires valid API key)",
@@ -469,10 +460,6 @@ class Settings(BaseSettings):
             "Maximum router calls per turn against the same resolved provider/model. "
             "The retry never changes provider, model, or agent."
         ),
-    )
-    workflow_graph_version: str = Field(
-        default="routing-v2",
-        description="Checkpoint namespace and graph version for the production workflow",
     )
     conversation_turn_lock_timeout_seconds: float = Field(
         default=30.0,
@@ -594,14 +581,7 @@ class Settings(BaseSettings):
         description="Max concurrent Gemini embed_content requests during indexing.",
     )
 
-    # Media Resolution Configuration (for vision models)
-    media_resolution: str = Field(
-        default="high",
-        description=(
-            "Media resolution for vision models: low, medium, high "
-            "(Gemini 3 supports per-part resolution)"
-        ),
-    )
+    # Gemini code execution (agentic vision)
     enable_gemini_code_execution: bool = Field(
         default=True,
         description="Enable Gemini code execution tool for agentic vision workflows across agents",
@@ -672,17 +652,6 @@ class Settings(BaseSettings):
         "providers requires a deliberate collection cutover.",
     )
 
-    # Conversation Memory Configuration
-    memory_max_messages: int = Field(
-        default=0,
-        description="Maximum number of messages cached in memory per conversation (0 = no limit)",
-    )
-    memory_load_batch_size: int = Field(
-        default=100,
-        description=(
-            "Number of messages to load per batch when hydrating memory from the database (max 100)"
-        ),
-    )
     # Durable conversation memory (Memory Refactor 2026-04-29)
     memory_cache_ttl_seconds: int = Field(
         default=60,
@@ -1165,10 +1134,6 @@ class Settings(BaseSettings):
         description="Re-ranker model name (kept for backward compat; canonical "
         "setting is rag_reranker_model).",
     )
-    rerank_top_k: int = Field(
-        default=10,
-        description="Number of chunks to keep after re-ranking",
-    )
 
     # Vector Database Batch Processing
     qdrant_upsert_batch_size: int = Field(
@@ -1179,10 +1144,6 @@ class Settings(BaseSettings):
     # Table Processing Configuration
     extract_tables_from_pdf: bool = Field(
         default=True, description="Enable table extraction from PDF documents"
-    )
-    table_format: str = Field(
-        default="markdown",
-        description="Format for extracted tables (markdown, grid, plain)",
     )
 
     # Search Agent Configuration
@@ -1215,10 +1176,6 @@ class Settings(BaseSettings):
     react_agent_max_iterations: int = Field(
         default=50,
         description="Maximum number of refinement iterations before stopping",
-    )
-    react_agent_quality_threshold: float = Field(
-        default=0.7,
-        description="Minimum quality score (0.0-1.0) to accept response without refinement",
     )
     max_handoff_delegation_depth: int = Field(
         default=5,
@@ -1280,16 +1237,6 @@ class Settings(BaseSettings):
         description="Tool calling mode: 'auto', 'any', 'none', or specific tool name",
     )
 
-    # Planning Agent Configuration
-    max_auto_plan_tasks: int = Field(
-        default=20,
-        description="Absolute maximum number of tasks per execution session (safety limit)",
-    )
-    execution_call_budget: int = Field(
-        default=20,
-        description="Maximum LLM calls per execution session before pausing for user",
-    )
-
     # Tool Execution Configuration
     tool_execution_timeout: int = Field(
         default=30,
@@ -1301,10 +1248,6 @@ class Settings(BaseSettings):
             "Maximum repeated same tool/error/argument outputs before forcing "
             "final no-tools synthesis."
         ),
-    )
-    tool_validation_enabled: bool = Field(
-        default=True,
-        description="Enable/disable Pydantic validation for tool arguments and results",
     )
 
     # Tool Execution Policy Configuration (origin-aware timeout/retry policy)
@@ -1397,38 +1340,8 @@ class Settings(BaseSettings):
             "dropped whole instead of shrinking every result into uselessness."
         ),
     )
-    # Focused web evidence. Every bound below caps what reaches model context:
-    # the provider payload is allowed to be large, the model's view of it is not.
-    web_search_max_results: int = Field(
-        default=8,
-        ge=1,
-        le=20,
-        description="Ceiling on results one web_search call may request from the provider.",
-    )
-    web_search_result_max_chars: int = Field(
-        default=24_000,
-        ge=2_000,
-        le=100_000,
-        description="Maximum characters of projected search results returned to the model.",
-    )
-    web_open_max_urls: int = Field(
-        default=4,
-        ge=1,
-        le=10,
-        description="Maximum URLs one web_open call may extract in a single request.",
-    )
-    web_open_max_excerpts: int = Field(
-        default=8,
-        ge=1,
-        le=20,
-        description="Maximum focused excerpts returned by one web_open call.",
-    )
-    web_open_max_chars: int = Field(
-        default=18_000,
-        ge=2_000,
-        le=80_000,
-        description="Maximum characters of extracted page evidence returned to the model.",
-    )
+    # Focused tool-result evidence. Each bound caps what reaches model context:
+    # the stored payload is allowed to be large, the model's view of it is not.
     tool_result_focus_max_excerpts: int = Field(
         default=8,
         ge=1,
@@ -1621,35 +1534,8 @@ class Settings(BaseSettings):
         description="Tool names or server names that planning agent can use. Empty = all tools.",
     )
 
-    # Hallucination Prevention Configuration
-    confidence_threshold_abstain: float = Field(
-        default=0.3,
-        description="Minimum confidence score below which agent should abstain from answering",
-    )
-    enable_structured_output_validation: bool = Field(
-        default=False,
-        description="Toggle for using Pydantic structured output schemas for response validation",
-    )
-    confidence_weight_tool_success: float = Field(
-        default=0.4,
-        description="Weight for tool success rate in confidence calculation",
-    )
-    confidence_weight_completeness: float = Field(
-        default=0.3,
-        description="Weight for response completeness in confidence calculation",
-    )
-    confidence_weight_retrieval: float = Field(
-        default=0.3,
-        description="Weight for retrieval quality (RAG) in confidence calculation",
-    )
-    enable_citation_verification: bool = Field(
-        default=True,
-        description=(
-            "Retained for operational visibility only. Grounded-answer validation is "
-            "mandatory for every RAG result in routing-v2 and cannot be turned off; "
-            "there is no shadow mode and no path that skips it."
-        ),
-    )
+    # Grounded-answer gate. Validation is mandatory for every RAG result and
+    # cannot be turned off; this only sets the gate's citation threshold.
     min_citation_coverage: float = Field(
         default=0.5,
         description="Minimum fraction of an answer's claims that must carry a citation for "
@@ -1793,10 +1679,6 @@ class Settings(BaseSettings):
             "Set to 0 to disable the planning iteration budget."
         ),
     )
-    planning_consecutive_errors_limit: int = Field(
-        default=3,
-        description="Maximum consecutive planning tool errors before stopping",
-    )
     planning_rubric_enabled: bool = Field(
         default=True,
         description=(
@@ -1810,17 +1692,6 @@ class Settings(BaseSettings):
         description=(
             "Maximum Planning rubric grading passes per attempt. Minimum 1. "
             "Set planning_rubric_enabled=False to disable grading."
-        ),
-    )
-
-    # Planning-mode subagent dispatcher configuration
-    planning_subagents_enabled: bool = Field(
-        default=True,
-        description=(
-            "Enable the Planning-mode subagent dispatch tool. When True, the Planning "
-            "Agent can receive a `dispatch_subagents` internal tool while Planning "
-            "mode is active so it can fan out independent worker tasks to other graph "
-            "agents. Prompt policy controls when the tool should be used."
         ),
     )
 
@@ -1944,12 +1815,6 @@ class Settings(BaseSettings):
         description="TTL in seconds for caching client device tool/skill catalogs. "
         "Catalogs are refreshed when a device reconnects or explicitly syncs.",
     )
-    client_runtime_require_connected_device_for_local_tools: bool = Field(
-        default=True,
-        description="When True, tool calls targeting client-local tools fail if no "
-        "device is connected. "
-        "When False, such calls return a recoverable error allowing the model to adapt.",
-    )
     client_runtime_heartbeat_interval_seconds: int = Field(
         default=30,
         description="Expected heartbeat interval from connected client devices. "
@@ -2026,10 +1891,6 @@ class Settings(BaseSettings):
             "Oversized inline data is rejected at finalization rather than persisted or streamed."
         ),
     )
-    rich_image_candidate_max_count: int = Field(
-        default=8,
-        description="Maximum normalized web-image candidates retained per tool result.",
-    )
     rich_image_min_width_px: int = Field(
         default=320,
         description="Reject provider images with a known width below this value.",
@@ -2054,16 +1915,6 @@ class Settings(BaseSettings):
             "Reject provider images wider than this width/height ratio when both "
             "dimensions are known. Catches hero strips the minimum-dimension "
             "gates miss; still admits panoramas and wide charts."
-        ),
-    )
-    rich_image_group_max_items: int = Field(
-        default=3,
-        ge=2,
-        le=3,
-        description=(
-            "Maximum cells in a legacy raw-tool image_group. Provider-native "
-            "galleries use rich_image_gallery_max_items instead. The renderer "
-            "wraps groups after three columns without dropping approved cells."
         ),
     )
     web_image_fetch_connect_timeout_seconds: float = Field(
@@ -2111,24 +1962,10 @@ class Settings(BaseSettings):
         description=(
             "Minimum keyword-overlap score (fraction of an item's descriptive tokens "
             "found in a paragraph) required to auto-place the item after that paragraph. "
-            "Governs widget auto-placement only; images use "
-            "RICH_IMAGE_ANCHOR_MIN_SCORE on the query-anchoring path. The score is "
+            "Governs widget auto-placement only; images appear only where the model "
+            "placed their marker. The score is "
             "quantized by token count, so at the default a widget title of four tokens "
             "or fewer needs exactly one matching token — the same as any match at all."
-        ),
-    )
-    rich_image_anchor_min_score: float = Field(
-        default=0.34,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Fraction of image-query tokens a paragraph must contain to receive that "
-            "image's marker directly. This selects the placement, not whether the image "
-            "appears: below it the image anchors at the first substantial paragraph "
-            "instead, and only an image matching no paragraph at all is dropped. The "
-            "score is quantized by query length, so at the default a one- or two-token "
-            "query cannot land below the threshold, and a three- to five-token query "
-            "needs two matching tokens."
         ),
     )
 
@@ -2140,7 +1977,6 @@ class Settings(BaseSettings):
         "react_agent_recursion_limit",
         "planning_rubric_max_iterations",
         "agentic_max_iterations",
-        "planning_consecutive_errors_limit",
         "tool_execution_consecutive_errors_limit",
         "celery_worker_concurrency",
         "celery_worker_prefetch_multiplier",
@@ -2170,7 +2006,6 @@ class Settings(BaseSettings):
         "model_usage_failure_store_ttl_seconds",
         "chat_image_max_bytes",
         "image_preview_max_partials_per_image",
-        "rich_image_candidate_max_count",
         "rich_image_min_width_px",
         "rich_image_min_height_px",
         mode="before",
@@ -2257,8 +2092,6 @@ class Settings(BaseSettings):
         "search_history_max_tokens",
         "planning_history_max_messages",
         "planning_history_max_tokens",
-        "memory_max_messages",
-        "memory_load_batch_size",
         "tool_result_max_chars",
         "mcp_tool_search_default_top_k",
         "mcp_tool_search_max_top_k",

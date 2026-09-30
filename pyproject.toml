@@ -47,7 +47,6 @@ dependencies = [
     # AI & LangChain Ecosystem
     "langchain>=1.3.4,<2.0.0",
     "langchain-core>=1.4.2,<2.0.0",
-    "langchain-text-splitters>=1.1.2,<2.0.0",
     "langgraph>=1.2.4,<2.0.0",
     "langgraph-checkpoint>=4.1.1,<5.0.0",
     "langgraph-checkpoint-postgres>=3.1.0,<4.0.0",
@@ -63,7 +62,6 @@ dependencies = [
     "google-genai>=2.13.0,<3.0.0",
     "openai>=1.0.0",
     "tavily-python==0.7.15",
-    "langchain-tavily>=0.2.0",
     
     # Vector Database & Embeddings
     "qdrant-client>=1.7.0",
@@ -72,18 +70,13 @@ dependencies = [
     "huggingface-hub>=0.34.0,<1.0",
     "torch>=2.1.0",
     
-    # Token Counting & NLP
+    # Token Counting
     "tiktoken>=0.5.0",
-    "nltk>=3.8.0",
-    
-    # Document Processing
-    "pypdf>=3.17.0",
-    "python-docx>=1.1.0",
-    "docx2txt>=0.8",
+
+    # Document Processing (PDF/DOCX/PPTX/HTML go through MinerU, run as a
+    # separate CLI or service, so their parser libraries are not declared here)
     "openpyxl>=3.1.2",
     "Pillow>=10.0.0",
-    "pdfplumber>=0.11.0",
-    "tabulate>=0.9.0",
     
     # Utilities
     "filelock>=3.20.0,<4.0.0",
@@ -92,7 +85,6 @@ dependencies = [
     "anyio>=4.13.0",
     "cachetools>=6.2.4",
     "requests>=2.34.2",
-    "fastapi-radar>=0.0.2",
     "python-dotenv>=1.0.0",
     "cryptography>=41.0.0",
     "tomli>=2.0.0; python_version < '3.11'",

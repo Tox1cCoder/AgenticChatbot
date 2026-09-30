@@ -20,7 +20,6 @@ def _settings(**overrides):
 def test_rich_image_selection_defaults_are_bounded():
     settings = _settings()
 
-    assert settings.rich_image_candidate_max_count == 8
     assert settings.rich_image_min_width_px == 320
     assert settings.rich_image_min_height_px == 180
 
@@ -38,7 +37,6 @@ def test_web_image_delivery_defaults_are_render_time_bounded():
 @pytest.mark.parametrize(
     "field",
     (
-        "rich_image_candidate_max_count",
         "rich_image_min_width_px",
         "rich_image_min_height_px",
     ),
