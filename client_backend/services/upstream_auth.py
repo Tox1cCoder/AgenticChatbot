@@ -94,7 +94,8 @@ class UpstreamAuthService:
             self._save_credentials(credentials)
             return credentials
         except Exception as e:
-            logger.warning(f"Failed to load credentials: {e}")
+            # Type only: a pydantic error repeats its input, which holds the tokens.
+            logger.warning("Failed to load credentials: %s", type(e).__name__)
             return None
 
     def _clear_credentials(self, user_id: str) -> None:

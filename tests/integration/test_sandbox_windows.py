@@ -40,10 +40,16 @@ needs_account = pytest.mark.skipif(
 )
 
 
-def _as_sandbox(*command: str, cwd: Path) -> subprocess.CompletedProcess:
+def _as_sandbox(
+    *command: str, cwd: Path, variables: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    from client_backend.services.sandbox.launcher import ENV_VARIABLE, encode_environment
+
     # conftest points CLIENT_PROFILE_ROOT at a temporary folder; the launcher
     # needs the real one, where setup stored the account's credentials.
     env = dict(os.environ, CLIENT_PROFILE_ROOT=str(REAL_PROFILE))
+    if variables is not None:
+        env[ENV_VARIABLE] = encode_environment(variables)
     return subprocess.run(
         [sys.executable, "-m", "client_backend.services.sandbox.launcher",
          "--cwd", str(cwd), "--", *command],
@@ -85,6 +91,19 @@ def test_a_repo_workspace_is_refused_and_left_ungranted(scratch):
     # nothing; a real profile workspace has no such inheritance.)
     listing = subprocess.run(["icacls", str(repo)], capture_output=True, text=True).stdout
     assert _real_account_name() not in listing
+
+
+@needs_account
+def test_variables_from_the_environment_reach_the_sandboxed_program(scratch):
+    """The launcher takes the program's variables from its environment, not argv."""
+    shown = _as_sandbox(
+        "cmd", "/c", "set", "KANI_PROBE", cwd=scratch, variables={"KANI_PROBE": "sandbox-probe"}
+    )
+
+    assert shown.returncode == 0, shown.stderr
+    assert "KANI_PROBE=sandbox-probe" in shown.stdout
+    # The payload itself is consumed by the launcher, not handed to the account.
+    assert "KANI_SANDBOX_ENV" not in _as_sandbox("cmd", "/c", "set", cwd=scratch).stdout
 
 
 @needs_account

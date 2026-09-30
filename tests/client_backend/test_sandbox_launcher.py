@@ -8,6 +8,8 @@ verified on a machine where the account exists.
 
 from __future__ import annotations
 
+import base64
+import os
 import subprocess
 import sys
 
@@ -44,6 +46,65 @@ def test_the_programs_exit_code_comes_back(tmp_path):
     completed = subprocess.run(line, capture_output=True, text=True)
 
     assert completed.returncode == 7
+
+
+def _run_main(monkeypatch, encoded: str | None) -> tuple[int, list[str]]:
+    from client_backend.services.sandbox import account, windows
+
+    started: list[str] = []
+
+    def run_as_user(username, password, command_line, cwd):
+        started.append(command_line)
+        return 0
+
+    credentials = type("Credentials", (), {"username": "kani-sandbox", "password": "pw"})()
+    monkeypatch.setattr(account, "load_credentials", lambda: credentials)
+    monkeypatch.setattr(windows, "run_as_user", run_as_user)
+    if encoded is None:
+        monkeypatch.delenv(launcher.ENV_VARIABLE, raising=False)
+    else:
+        monkeypatch.setenv(launcher.ENV_VARIABLE, encoded)
+    code = launcher.main(["--cwd", r"C:\work", "--", "node", "index.js"])
+    return code, started
+
+
+def test_the_programs_variables_come_from_the_environment_not_arguments(monkeypatch):
+    encoded = launcher.encode_environment({"GIT_TERMINAL_PROMPT": "0", "TOKEN": "${NOT_EXPANDED}"})
+
+    code, started = _run_main(monkeypatch, encoded)
+
+    assert code == 0
+    assert started == [
+        'cmd.exe /d /s /c "set "GIT_TERMINAL_PROMPT=0"&&set "TOKEN=${NOT_EXPANDED}"&&node index.js"'
+    ]
+    # Consumed: the sandboxed program gets its variables through cmd.exe only.
+    assert launcher.ENV_VARIABLE not in os.environ
+
+
+def test_without_variables_the_program_runs_with_none_added(monkeypatch):
+    code, started = _run_main(monkeypatch, None)
+
+    assert code == 0
+    assert started == ['cmd.exe /d /s /c "node index.js"']
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"not json", b'["A=1"]', b'{"A": 1}'],
+    ids=["not-json", "not-a-map", "non-string-value"],
+)
+def test_a_malformed_variable_payload_is_refused(monkeypatch, payload):
+    code, started = _run_main(monkeypatch, base64.b64encode(payload).decode("ascii"))
+
+    assert code == 126
+    assert started == []
+
+
+def test_a_payload_that_is_not_base64_is_refused(monkeypatch):
+    code, started = _run_main(monkeypatch, "not base64!")
+
+    assert code == 126
+    assert started == []
 
 
 @pytest.mark.parametrize(

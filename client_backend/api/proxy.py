@@ -2,9 +2,10 @@
 Compatibility proxy routes for server-owned API surfaces.
 """
 
+from urllib.parse import unquote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 
 from client_backend.api.common import proxy_server_request, rewrite_widget_ws_url
@@ -12,7 +13,22 @@ from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
 from client_backend.services.runtime_bridge import get_runtime_bridge
 
-router = APIRouter(tags=["proxy"])
+
+def refuse_dot_segment_path_params(request: Request) -> None:
+    """404 for a path parameter that would stop being one upstream path segment.
+
+    ``/ai/conversations/%2E%2E`` arrives as ``conversation_id == ".."``; formatted
+    into the upstream path it is normalised away and reaches a route this
+    allowlist never exposed. Decoded once more to catch double encoding.
+    """
+
+    for value in request.path_params.values():
+        text = unquote(str(value))
+        if text in {".", ".."} or "/" in text or "\\" in text:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+
+router = APIRouter(tags=["proxy"], dependencies=[Depends(refuse_dot_segment_path_params)])
 
 # Multi-method paths are declared with one stacked decorator per method rather
 # than ``api_route(methods=[...])``: FastAPI derives one operation id per route,

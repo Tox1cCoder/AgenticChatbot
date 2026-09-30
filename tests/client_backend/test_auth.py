@@ -339,6 +339,39 @@ async def test_rejected_restore_does_not_leave_dead_tokens_on_the_client(tmp_pat
     assert client.get_tokens() is None
 
 
+def test_unreadable_credentials_log_the_error_type_not_its_text(tmp_path, monkeypatch, caplog):
+    """A pydantic error echoes its input, so logging it would write the tokens to the log."""
+    import json
+    import logging
+
+    from client_backend.core.config import client_settings
+    from client_backend.core.paths import profile_subdir_path
+    from client_backend.services.upstream_auth import UpstreamAuthService
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "profile"))
+    path = profile_subdir_path("user-123", "session") / "credentials.json"
+    path.parent.mkdir(parents=True)
+    # A legacy plaintext file missing a required field: the ValidationError
+    # text would repeat the whole input, tokens included.
+    path.write_text(
+        json.dumps(
+            {
+                "user_id": "user-123",
+                "username": "user@example.com",
+                "tokens": {"access_token": "sk-leaky-access", "refresh_token": "sk-leaky-refresh"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        loaded = UpstreamAuthService(server_client=object())._load_credentials("user-123")
+
+    assert loaded is None
+    assert "ValidationError" in caplog.text
+    assert "sk-leaky" not in caplog.text
+
+
 def test_augment_auth_response_restores_user_context_for_refresh(monkeypatch):
     class _AuthServiceStub:
         def get_current_user_id(self) -> str:

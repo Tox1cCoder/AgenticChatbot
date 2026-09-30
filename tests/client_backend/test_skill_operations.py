@@ -521,6 +521,20 @@ async def test_lock_timeout_is_reported_as_retryable(operation_env):
 
 
 @pytest.mark.asyncio
+async def test_unexpected_failure_keeps_exception_text_out_of_the_receipt(operation_env):
+    """Exception text can carry local paths and token prefixes; a receipt keeps the type."""
+    operation_env.installer.error = ValueError(r"C:\Users\thai\secret.json token=sk-abc123")
+
+    operation = await operation_env.start_and_wait()
+
+    assert operation.state == "failed"
+    assert operation.failure.code == "SKILL_BUNDLE_INVALID"
+    assert "ValueError" in operation.failure.message
+    assert "secret.json" not in operation.failure.message
+    assert "sk-abc123" not in operation.failure.message
+
+
+@pytest.mark.asyncio
 async def test_expired_upload_fails_the_operation_before_installing(operation_env):
     upload = operation_env.staged_upload()
     operation = await operation_env.service.start(USER_A, upload.upload_id, _request())

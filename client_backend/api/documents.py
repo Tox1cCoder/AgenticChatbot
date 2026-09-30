@@ -7,11 +7,16 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile, status
 
 from client_backend.api.common import proxy_server_request, raise_server_error
+from client_backend.api.proxy import refuse_dot_segment_path_params
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
 from client_backend.services.server_api import get_server_client
 
-router = APIRouter(prefix="/documents", tags=["documents"])
+router = APIRouter(
+    prefix="/documents",
+    tags=["documents"],
+    dependencies=[Depends(refuse_dot_segment_path_params)],
+)
 
 
 async def _read_upload_items(files: list[UploadFile]) -> list[dict[str, Any]]:

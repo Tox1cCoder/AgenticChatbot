@@ -34,15 +34,38 @@ _REMOVED_SETTINGS = {
 }
 
 
+def _read_local_secret(secret_path: Path) -> str:
+    if not secret_path.exists():
+        return ""
+    return secret_path.read_text(encoding="utf-8").strip()
+
+
 def _load_or_create_local_secret(secret_path: Path) -> str:
-    """Load a persisted local secret, creating one on first run."""
-    if secret_path.exists():
-        secret = secret_path.read_text(encoding="utf-8").strip()
-        if secret:
-            return secret
+    """Load a persisted local secret, creating one on first run.
+
+    Created owner-only (0o600) in one step, so on POSIX there is no moment when
+    the default umask leaves the signing secret readable by other users. On
+    Windows the mode only sets the read-only bit, which 0o600 leaves clear.
+    """
+    existing = _read_local_secret(secret_path)
+    if existing:
+        return existing
+    # Left empty by an interrupted first run; O_EXCL below needs it gone.
+    secret_path.unlink(missing_ok=True)
 
     secret = secrets.token_urlsafe(48)
-    secret_path.write_text(secret, encoding="utf-8")
+    try:
+        descriptor = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        # Another sidecar process created it first; both must sign with one secret.
+        existing = _read_local_secret(secret_path)
+        if existing:
+            return existing
+        raise RuntimeError(
+            f"{secret_path} is being created by another process; start the sidecar again"
+        ) from None
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(secret)
     return secret
 
 

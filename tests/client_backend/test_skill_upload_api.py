@@ -309,6 +309,92 @@ def test_upload_failures_map_to_documented_statuses(api_env, code, expected_stat
     assert set(body["error"]) == {"retryable"}
 
 
+@pytest.fixture()
+def small_upload_limit(monkeypatch):
+    settings = _api_globals()["client_settings"]
+    monkeypatch.setattr(settings, "skill_upload_max_bytes", 1_000)
+    return 1_000
+
+
+def test_an_upload_declared_too_large_is_refused_before_it_is_read(
+    api_env, small_upload_limit
+):
+    """Starlette would spool the whole body to disk before the route ran."""
+    oversized = b"PK" + b"\0" * (small_upload_limit + 256 * 1024)
+
+    response = api_env.client.post(
+        "/skills/uploads",
+        files={"file": ("demo.zip", oversized, "application/zip")},
+        headers=api_env.auth_headers,
+    )
+
+    assert response.status_code == 413
+    assert response.json()["code"] == "SKILL_ARCHIVE_TOO_LARGE"
+    assert api_env.uploads.staged == []
+
+
+async def _call_upload_route(app, headers: list[tuple[bytes, bytes]]) -> tuple[int, int]:
+    """Drive the ASGI app directly: returns (status, how often the body was read)."""
+    reads = 0
+    status: list[int] = []
+
+    async def receive():
+        nonlocal reads
+        reads += 1
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            status.append(message["status"])
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/skills/uploads",
+        "raw_path": b"/skills/uploads",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"content-type", b"multipart/form-data; boundary=x"), *headers],
+        "client": ("127.0.0.1", 1),
+        "server": ("127.0.0.1", 8100),
+    }
+    await app(scope, receive, send)
+    return status[0], reads
+
+
+@pytest.mark.asyncio
+async def test_a_declared_oversized_body_is_never_received(api_env, small_upload_limit):
+    status, reads = await _call_upload_route(
+        api_env.client.app, [(b"content-length", b"1000000000")]
+    )
+
+    assert status == 413
+    assert reads == 0
+
+
+@pytest.mark.asyncio
+async def test_an_upload_without_a_declared_length_is_refused(api_env, small_upload_limit):
+    """Chunked transfer would otherwise bypass the length check."""
+    status, reads = await _call_upload_route(api_env.client.app, [])
+
+    assert status == 411
+    assert reads == 0
+
+
+def test_an_upload_within_the_limit_is_still_staged(api_env, small_upload_limit):
+    response = api_env.client.post(
+        "/skills/uploads",
+        files={"file": ("demo.zip", b"PK" + b"\0" * 500, "application/zip")},
+        headers=api_env.auth_headers,
+    )
+
+    assert response.status_code == 201
+    assert len(api_env.uploads.staged) == 1
+
+
 def test_retryable_flag_is_set_for_transient_failures(api_env):
     api_env.uploads.error = _upload_error(
         "SKILL_STORAGE_INSUFFICIENT",

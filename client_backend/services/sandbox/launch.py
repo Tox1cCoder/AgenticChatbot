@@ -19,6 +19,7 @@ import client_backend
 from client_backend.core.config import client_settings
 from client_backend.services.desktop_commander_policy import NO_ONBOARDING_FLAG
 from client_backend.services.sandbox.account import load_credentials
+from client_backend.services.sandbox.launcher import ENV_VARIABLE, encode_environment
 from client_backend.services.sandbox.path_resolution import grant_path_resolution
 from client_backend.services.sandbox.runtime import (
     SandboxRuntimeError,
@@ -56,15 +57,17 @@ class SandboxLaunch:
     def mcp_entry(self, env: Mapping[str, str]) -> dict[str, Any]:
         """The MCP server entry that starts Desktop Commander through the launcher."""
 
-        args = ["-m", _LAUNCHER_MODULE, "--cwd", str(self.cwd)]
-        for name, value in {**env, **_GIT_SAFE_DIRECTORY}.items():
-            args += ["--env", f"{name}={value}"]
-        args += ["--", str(self.node), str(self.desktop_commander), NO_ONBOARDING_FLAG]
+        args = ["-m", _LAUNCHER_MODULE, "--cwd", str(self.cwd), "--"]
+        args += [str(self.node), str(self.desktop_commander), NO_ONBOARDING_FLAG]
+        # The values ride in the launcher's environment, not its command line,
+        # which every process can read and process-audit logs record.
+        payload = encode_environment({**env, **_GIT_SAFE_DIRECTORY})
         return {
             "transport": "stdio",
             "command": sys.executable,
             "args": args,
             "cwd": str(_PACKAGE_ROOT),
+            "env": {ENV_VARIABLE: payload},
         }
 
 

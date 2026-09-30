@@ -63,13 +63,35 @@ def test_desktop_commander_runs_as_the_sandbox_account_from_the_pinned_install(t
 
 
 def test_sandboxed_desktop_commander_keeps_its_quiet_non_interactive_environment(tmp_path):
-    args = _entries(tmp_path, _LAUNCH)["desktop-commander"]["args"]
-    settings = {args[i + 1] for i, arg in enumerate(args) if arg == "--env"}
+    from client_backend.services.sandbox.launcher import ENV_VARIABLE, decode_environment
 
-    assert "DESKTOP_COMMANDER_DISABLE_TELEMETRY=1" in settings
-    assert "GIT_TERMINAL_PROMPT=0" in settings
+    entry = _entries(tmp_path, _LAUNCH)["desktop-commander"]
+    settings = decode_environment(entry["env"][ENV_VARIABLE])
+
+    assert settings["DESKTOP_COMMANDER_DISABLE_TELEMETRY"] == "1"
+    assert settings["GIT_TERMINAL_PROMPT"] == "0"
     # Workspace files belong to the user; git refuses "dubious ownership" otherwise.
-    assert {"GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=*"} <= settings
+    assert settings["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert settings["GIT_CONFIG_VALUE_0"] == "*"
+
+
+def test_sandbox_environment_values_stay_off_the_launcher_command_line(tmp_path):
+    """Every process can read a command line, and process-audit logs record it."""
+    store = _store(tmp_path, {})
+    store.save_custom_server(
+        "desktop-commander",
+        {"transport": "stdio", **_DESKTOP_COMMANDER},
+        env={"DC_API_TOKEN": "sk-sandbox-secret"},
+        headers={},
+    )
+    entries = LocalMCPManager._build_server_config(
+        store.list_effective_servers(), sandbox=_LAUNCH
+    )
+    command_line = " ".join(entries["desktop-commander"]["args"])
+
+    assert "sk-sandbox-secret" not in command_line
+    assert "GIT_TERMINAL_PROMPT" not in command_line
+    assert "--env" not in command_line
 
 
 def test_other_servers_are_not_sandboxed(tmp_path):

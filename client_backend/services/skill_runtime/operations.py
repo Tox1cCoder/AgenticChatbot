@@ -318,11 +318,13 @@ class SkillInstallationService:
             return
         except Exception as exc:  # noqa: BLE001 - a receipt must never be left running
             logger.error("skill installation %s failed unexpectedly", operation_id, exc_info=True)
+            # The receipt reaches a client; exception text can carry local paths
+            # and token fragments, so it keeps only the exception type.
             self._fail(
                 user_id,
                 operation_id,
                 publish_code(SKILL_INSTALL_INVALID),
-                str(exc) or "The installation failed unexpectedly.",
+                f"The installation failed unexpectedly ({type(exc).__name__}).",
             )
             return
 

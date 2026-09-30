@@ -21,6 +21,47 @@ def test_initialize_client_environment_defers_profile_side_effects(tmp_path):
     assert (profile_root / ".local_session_secret").exists()
 
 
+def test_local_secret_is_created_owner_only_and_exclusively(tmp_path, monkeypatch):
+    """On POSIX the default umask would leave the signing secret world-readable."""
+    import os
+
+    from client_backend.core import config
+
+    opened: list[tuple[int, int]] = []
+    real_open = os.open
+
+    def recording_open(path, flags, mode=0o777, *args, **kwargs):
+        if Path(path).name == ".local_session_secret":
+            opened.append((flags, mode))
+        return real_open(path, flags, mode, *args, **kwargs)
+
+    monkeypatch.setattr(config.os, "open", recording_open)
+    secret_path = tmp_path / ".local_session_secret"
+
+    secret = config._load_or_create_local_secret(secret_path)
+
+    assert len(opened) == 1
+    flags, mode = opened[0]
+    assert mode == 0o600
+    assert flags & os.O_CREAT and flags & os.O_EXCL and flags & os.O_WRONLY
+    assert secret_path.read_text(encoding="utf-8") == secret
+    # A second start reads the same secret rather than minting a new one.
+    assert config._load_or_create_local_secret(secret_path) == secret
+
+
+def test_an_empty_local_secret_file_is_replaced(tmp_path):
+    """An interrupted first run can leave the file empty; it must not stay unusable."""
+    from client_backend.core import config
+
+    secret_path = tmp_path / ".local_session_secret"
+    secret_path.write_text("", encoding="utf-8")
+
+    secret = config._load_or_create_local_secret(secret_path)
+
+    assert secret
+    assert secret_path.read_text(encoding="utf-8") == secret
+
+
 def test_skills_root_defaults_to_the_profile(tmp_path):
     """Unset means "resolve per user under the profile", not "no skills"."""
     assert ClientSettings(profile_root=str(tmp_path)).skills_root == ""
