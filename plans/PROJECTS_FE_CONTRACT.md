@@ -130,11 +130,10 @@ Example `GET /projects?page=1&limit=10` response (timestamps and IDs vary):
 - **Always send `customAgentIds`.** `PUT .../custom-agents` with `{}` clears the project's agent list. `[]` clears it on purpose.
 - **Default agents only reach new members.** Changing a project's agents does not change conversations already in it. A conversation that leaves the project keeps its agents. Deleting a custom agent removes it from every project's list.
 - **Attaching is a move.** Attaching a conversation that is already in another project moves it, with no error. Add a confirmation step in the UI if you want one.
-- **Deleting a project keeps its conversations.** They are detached (`projectId` becomes `null`), not deleted.
+- **Deleting a project keeps its conversations but deletes its memories.** Conversations are detached (`projectId` becomes `null`), not deleted. Memories saved inside the project are deleted with it; global memories are untouched. Say so in the delete dialog.
 - **Refetch after `data: null`.** After attach or detach, refetch the conversation (`projectId`) and affected project(s) (`conversationCount`). After project deletion, refresh the project list and affected conversations; fetching the deleted project returns `404`.
 - **Instruction edits apply on the next message** in every conversation in the project.
 - **Membership decides what the assistant can recall.** In a project, the assistant recalls memories saved in that project plus global ones, and can search past conversations in that same project only. Moving a conversation changes this from its next message, which is worth one line in a move confirmation.
-- **Known issue:** memories saved inside a project are no longer recalled anywhere once the project is deleted. Do not promise in the delete dialog that they are kept.
 
 ## Errors
 

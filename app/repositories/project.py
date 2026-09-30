@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, or_, select, update
 from app.models.conversation import Conversation
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
 from app.models.project import Project, ProjectCustomAgent
+from app.models.user_memory import UserMemory
 from app.repositories.session_transport import RepositorySessionMixin
 from app.repositories.utils.pagination import Paginator
 
@@ -170,11 +171,15 @@ class ProjectRepository(RepositorySessionMixin):
             return project
 
     def soft_delete_and_detach(self, owner_id: UUID, project_id: UUID) -> bool:
-        """Soft-delete the project and release its conversations.
+        """Soft-delete the project, its memories, and release its conversations.
 
         Conversations survive as loose conversations. The detach is a hard
         write while the delete is soft, so restoring a project would restore
         it empty; there is no restore in this slice.
+
+        The project's memories are soft-deleted in the same transaction. A soft
+        delete never fires ``user_memories.project_id``'s ``ON DELETE SET NULL``,
+        and with the conversations detached nothing could recall them anyway.
         """
         with self.session_factory() as session:
             project = session.execute(
@@ -190,6 +195,11 @@ class ProjectRepository(RepositorySessionMixin):
                 update(Conversation)
                 .where(Conversation.project_id == project_id)
                 .values(project_id=None)
+            )
+            session.execute(
+                update(UserMemory)
+                .where(UserMemory.project_id == project_id, UserMemory.deleted_at.is_(None))
+                .values(deleted_at=func.now())
             )
             project.deleted_at = func.now()
             session.commit()

@@ -5966,7 +5966,7 @@ def render_project_view() -> None:
     if st.session_state.get("project_delete_pending_id") == project_id:
         st.warning(
             "Deleting this project detaches its conversations. "
-            "Project-specific memories will no longer be available."
+            "Memories saved in this project are deleted with it."
         )
         cancel_col, confirm_col = st.columns(2)
         with cancel_col:
