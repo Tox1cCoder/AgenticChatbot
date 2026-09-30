@@ -28,7 +28,6 @@ NO_RESPONSE_GENERATED = "No response generated"
 
 # === Error Messages ===
 ERROR_NO_RESPONSE = "Error: No response generated"
-ERROR_NO_RESPONSE_RESUME = "Error: No response generated after resume"
 ERROR_RESPONSE_AFTER_RESUME = "Error: No response after resuming"
 
 # === General Errors ===

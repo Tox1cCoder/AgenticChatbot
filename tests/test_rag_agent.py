@@ -1664,3 +1664,20 @@ def test_rag_system_prompt_has_compact_complex_query_policy_without_hardcoded_ph
     found_literals = [term for term in forbidden_literals if term in section_lower]
     assert not found_literals, f"RAG prompt contains hardcoded query phrases: {found_literals}"
     assert "Hard query strategy" not in AGENTIC_RAG_SYSTEM_PROMPT
+
+
+def test_get_status_reports_the_error_type_not_its_text(caplog):
+    """A health payload must not echo a connection error's hosts or credentials."""
+    agent = object.__new__(RAGAgent)
+    agent.collection_name = "documents"
+    agent.qdrant_client = MagicMock()
+    agent.qdrant_client.get_collections.side_effect = ConnectionError(
+        "connect to qdrant://admin:s3cret@10.0.0.5:6333 refused"
+    )
+
+    with caplog.at_level("ERROR", logger=rag_agent_module.logger.name):
+        status = agent.get_status()
+
+    assert status == {"status": "error", "error": "ConnectionError"}
+    assert "s3cret" not in str(status)
+    assert any(record.exc_info for record in caplog.records), "the detail stays in the log"

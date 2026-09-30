@@ -666,10 +666,6 @@ class CtxCapturingWorkflow:
         self.captured = current_usage_context()
         yield make_event("complete", sequence=0, data={"response": None})
 
-    async def resume(self, **_kwargs):
-        self.captured = current_usage_context()
-        return None
-
     async def resume_with_decisions_stream(self, **_kwargs):
         self.captured = current_usage_context()
         yield make_event("complete", sequence=0, data={"response": None})
@@ -773,21 +769,6 @@ async def test_execute_request_stream_can_close_from_another_task_context():
 
     assert [context.operation for context in captured] == ["workflow", "workflow"]
     assert current_usage_context().operation == "unknown"
-
-
-async def test_resume_workflow_rebuilds_ownership_from_arguments():
-    workflow = CtxCapturingWorkflow()
-    service = _ai_service(workflow, checkpointer=object())
-    user_id, conversation_id = uuid4(), uuid4()
-
-    await service.resume_workflow(conversation_id=conversation_id, user_id=user_id)
-
-    captured = workflow.captured
-    assert captured.user_id == user_id
-    assert captured.conversation_id == conversation_id
-    assert captured.operation == "workflow"
-    # The reserved assistant id is never used as a request-message FK on resume.
-    assert captured.request_message_id is None
 
 
 async def test_resume_interrupted_stream_binds_context_from_authenticated_args():

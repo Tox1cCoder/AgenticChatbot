@@ -25,15 +25,12 @@ class _Response:
 
 
 def _factory(response):
-    from app.ai.workflow.planning_execution import PlanningNodeFactory
-
-    factory = object.__new__(PlanningNodeFactory)
+    from tests.planning_graph_support import scripted_planning_node_factory
 
     async def call_model(_state):
         return response
 
-    factory._call_model = call_model
-    return factory
+    return scripted_planning_node_factory(call_model)
 
 
 @pytest.mark.asyncio

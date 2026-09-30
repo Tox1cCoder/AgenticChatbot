@@ -343,6 +343,11 @@ class SpecialistBuild:
     web_research_session: Any = None
 
 
+#: Builds the definition one custom-agent invocation runs from that request's
+#: own roster, or returns ``None`` when the agent is not attached to it.
+CustomDefinitionResolver = Callable[[SpecialistRequest], SpecialistDefinition | None]
+
+
 class SpecialistFactory:
     """Compiles and runs one specialist subgraph per invocation.
 
@@ -350,6 +355,13 @@ class SpecialistFactory:
     for its own sake: the prompt, tool set, model, and credentials are all
     scoped to one authenticated caller, so a shared instance would leak one
     user's execution scope into another's turn.
+
+    The same holds for definitions. The fixed ones are the base specialists;
+    a custom agent's definition belongs to one turn's roster and is resolved
+    from the request every time, never stored here. Storing it made every turn
+    share one mutable registry: a later turn ran an earlier turn's tools,
+    handoff targets, and instructions, and a Planning worker (which never
+    stored one) found none.
     """
 
     def __init__(
@@ -363,6 +375,7 @@ class SpecialistFactory:
         settings: Any = None,
         receipt_service: Any = None,
         web_research_service: Any = None,
+        custom_definition_resolver: CustomDefinitionResolver | None = None,
     ) -> None:
         self._definitions = dict(definitions)
         self._runtime_model_resolver = runtime_model_resolver
@@ -372,16 +385,25 @@ class SpecialistFactory:
         self._settings = settings
         self._receipt_service = receipt_service
         self._web_research_service = web_research_service
+        self._custom_definition_resolver = custom_definition_resolver
 
-    # -- registry --------------------------------------------------------
+    # -- resolution ------------------------------------------------------
 
-    def register(self, definition: SpecialistDefinition) -> None:
-        self._definitions[definition.agent_id] = definition
+    def definition_for(self, request: SpecialistRequest) -> SpecialistDefinition:
+        """The definition this request runs.
 
-    def definition_for(self, agent_id: str) -> SpecialistDefinition:
+        A custom agent's comes from the request's own roster, so an edited or
+        detached agent takes effect on the turn that sees it, and a resolver
+        answering for a different id is refused rather than trusted.
+        """
+        agent_id = request.agent_id
+        if agent_id.startswith(CUSTOM_AGENT_PREFIX):
+            resolver = self._custom_definition_resolver
+            definition = resolver(request) if resolver is not None else None
+            if definition is None or definition.agent_id != agent_id:
+                raise UnavailableSpecialist(f"custom agent {agent_id!r} is not attached")
+            return definition
         definition = self._definitions.get(agent_id)
-        if definition is None and agent_id.startswith(CUSTOM_AGENT_PREFIX):
-            definition = self._definitions.get(CUSTOM_AGENT_NODE)
         if definition is None:
             raise UnavailableSpecialist(f"no specialist definition for {agent_id!r}")
         return definition
@@ -390,7 +412,7 @@ class SpecialistFactory:
 
     async def invoke(self, request: SpecialistRequest) -> ResponseOutcome:
         """Run a specialist for a public turn and return a server-owned outcome."""
-        definition = self.definition_for(request.agent_id)
+        definition = self.definition_for(request)
         build = await self._build(definition, request)
 
         try:
@@ -500,7 +522,7 @@ class SpecialistFactory:
         tool_execution: ToolExecutionMiddleware | None = None
         web_research_session = None
         try:
-            definition = self.definition_for(request.agent_id)
+            definition = self.definition_for(request)
             # A delegated worker gets the same budget as a top-level turn: it
             # runs the same specialists through the same builder, so leaving it
             # out would have been the R1 gap one level down.

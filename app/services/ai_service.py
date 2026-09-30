@@ -24,7 +24,6 @@ from ..ai.workflow.errors import workflow_error, workflow_error_payload
 from ..core.config import settings
 from ..core.response_constants import (
     ERROR_NO_RESPONSE,
-    ERROR_NO_RESPONSE_RESUME,
     UNKNOWN_ERROR,
 )
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
@@ -328,40 +327,6 @@ class AIService:
             if callable(aclose):
                 with bind_usage_context(usage_context):
                     await aclose()
-
-    async def resume_workflow(
-        self,
-        conversation_id: UUID,
-        user_id: UUID,
-        user_input: str | None = None,
-    ) -> WorkflowResponse:
-        thread_id = str(conversation_id) if conversation_id and self.checkpointer else None
-
-        if not thread_id:
-            return self._build_error_response(
-                "Cannot resume: Checkpointing not enabled or conversation ID missing"
-            )
-
-        # Ownership is rebuilt from the authenticated arguments, never from
-        # checkpoint state.
-        resume_context = UsageContext(
-            user_id=_parse_uuid(user_id),
-            conversation_id=_parse_uuid(conversation_id),
-            correlation_id=thread_id,
-            operation="workflow",
-        )
-        with bind_usage_context(resume_context):
-            response = await self.workflow.resume(
-                thread_id=thread_id,
-                user_input=user_input,
-            )
-
-        if response:
-            normalized_response = self._to_service_response(response)
-            if normalized_response:
-                return normalized_response
-
-        return self._build_error_response(ERROR_NO_RESPONSE_RESUME)
 
     async def _map_workflow_stream(self, workflow_stream, *, emit_rich_items: bool = False):
         """Curate the workflow's canonical ``V3StreamEvent`` stream for the API.

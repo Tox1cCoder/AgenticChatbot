@@ -527,10 +527,12 @@ class RAGAgent(BaseAgent):
                 "embedding_dimension": self.embedding_dimension,
             }
         except Exception as e:
+            # The detail (hosts, paths, credentials in a connection string) goes
+            # to the operator log only; callers get the exception's type.
             logger.error("Error getting RAG agent status", exc_info=True)
             return {
                 "status": "error",
-                "error": str(e),
+                "error": type(e).__name__,
             }
 
     # === Agentic RAG Content Retrieval Methods ===

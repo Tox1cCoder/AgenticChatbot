@@ -18,6 +18,7 @@ from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
+from langgraph.managed import RemainingSteps
 
 from app.ai.schemas import AgentResponse, GraphContext
 from app.ai.workflow.contracts import (
@@ -162,6 +163,10 @@ class WorkflowState(TypedDict):
     carried_messages: NotRequired[list[Any] | None]
     carried_web_sources: NotRequired[list[dict[str, Any]] | None]
     workflow_error: NotRequired[WorkflowError | None]
+    # Supersteps this graph run has left before the recursion limit. Managed by
+    # LangGraph and never checkpointed. Planning reads it to answer while the
+    # run can still reach ``finalize``, instead of ending in a recursion error.
+    remaining_steps: NotRequired[RemainingSteps]
 
     # --- request scope ----------------------------------------------------
     conversation_id: NotRequired[str | None]

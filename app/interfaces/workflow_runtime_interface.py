@@ -26,11 +26,6 @@ class IWorkflowRuntime(ABC):
         pass
 
     @abstractmethod
-    async def resume(self, thread_id: str, user_input: str | None = None) -> Any:
-        """Resume a paused workflow thread."""
-        pass
-
-    @abstractmethod
     async def resume_with_decisions_stream(
         self,
         thread_id: str,

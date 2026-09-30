@@ -84,12 +84,6 @@
     "disposition": "workflow_stream"
   },
   {
-    "file": "app/ai/graph.py",
-    "function": "MultiAgentWorkflow.resume",
-    "call_chain": "self.graph.ainvoke",
-    "disposition": "workflow_stream"
-  },
-  {
     "file": "app/ai/image_generation/gemini.py",
     "function": "GeminiImageProvider.stream_generate",
     "call_chain": "self._client.aio.models.generate_content_stream",

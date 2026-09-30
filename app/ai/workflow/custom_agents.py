@@ -6,7 +6,7 @@ Methods are relocated verbatim; behavior is identical.
 from typing import Any
 
 from app.ai.agent_metadata import agent_identity, base_agent_capability
-from app.ai.agents.custom_agent import CustomAgent
+from app.ai.agents.custom_agent import CustomAgent, build_custom_specialist_definition
 from app.ai.custom_agent_runtime import build_custom_agent_runtime_spec, is_custom_runtime_id
 from app.ai.hand_off_tool import create_hand_off_tool
 from app.ai.schemas import GraphState, GraphStateView
@@ -169,21 +169,31 @@ class CustomAgentsMixin:
         state["context"] = context
 
     def _build_custom_agent(
-        self, state: GraphState, runtime_agent_id: str | None
+        self,
+        state: GraphState,
+        runtime_agent_id: str | None,
+        *,
+        allow_handoff: bool = True,
     ) -> CustomAgent | None:
         """Build a live CustomAgent from the workflow ``custom_agents`` state.
 
         Built fresh each invocation so edited configuration applies to future
         turns (live config). Returns ``None`` if the agent is not attached.
+        ``allow_handoff=False`` builds it with no handoff targets, so it gets
+        neither the ``hand_off`` tool nor the delegation prompt.
         """
         entry = GraphStateView(state).custom_agents().get(runtime_agent_id)
         if not entry:
             return None
         spec = build_custom_agent_runtime_spec(
             entry,
-            allowed_handoff_targets=self._custom_handoff_targets(state, runtime_agent_id),
-            handoff_target_descriptions=self._custom_handoff_target_descriptions(
-                state, runtime_agent_id
+            allowed_handoff_targets=(
+                self._custom_handoff_targets(state, runtime_agent_id) if allow_handoff else []
+            ),
+            handoff_target_descriptions=(
+                self._custom_handoff_target_descriptions(state, runtime_agent_id)
+                if allow_handoff
+                else {}
             ),
         )
         return CustomAgent(
@@ -191,6 +201,25 @@ class CustomAgentsMixin:
             runtime_model_resolver=self._runtime_model_resolver,
             recorder=self._model_usage_recorder,
         )
+
+    def _custom_specialist_definition(self, request: Any) -> Any | None:
+        """The definition one custom-agent invocation runs, from its own roster.
+
+        The specialist factory calls this per request instead of keeping a
+        registry, because the factory is shared by every turn. A public turn's
+        request carries the graph state; a Planning worker's carries the
+        parent's roster snapshot. A worker is built without handoff targets: it
+        returns a private result to Planning and never performs a parent-level
+        handoff.
+        """
+        if request.extras.get("worker"):
+            roster = {"custom_agents": request.extras.get("custom_agents") or {}}
+            agent = self._build_custom_agent(roster, request.agent_id, allow_handoff=False)
+        else:
+            agent = self._build_custom_agent(request.state, request.agent_id)
+        if agent is None:
+            return None
+        return build_custom_specialist_definition(agent)
 
     def _is_attached_custom_agent(self, state: GraphState, runtime_agent_id: str | None) -> bool:
         """True when ``runtime_agent_id`` is an attached custom agent in state."""

@@ -233,7 +233,18 @@ def make_continuation_pause_node(
         # An undecidable side effect is never rolled over automatically: the next
         # epoch mints new tool-call ids, so its receipts cannot dedupe a replay.
         # It takes the asking path, where the offer is blocked until reconciled.
-        if _rolls_its_own_epoch() and not payload.mutation_outcome_unknown:
+        #
+        # Nor is a hard limit. It means this graph run is out of supersteps
+        # (Planning records it when the recursion limit is about to fire), so
+        # an epoch rolled inside the same run would die as a recursion error.
+        # A human Continue resumes in a fresh run, which has its steps back.
+        # Read from the budget, not from the live step count, so the node takes
+        # the same branch when it re-executes on resume.
+        if (
+            _rolls_its_own_epoch()
+            and not payload.mutation_outcome_unknown
+            and payload.budget.get("exhausted_by") != "hard_limit"
+        ):
             # No interrupt at all. Emitting one would advertise a Continue that
             # nothing is waiting to redeem, and the turn would still have to
             # answer it itself.

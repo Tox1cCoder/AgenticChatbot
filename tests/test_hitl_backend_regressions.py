@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -77,60 +76,22 @@ async def _async_value(value):
     return value
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("pending_node", ["planning_worker", "rag_agent"])
-async def test_auto_resume_returns_followup_planning_or_rag_interrupt(pending_node):
-    workflow = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
-    workflow.checkpointer = object()
-    initial_snapshot = SimpleNamespace(
-        next=(pending_node,), tasks=(), interrupts=(), values={"messages": []}
-    )
-    followup_snapshot = _paused_snapshot(pending_node)
-    workflow.graph = SimpleNamespace(
-        aget_state=AsyncMock(side_effect=[initial_snapshot, followup_snapshot]),
-        ainvoke=AsyncMock(return_value={}),
-    )
-    workflow._build_graph_config = lambda _thread_id: {}
-    # A resume now hands the graph a runtime context built from the
-    # checkpointed values, because the transition resolver reads the *live*
-    # inventory from it. This stub is a bare `__new__` instance, so give it the
-    # collaborators that build requires.
-    workflow.agents = {"chat_agent": object(), pending_node: object()}
-    workflow.routing_service = object()
-    workflow.routing_context_builder = object()
-    expected = object()
-    workflow._build_interrupt_agent_response = lambda _snapshot, _thread_id, _conversation_id: (
-        expected
-    )
+def test_the_non_streaming_resume_chain_stays_deleted():
+    """No route called it, and it could not have worked.
 
-    assert await workflow.resume("thread-1", user_input="continue") is expected
-
-
-@pytest.mark.asyncio
-async def test_plain_resume_never_answers_a_pending_approval():
-    """``resume`` used to approve every tool call in the last AIMessage.
-
-    A gated tool may only run on a human decision, so a turn waiting on one is
-    refused and the graph is never invoked.
+    It resumed ``thread_id=str(conversation_id)``, but checkpoint threads are
+    per turn (``routing-v2:{conversation}:{turn}``), so it addressed a thread
+    that never exists. Resuming goes through the streaming path only.
     """
-    from langchain_core.messages import AIMessage
+    from app.interfaces.message_service_interface import IMessageService
+    from app.interfaces.workflow_runtime_interface import IWorkflowRuntime
+    from app.services.ai_service import AIService
 
-    workflow = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
-    workflow.checkpointer = object()
-    snapshot = _paused_snapshot("chat_agent")
-    snapshot.values["messages"] = [
-        AIMessage(content="", tool_calls=[{"id": "call-1", "name": "write", "args": {}}])
-    ]
-    workflow.graph = SimpleNamespace(
-        aget_state=AsyncMock(return_value=snapshot),
-        ainvoke=AsyncMock(return_value={}),
-    )
-    workflow._build_graph_config = lambda _thread_id: {}
-
-    with pytest.raises(ValueError, match="tool approval"):
-        await workflow.resume("thread-1")
-
-    workflow.graph.ainvoke.assert_not_awaited()
+    assert not hasattr(AIService, "resume_workflow")
+    assert not hasattr(MessageService, "resume_workflow")
+    assert not hasattr(IMessageService, "resume_workflow")
+    assert not hasattr(graph_module.MultiAgentWorkflow, "resume")
+    assert not hasattr(IWorkflowRuntime, "resume")
 
 
 def test_server_mcp_qualified_id_is_not_client_runtime_provenance():

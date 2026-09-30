@@ -77,13 +77,6 @@ class IMessageService(ABC):
         pass
 
     @abstractmethod
-    async def resume_workflow(
-        self, conversation_id: UUID, user_id: UUID, user_input: str | None = None
-    ) -> MessageRead:
-        """Resume a paused workflow and return the bot's response message"""
-        pass
-
-    @abstractmethod
     async def resume_message_creation_stream(
         self,
         thread_id: str,

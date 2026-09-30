@@ -3471,54 +3471,6 @@ class MessageService(IMessageService):
                 self.ai_service.invalidate_history_cache(conversation_id)
         return deleted
 
-    async def resume_workflow(
-        self,
-        conversation_id: UUID,
-        user_id: UUID,
-        user_input: str | None = None,
-    ) -> MessageRead:
-        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
-
-        bot_response = await self.ai_service.resume_workflow(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            user_input=user_input,
-        )
-
-        bot_response_content = extract_response_content(bot_response, NO_RESPONSE_GENERATED)
-        bot_response_content = finalize_article_content(bot_response, bot_response_content)
-
-        bot_metadata = build_bot_metadata(bot_response)
-        bot_response_content, bot_metadata = await self._externalize_remote_rich_images(
-            bot_response_content,
-            bot_metadata,
-            conversation_id,
-            user_id,
-        )
-        if self._sync_response_plan_state(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            bot_response=bot_response,
-            current_lifecycle=None,
-        ):
-            bot_metadata["todos_synced"] = True
-
-        bot_message = await self._acreate_bot_response_message(
-            conversation_id=conversation_id,
-            content=bot_response_content,
-            metadata=bot_metadata,
-        )
-        await self._mark_persisted_web_images(
-            bot_metadata, conversation_id=conversation_id, user_id=user_id
-        )
-
-        await self._compact_checkpoint_after_persist(
-            conversation_id=conversation_id,
-            thread_id=str(conversation_id),
-        )
-
-        return bot_message
-
     @staticmethod
     def _build_task_context_dict(task: Any | None) -> dict[str, Any] | None:
         if not task:

@@ -360,33 +360,6 @@ async def test_failed_message_persistence_does_not_mark_web_image_selected(monke
 
 
 @pytest.mark.asyncio
-async def test_resume_workflow_externalizes_before_message_create(monkeypatch):
-    reference_id = uuid4()
-    web_images = AsyncMock()
-    web_images.register.return_value = SimpleNamespace(id=reference_id)
-    service = _service(web_images)
-    service.conversation_validation_utils = SimpleNamespace(
-        validate_conversation_access=lambda *_args: None
-    )
-    response = SimpleNamespace(metadata={})
-    service.ai_service = SimpleNamespace(resume_workflow=AsyncMock(return_value=response))
-    service._sync_response_plan_state = Mock(return_value=False)
-    service._acreate_bot_response_message = AsyncMock(return_value="persisted")
-    service._compact_checkpoint_after_persist = AsyncMock()
-    body = f"Answer\n\n<!--rich:{IMAGE_ID}-->"
-    _patch_response_builders(monkeypatch, body, _metadata())
-
-    result = await service.resume_workflow(uuid4(), uuid4())
-
-    assert result == "persisted"
-    persisted = service._acreate_bot_response_message.await_args.kwargs
-    assert persisted["metadata"]["rich_items"][0]["payload"]["url"] == (
-        f"/web-images/{reference_id}"
-    )
-    web_images.mark_selected.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_completed_continuation_uses_the_normal_grounded_persistence_path(monkeypatch):
     reference_id = uuid4()
     web_images = AsyncMock()

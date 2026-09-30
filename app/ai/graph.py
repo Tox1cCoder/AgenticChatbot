@@ -35,7 +35,6 @@ from .agent_metadata import (
 )
 from .agents.canvas_agent import CanvasAgent, build_canvas_specialist_definition
 from .agents.chat_agent import ChatAgent, build_chat_specialist_definition
-from .agents.custom_agent import build_custom_specialist_definition
 from .agents.image_generator_agent import (
     ImageGeneratorAgent,
     build_image_generator_specialist_definition,
@@ -92,6 +91,7 @@ from .workflow.contracts import (
     WorkflowRoutingException,
 )
 from .workflow.custom_agents import CustomAgentsMixin
+from .workflow.execution_budget import ExecutionBudgetLimits
 from .workflow.graph_builder import build_workflow_graph
 from .workflow.inventory import CUSTOM_AGENT_NODE
 from .workflow.middleware import _stream_writer as _graph_stream_writer
@@ -342,6 +342,7 @@ class MultiAgentWorkflow(
             resolve_allowed_tools=self._planning_allowed_tools,
             apply_todo_actions=self._planning_apply_todo_actions,
             review_rubric=self._planning_review_rubric,
+            budget_limits=ExecutionBudgetLimits.from_settings(settings),
         )
 
         self.graph = self._build_graph()
@@ -1626,6 +1627,7 @@ class MultiAgentWorkflow(
             settings=settings,
             receipt_service=receipt_service,
             web_research_service=self._web_research_service,
+            custom_definition_resolver=self._custom_specialist_definition,
         )
 
     async def _specialist_request_for(self, node_name: str, state: GraphState) -> SpecialistRequest:
@@ -1736,16 +1738,13 @@ class MultiAgentWorkflow(
                 state, request, await self._invoke_rag_specialist(request, state)
             )
 
-        if node_name == CUSTOM_AGENT_NODE:
-            custom_agent = self._build_custom_agent(state, request.agent_id)
-            if custom_agent is None:
-                logger.warning(
-                    "custom_agent subgraph reached for unattached id '%s'", request.agent_id
-                )
-                raise ValueError(f"custom agent {request.agent_id} is not attached")
-            self._specialist_factory.register(build_custom_specialist_definition(custom_agent))
-
+        # A custom agent's definition is not registered here: the factory
+        # resolves it from this request (``_custom_specialist_definition``),
+        # because a definition stored on the shared factory outlived its turn.
         agent = self._resolve_runtime_agent(state, request.agent_id)
+        if node_name == CUSTOM_AGENT_NODE and agent is None:
+            logger.warning("custom_agent subgraph reached for unattached id '%s'", request.agent_id)
+            raise ValueError(f"custom agent {request.agent_id} is not attached")
         # Deferred tools loaded on an earlier turn live in the checkpoint, not
         # in process memory, so they have to be restored before the subgraph
         # resolves its tool set and persisted after it may have loaded more.
@@ -2103,48 +2102,6 @@ class MultiAgentWorkflow(
             agent_response = self._attach_planning_state_metadata(agent_response, final_state)
 
         return agent_response
-
-    async def resume(
-        self,
-        thread_id: str,
-        user_input: str | None = None,
-    ) -> AgentResponse | None:
-        if not self.checkpointer:
-            raise ValueError("Checkpointing is not enabled, cannot resume.")
-
-        config = self._build_graph_config(thread_id)
-        state_snapshot = await self.graph.aget_state(config)
-
-        # This path once answered a pending approval by approving every tool
-        # call in the last AIMessage. Only a human decision may release a
-        # gated tool, so an approval wait is refused here, never answered.
-        if pending_interrupt_payload(state_snapshot) is not None:
-            raise ValueError(
-                "Workflow is waiting on a tool approval; resume it with explicit decisions"
-            )
-
-        result = await self.graph.ainvoke(
-            Command(resume=user_input),
-            config=config,
-            context=self._resume_runtime_context(state_snapshot.values),
-        )
-
-        # Check for further interrupts
-        final_snapshot = await self.graph.aget_state(config)
-        interrupt_response = self._build_interrupt_agent_response(
-            final_snapshot,
-            thread_id,
-            final_snapshot.values.get("conversation_id"),
-        )
-        if interrupt_response:
-            return interrupt_response
-
-        response = self._finalized_response(result)
-        if not response:
-            final_state = (await self.graph.aget_state(config)).values
-            response = self._finalized_response(final_state)
-
-        return response
 
     async def resume_with_decisions_stream(
         self,

@@ -51,9 +51,14 @@ from app.ai.workflow.contracts import (
     WorkerResult,
     WorkerTask,
 )
+from app.ai.workflow.execution_budget import (
+    ExecutionBudgetAccountant,
+    ExecutionBudgetLimits,
+    ExecutionBudgetState,
+)
 from app.ai.workflow.inventory import RoutingInventory
 from app.ai.workflow.middleware import _stream_writer
-from app.ai.workflow.specialists import UnavailableSpecialist
+from app.ai.workflow.specialists import HARD_LIMIT_PARTIAL_TEXT, UnavailableSpecialist
 from app.core.rich_response import strip_inline_rich_markers
 from app.observability.routing import get_routing_metrics_recorder
 
@@ -698,6 +703,17 @@ WRITE_TODOS_TOOL_NAME = "write_todos"
 #: ``empty_public_content``.
 NOT_RUN_THIS_TURN = "not_run_this_turn"
 
+#: Supersteps a reserved answer still needs after the Planning model node that
+#: produced it: ``planning_package``, ``validate_output``, then
+#: ``continuation_pause`` or ``finalize``, and ``finalize``.
+PLANNING_ANSWER_STEPS = 4
+
+#: The longest way from one Planning model turn back to the next: a dispatch
+#: wave (``planning_dispatch``, ``planning_worker``, ``planning_collect``) and
+#: the model node itself. A turn that cannot afford one more round trip plus
+#: the answer path has to answer now.
+PLANNING_ROUND_TRIP_STEPS = 4
+
 
 class PlanningNodeFactory:
     """The six real outer-graph nodes that make up Planning.
@@ -722,6 +738,7 @@ class PlanningNodeFactory:
         resolve_allowed_tools: Callable[[str, Mapping[str, Any]], tuple[str, ...]],
         apply_todo_actions: Callable[[Mapping[str, Any], Sequence[dict[str, Any]]], Any],
         review_rubric: Callable[[Mapping[str, Any], list[dict[str, Any]]], Any] | None = None,
+        budget_limits: ExecutionBudgetLimits | None = None,
     ) -> None:
         self._call_model = call_model
         self._worker_runtime = worker_runtime
@@ -730,6 +747,10 @@ class PlanningNodeFactory:
         self._resolve_allowed_tools = resolve_allowed_tools
         self._apply_todo_actions = apply_todo_actions
         self._review_rubric = review_rubric
+        # The same per-epoch ladder every specialist runs on. ``None`` reads
+        # the declared defaults, which is what a settings object lacking the
+        # fields would give the specialists too.
+        self._budget_limits = budget_limits or ExecutionBudgetLimits.from_settings(None)
 
     # -- topology ---------------------------------------------------------
 
@@ -768,14 +789,60 @@ class PlanningNodeFactory:
         never executed by the common tool pipeline, so nothing it says can
         reach a provider or a credential -- the server reads the proposal,
         validates it in full, and owns every task that results.
+
+        Every call is counted on the shared execution budget, carried in
+        ``execution_budget`` across Planning's nodes. When the epoch's model
+        calls run out, or the graph run is about to run out of supersteps, this
+        call is the reserved answer: tool-free, and routed to packaging. That
+        is what bounds a model that keeps proposing calls Planning cannot run;
+        before, only the recursion limit did, and the turn died as an error.
         """
-        response = await self._call_model(state)
+        accountant = self._accountant(state)
+        accountant.note_model_call()
+        if _out_of_steps(state) and accountant.state.exhausted_by != "hard_limit":
+            accountant.note_hard_limit()
+        forced = accountant.state.forced_synthesis
+
+        response = await self._call_model(_forced_synthesis_state(state) if forced else state)
         content = str(getattr(getattr(response, "message", None), "content", "") or "")
         tool_calls = [
             dict(call)
             for call in (getattr(getattr(response, "message", None), "tool_calls", None) or [])
         ]
+        budget = accountant.state.model_dump(mode="json")
 
+        if forced:
+            return _reserved_answer(content, tool_calls, budget)
+        command = await self._decide(state, content, tool_calls, response)
+        return Command(
+            graph=command.graph,
+            update={**dict(command.update or {}), "execution_budget": budget},
+            goto=command.goto,
+        )
+
+    def _accountant(self, state: Mapping[str, Any]) -> ExecutionBudgetAccountant:
+        """This epoch's accountant, resumed from what earlier Planning nodes spent.
+
+        ``continuation_pause`` clears the budget when it opens the next epoch,
+        so an absent one is a fresh epoch rather than an empty quota.
+        """
+        carried = state.get("execution_budget")
+        budget_state: ExecutionBudgetState | None = None
+        if isinstance(carried, Mapping) and carried:
+            try:
+                budget_state = ExecutionBudgetState.model_validate(dict(carried))
+            except ValidationError:
+                logger.warning("Ignored an unreadable carried execution budget in Planning")
+        return ExecutionBudgetAccountant(limits=self._budget_limits, state=budget_state)
+
+    async def _decide(
+        self,
+        state: Mapping[str, Any],
+        content: str,
+        tool_calls: list[dict[str, Any]],
+        response: Any,
+    ) -> Command:
+        """Route one unforced model turn by what it asked for."""
         if not tool_calls:
             if not content.strip():
                 # The turn ends here with nothing to publish, and until this
@@ -1180,6 +1247,56 @@ class PlanningNodeFactory:
 # ----------------------------------------------------------------------
 # node helpers
 # ----------------------------------------------------------------------
+
+
+def _out_of_steps(state: Mapping[str, Any]) -> bool:
+    """Whether this graph run can no longer afford another Planning round.
+
+    ``remaining_steps`` is LangGraph's managed count for this run. It is absent
+    when a node is called directly, which is not a reason to force an answer.
+    """
+    remaining = state.get("remaining_steps")
+    if not isinstance(remaining, int) or isinstance(remaining, bool):
+        return False
+    return remaining < PLANNING_ROUND_TRIP_STEPS + PLANNING_ANSWER_STEPS
+
+
+def _forced_synthesis_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    """The state the reserved answer call is made from.
+
+    ``force_final_response`` is the context flag the model collaborator already
+    honours: it binds no tools, adds the budget notice to the prompt, and drops
+    any tool call the model returns anyway. A copy, so the flag never reaches
+    checkpointed state and cannot force a later epoch.
+    """
+    context = dict(state.get("context") or {})
+    context["force_final_response"] = True
+    context["tool_budget"] = {"scope": "planning"}
+    return {**dict(state), "context": context}
+
+
+def _reserved_answer(content: str, tool_calls: Sequence[Any], budget: dict[str, Any]) -> Command:
+    """Package the reserved answer call, whatever the model returned.
+
+    A tool call here is dropped, not answered: it is left off the recorded
+    message, so no call is stranded without its result. A model that still
+    said nothing gets the server-owned partial statement, because the turn has
+    to answer and continuing it resumes from the evidence already gathered.
+    """
+    if tool_calls:
+        logger.warning(
+            "Planning's reserved answer call returned %d tool call(s); dropping them",
+            len(tool_calls),
+        )
+    text = content if content.strip() else HARD_LIMIT_PARTIAL_TEXT
+    return Command(
+        update={
+            "messages": [AIMessage(content=text)],
+            "execution_phase": "executing",
+            "execution_budget": budget,
+        },
+        goto="planning_package",
+    )
 
 
 def _control_message(call: Mapping[str, Any], code: str) -> ToolMessage:
