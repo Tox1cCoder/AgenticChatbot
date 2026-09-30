@@ -6,6 +6,8 @@ import streamlit as st  # type: ignore
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from app.ui.sidecar_session import SidecarSession
+
 API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8100")
 REQUEST_TIMEOUT = (5, 30)
 
@@ -26,7 +28,8 @@ def get_http_session() -> requests.Session:
         pool_connections=10,
         pool_maxsize=20,
     )
-    session = requests.Session()
+    # Sends the sidecar's launch token (X-Kani-Client) and re-reads it after a restart.
+    session = SidecarSession(API_BASE_URL)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session

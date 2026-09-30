@@ -50,6 +50,7 @@ from app.ui.rag_artifacts import (
     RAGDocumentListing,
     extract_rag_artifact_views,
 )
+from app.ui.sidecar_session import SidecarSession
 from app.ui.stream_markdown import (
     normalize_display_markdown_text,
     normalize_stream_markdown_text,
@@ -3361,7 +3362,8 @@ def get_http_session() -> requests.Session:
         pool_connections=20,
         pool_maxsize=40,
     )
-    session = requests.Session()
+    # Sends the sidecar's launch token (X-Kani-Client) and re-reads it after a restart.
+    session = SidecarSession(API_BASE_URL)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session

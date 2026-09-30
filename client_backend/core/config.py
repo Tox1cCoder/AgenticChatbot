@@ -277,6 +277,14 @@ class ClientSettings(BaseSettings):
         ],
         description="Explicit browser origins allowed to call the sidecar. Never '*'.",
     )
+    trust_checks_enabled: bool = Field(
+        default=True,
+        description=(
+            "Require the per-launch client token (X-Kani-Client), a loopback Host and an "
+            "allowed Origin on every request. The test suite turns this off; turning it "
+            "off on a real install lets any local process or web page drive the sidecar."
+        ),
+    )
     allow_non_loopback_backend: bool = Field(
         default=False,
         description="Opt in to binding the sidecar off loopback. Exposes local tools.",

@@ -121,6 +121,48 @@ def test_a_clean_workspace_is_granted_and_usable(scratch):
 
 
 @needs_account
+def test_account_cannot_read_the_launch_token(scratch, monkeypatch):
+    """The token that admits /auth/restore must stay out of the account's reach.
+
+    Written under ProgramData on purpose: every user inherits read access there,
+    so only the file's own owner-only ACL can be what keeps the account out. The
+    sibling file with inherited permissions shows the probe does read what it can.
+    """
+    from client_backend.core import launch_token
+    from client_backend.core.config import client_settings
+
+    profile = scratch / "profile"
+    monkeypatch.setattr(client_settings, "profile_root", str(profile))
+    token = launch_token.issue_launch_token()
+    try:
+        readable = profile / "inherited.txt"
+        readable.write_text("inherited-permissions", encoding="utf-8")
+
+        control = _as_sandbox("cmd", "/c", "type", str(readable), cwd=scratch)
+        assert control.returncode == 0, control.stderr
+        assert "inherited-permissions" in control.stdout
+
+        probe = _as_sandbox("cmd", "/c", "type", str(launch_token.launch_token_path()), cwd=scratch)
+        assert probe.returncode != 0
+        assert token not in probe.stdout
+    finally:
+        launch_token.revoke_launch_token()
+
+
+@needs_account
+def test_account_cannot_read_the_real_profile_signing_secret(scratch):
+    """The profile root itself is closed to the account: it holds the local-session
+    signing secret and stored credentials. Output is never shown: it is a secret."""
+    secret = REAL_PROFILE / ".local_session_secret"
+    if not secret.is_file():
+        pytest.skip("no local session secret in the real profile")
+
+    probe = _as_sandbox("cmd", "/c", "type", str(secret), cwd=scratch)
+
+    assert probe.returncode != 0, "the sandbox account read the local session secret"
+
+
+@needs_account
 def test_account_can_write_only_after_grant_and_cannot_change_runtime(scratch):
     from client_backend.services.sandbox.runtime import ensure_runtime_root, ensure_workspace_access
 

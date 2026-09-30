@@ -6,6 +6,7 @@ import types
 from typing import Any
 
 import pytest
+import requests
 
 
 class _SessionState(dict):
@@ -168,3 +169,116 @@ def test_sidebar_sign_out_clears_project_state(monkeypatch):
     assert streamlit_stub.session_state.projects_list == []
     assert streamlit_stub.session_state.projects_loaded is False
     assert streamlit_stub.session_state.current_project_id is None
+
+
+# ── Launch token: demo.py proves it is the sidecar's own client ────────────
+
+
+class _RecordingAdapter(requests.adapters.BaseAdapter):
+    """Answers each send with the next queued status and records the headers."""
+
+    def __init__(self, statuses: list[int]) -> None:
+        super().__init__()
+        self.statuses = list(statuses)
+        self.sent: list[dict[str, str]] = []
+        self.bodies: list[bytes | str | None] = []
+
+    def send(self, request, **_kwargs):
+        self.sent.append(dict(request.headers))
+        self.bodies.append(request.body)
+        response = requests.Response()
+        response.status_code = self.statuses.pop(0) if self.statuses else 200
+        response.url = request.url
+        response.request = request
+        response._content = b"{}"
+        return response
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.fixture
+def token_file(monkeypatch, tmp_path):
+    from client_backend.core import launch_token
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path))
+    return launch_token.launch_token_path()
+
+
+def _session_with(demo, adapter: _RecordingAdapter):
+    session = demo.get_http_session()
+    session.mount(demo.API_BASE_URL, adapter)
+    return session
+
+
+def test_demo_session_sends_the_launch_token_to_the_sidecar(monkeypatch, token_file):
+    demo, _ = _import_demo_with_ui_stubs(monkeypatch)
+    token_file.write_text("launch-one", encoding="utf-8")
+    adapter = _RecordingAdapter([200])
+
+    response = _session_with(demo, adapter).get(f"{demo.API_BASE_URL}/mcp/sandbox")
+
+    assert response.status_code == 200
+    assert adapter.sent[0]["X-Kani-Client"] == "launch-one"
+
+
+def test_demo_session_rereads_a_rotated_token_and_retries_once(monkeypatch, token_file):
+    demo, _ = _import_demo_with_ui_stubs(monkeypatch)
+    token_file.write_text("launch-one", encoding="utf-8")
+    adapter = _RecordingAdapter([200, 401, 200])
+    session = _session_with(demo, adapter)
+    session.get(f"{demo.API_BASE_URL}/health")
+
+    token_file.write_text("launch-two", encoding="utf-8")  # the sidecar restarted
+    response = session.post(f"{demo.API_BASE_URL}/auth/login", json={"email": "a"})
+
+    assert response.status_code == 200
+    assert [sent["X-Kani-Client"] for sent in adapter.sent] == [
+        "launch-one",
+        "launch-one",
+        "launch-two",
+    ]
+    assert adapter.bodies[1] == adapter.bodies[2]
+
+
+def test_demo_session_does_not_retry_a_401_with_an_unchanged_token(monkeypatch, token_file):
+    """An expired bearer session is a real 401; resending would not change it."""
+
+    demo, _ = _import_demo_with_ui_stubs(monkeypatch)
+    token_file.write_text("launch-one", encoding="utf-8")
+    adapter = _RecordingAdapter([401, 401])
+
+    response = _session_with(demo, adapter).get(f"{demo.API_BASE_URL}/mcp/sandbox")
+
+    assert response.status_code == 401
+    assert len(adapter.sent) == 1
+
+
+def test_demo_session_without_a_token_file_sends_no_header(monkeypatch, token_file):
+    demo, _ = _import_demo_with_ui_stubs(monkeypatch)
+    adapter = _RecordingAdapter([200])
+
+    _session_with(demo, adapter).get(f"{demo.API_BASE_URL}/health")
+
+    assert "X-Kani-Client" not in adapter.sent[0]
+
+
+def test_demo_session_never_sends_the_token_to_another_host(monkeypatch, token_file):
+    demo, _ = _import_demo_with_ui_stubs(monkeypatch)
+    token_file.write_text("launch-one", encoding="utf-8")
+    adapter = _RecordingAdapter([200])
+    session = demo.get_http_session()
+    session.mount("https://elsewhere.example", adapter)
+
+    session.get("https://elsewhere.example/x", headers={"X-Kani-Client": "leak"})
+
+    assert "X-Kani-Client" not in adapter.sent[0]
+
+
+def test_upload_support_uses_the_sidecar_session(monkeypatch):
+    _import_demo_with_ui_stubs(monkeypatch)
+    import upload_support
+    from app.ui.sidecar_session import SidecarSession
+
+    assert isinstance(upload_support.get_http_session(), SidecarSession)

@@ -29,7 +29,13 @@ from client_backend.api.skill_errors import register_skill_exception_handlers
 from client_backend.api.skills import router as skills_router
 from client_backend.api.web_images import router as web_images_router
 from client_backend.core.config import client_settings, initialize_client_environment
+from client_backend.core.launch_token import (
+    issue_launch_token,
+    launch_token_path,
+    revoke_launch_token,
+)
 from client_backend.core.logging import get_logger, setup_logging
+from client_backend.core.request_trust import HostAllowlistMiddleware, RequestTrustMiddleware
 from client_backend.services.local_mcp_manager import shutdown_mcp_manager
 from client_backend.services.local_skills_registry import initialize_skills_registry
 from client_backend.services.runtime_bridge import get_runtime_bridge
@@ -53,6 +59,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Server API URL: {client_settings.server_api_base_url}")
     logger.info(f"Profile root: {client_settings.profile_root}")
     logger.info(f"Device name: {client_settings.device_name}")
+    _issue_launch_token()
 
     # Startup tasks
     try:
@@ -64,6 +71,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown tasks
     logger.info("Shutting down Client Backend...")
+    revoke_launch_token()
     # Installation tasks are stopped before the bridge so a half-finished install
     # cannot try to publish a catalog through a closing connection. Their receipts
     # stay on disk and are reconciled by recovery on the next start.
@@ -79,6 +87,23 @@ async def lifespan(app: FastAPI):
     await close_server_client()
 
 
+def _issue_launch_token() -> None:
+    """Rotate the client token for this launch; without one, guarded routes answer 503."""
+
+    if not client_settings.trust_checks_enabled:
+        logger.warning(
+            "CLIENT_TRUST_CHECKS_ENABLED is false: the sidecar accepts requests without the "
+            "launch token, from any Host and any Origin. Only the test suite should run so."
+        )
+        return
+    try:
+        issue_launch_token()
+    except Exception as exc:  # noqa: BLE001 - fail closed: log, serve 503, keep /health up
+        logger.error("Could not write the launch token; guarded routes will answer 503: %s", exc)
+        return
+    logger.info(f"Launch token written to {launch_token_path()}")
+
+
 def create_app() -> FastAPI:
     """
     Create and configure the FastAPI application.
@@ -89,6 +114,11 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+
+    # Middleware added later wraps the earlier ones. Order, outermost first: Host
+    # allowlist, CORS (answers preflights and adds CORS headers to refusals, so a
+    # browser can read why it was refused), then the Origin and launch-token checks.
+    app.add_middleware(RequestTrustMiddleware)
 
     # CORS middleware. Origins are explicit: this process executes local shell
     # commands, filesystem operations, and skill runtimes, so any page must not
@@ -102,6 +132,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
         allow_private_network=True,
     )
+    app.add_middleware(HostAllowlistMiddleware)
 
     compatibility_routers = [
         health_router,
