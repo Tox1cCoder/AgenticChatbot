@@ -83,6 +83,20 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "app\\core\\mcp_adapter_utils.py") -
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\schemas\\runtime_protocol.py") -Destination (Join-Path $bundleRoot "app\\schemas\\runtime_protocol.py") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\services\\widget_contract.py") -Destination (Join-Path $bundleRoot "app\\services\\widget_contract.py") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\services\\widget_runtime.py") -Destination (Join-Path $bundleRoot "app\\services\\widget_runtime.py") -Force
+# client_backend/api/projects.py documents its routes with the server's own
+# project schemas; these are that import closure.
+foreach ($relative in @(
+    "schemas\\custom_agent.py",
+    "schemas\\project.py",
+    "schemas\\responses\\api_response.py",
+    "schemas\\responses\\paginated_response.py",
+    "repositories\\utils\\pagination.py",
+    "utils\\case_conversion.py"
+)) {
+    $target = Join-Path $bundleRoot "app\\$relative"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot "app\\$relative") -Destination $target -Force
+}
 Copy-Item -LiteralPath (Join-Path $repoRoot ".env.client.example") -Destination (Join-Path $bundleRoot ".env.client.example") -Force
 
 Remove-CacheDirectories -Root $bundleRoot
@@ -104,6 +118,9 @@ Write-BundleFile -Path (Join-Path $bundleRoot "app\\ai\\__init__.py") -Content $
 Write-BundleFile -Path (Join-Path $bundleRoot "app\\core\\__init__.py") -Content $emptyInitContent
 Write-BundleFile -Path (Join-Path $bundleRoot "app\\schemas\\__init__.py") -Content $emptyInitContent
 Write-BundleFile -Path (Join-Path $bundleRoot "app\\services\\__init__.py") -Content $emptyInitContent
+foreach ($package in @("schemas\\responses", "repositories", "repositories\\utils", "utils")) {
+    Write-BundleFile -Path (Join-Path $bundleRoot "app\\$package\\__init__.py") -Content $emptyInitContent
+}
 
 if (Test-Path $bundleZipPath) {
     Remove-Item -LiteralPath $bundleZipPath -Force

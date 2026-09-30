@@ -118,6 +118,19 @@ def build(output_root: Path) -> tuple[Path, Path]:
         REPO_ROOT / "app" / "services" / "widget_runtime.py",
         app_dir / "services" / "widget_runtime.py",
     )
+    # client_backend/api/projects.py documents its routes with the server's own
+    # project schemas; these are that import closure.
+    for relative in (
+        ("schemas", "custom_agent.py"),
+        ("schemas", "project.py"),
+        ("schemas", "responses", "api_response.py"),
+        ("schemas", "responses", "paginated_response.py"),
+        ("repositories", "utils", "pagination.py"),
+        ("utils", "case_conversion.py"),
+    ):
+        target = app_dir.joinpath(*relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / "app" / Path(*relative), target)
     shutil.copy2(
         REPO_ROOT / ".env.client.example",
         bundle_root / ".env.client.example",
@@ -131,6 +144,13 @@ def build(output_root: Path) -> tuple[Path, Path]:
     (app_dir / "core" / "__init__.py").write_text("", encoding="utf-8")
     (app_dir / "schemas" / "__init__.py").write_text("", encoding="utf-8")
     (app_dir / "services" / "__init__.py").write_text("", encoding="utf-8")
+    for package in (
+        ("schemas", "responses"),
+        ("repositories",),
+        ("repositories", "utils"),
+        ("utils",),
+    ):
+        (app_dir.joinpath(*package) / "__init__.py").write_text("", encoding="utf-8")
     if bundle_zip.exists():
         bundle_zip.unlink()
     with zipfile.ZipFile(bundle_zip, "w", zipfile.ZIP_DEFLATED) as archive:

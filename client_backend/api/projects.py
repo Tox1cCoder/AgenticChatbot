@@ -14,7 +14,7 @@ from app.schemas.project import (
     ProjectRead,
     ProjectUpdate,
 )
-from app.schemas.responses import ApiResponse
+from app.schemas.responses.api_response import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from client_backend.api.common import proxy_server_request
 from client_backend.core.auth import require_local_session
