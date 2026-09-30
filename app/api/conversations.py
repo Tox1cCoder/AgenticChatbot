@@ -52,7 +52,7 @@ async def generate_conversation_title(
     status_code=status.HTTP_201_CREATED,
 )
 @AppAutoInjector.auto_inject()
-async def create_conversation(
+def create_conversation(
     conversation_data: ConversationCreate,
     conversation_service: IConversationService,
     user_id: UUID,
@@ -64,7 +64,7 @@ async def create_conversation(
 
 @router.get("/{conversation_id}", response_model=ApiResponse[ConversationRead])
 @AppAutoInjector.auto_inject()
-async def get_conversation(
+def get_conversation(
     conversation_id: UUID,
     conversation_service: IConversationService,
     user_id: UUID,
@@ -76,7 +76,7 @@ async def get_conversation(
 
 @router.get("/", response_model=PaginatedApiResponse[ConversationRead])
 @AppAutoInjector.auto_inject()
-async def get_conversations(
+def get_conversations(
     conversation_service: IConversationService,
     project_service: ProjectService,
     user_id: UUID,
@@ -126,7 +126,7 @@ async def get_conversations(
     response_model=PaginatedApiResponse[MessageRead],
 )
 @AppAutoInjector.auto_inject()
-async def get_conversation_messages(
+def get_conversation_messages(
     conversation_id: UUID,
     message_service: IMessageService,
     user_id: UUID,
@@ -151,7 +151,7 @@ async def get_conversation_messages(
 
 @router.patch("/{conversation_id}", response_model=ApiResponse[ConversationRead])
 @AppAutoInjector.auto_inject()
-async def update_conversation(
+def update_conversation(
     conversation_id: UUID,
     conversation_data: ConversationUpdate,
     conversation_service: IConversationService,

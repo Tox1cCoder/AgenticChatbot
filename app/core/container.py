@@ -631,6 +631,14 @@ class Container(containers.DeclarativeContainer):
         checkpoint_mgr = container.checkpoint_manager()
         return checkpoint_mgr.get_checkpointer()
 
+    def _get_conversation_checkpoint_manager():
+        # With checkpoints disabled startup never opens the manager and shutdown
+        # never closes it, so a delete must not open its pool lazily. The
+        # retention sweep deletes the threads of soft-deleted conversations.
+        if not settings.enable_langgraph_checkpoints:
+            return None
+        return container.checkpoint_manager()
+
     # AI service with conditional checkpoint injection
     def _create_ai_service():
         checkpointer = Container._get_checkpointer()
@@ -680,7 +688,7 @@ class Container(containers.DeclarativeContainer):
         user_validation_utils=user_validation_utils,
         conversation_validation_utils=conversation_validation_utils,
         ai_service=ai_service,
-        checkpoint_manager=checkpoint_manager,
+        checkpoint_manager=providers.Callable(_get_conversation_checkpoint_manager),
         project_service=project_service,
     )
 

@@ -799,7 +799,8 @@ it, its rollback setting, and whether reindexing is required — including the
 three ordered defects that currently block the grounded-answer gate. Do not
 enable any of these flags without reading it first.
 
-Document lifecycle events (`UPLOAD_STARTED`, `PROCESSING_STARTED`, `PROCESSING_COMPLETED`, `PROCESSING_FAILED`, `DELETED`) are published on an in-process event bus and logged by [`DocumentEventLogger`](app/services/document_event_listener.py).
+Document processing outcomes are recorded on the document row (`status`) and in
+the Celery worker's log.
 
 ---
 
@@ -1584,7 +1585,6 @@ pytest tests/client_backend/test_live_server_integration.py
 - **LangSmith** — set `LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` to stream traces to `LANGSMITH_PROJECT` (default `sample-chatbot`). The config module translates these into the `LANGCHAIN_*` variables LangChain expects.
 - **Centralised exceptions** — `register_exception_handlers` wires `APIException` → structured JSON with `{status, error_code, message, details}`.
 - **Health endpoints** — see above.
-- **Event bus** — `app.core.events.get_event_bus()` publishes `DocumentEvent` values consumed by `DocumentEventLogger`.
 
 ---
 

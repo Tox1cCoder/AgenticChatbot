@@ -56,6 +56,19 @@ GEMINI_PREFERRED_MODEL_ORDER = (
 )
 
 
+KEY_PREVIEW_MASK = "***"
+_KEY_PREVIEW_CHARS = 4
+# Below this length the last four characters would be most of the key.
+_KEY_PREVIEW_MIN_KEY_LENGTH = 12
+
+
+def key_preview(api_key: str | None) -> str:
+    """Return the key's last four characters for recognising it, or a mask."""
+    if not api_key or len(api_key) < _KEY_PREVIEW_MIN_KEY_LENGTH:
+        return KEY_PREVIEW_MASK
+    return f"...{api_key[-_KEY_PREVIEW_CHARS:]}"
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -313,12 +326,18 @@ class ProviderService:
             }
 
             if include_encrypted:
-                encrypted = provider.api_key_encrypted
-                config["key_preview"] = f"...{encrypted[-4:]}" if len(encrypted) >= 4 else "***"
+                config["key_preview"] = self._stored_key_preview(provider)
 
             result.append(config)
 
         return result
+
+    def _stored_key_preview(self, provider: ModelProvider) -> str:
+        """Preview the decrypted key; the ciphertext's tail identifies nothing."""
+        try:
+            return key_preview(self._decrypt_key(provider.api_key_encrypted))
+        except ValueError:
+            return KEY_PREVIEW_MASK
 
     def delete_provider(self, user_id: UUID, provider_type: str) -> bool:
         provider_type = self._normalize_provider_type(provider_type)

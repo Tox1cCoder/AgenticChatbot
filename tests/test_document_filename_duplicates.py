@@ -73,7 +73,6 @@ def test_service_rejects_duplicate_filename_before_create():
 
     service.document_validation_utils = MagicMock()
     service.index_service = MagicMock()
-    service._event_bus = MagicMock()
 
     with pytest.raises(DuplicateDocumentFilenameError):
         asyncio.run(
@@ -105,9 +104,6 @@ def test_replacing_a_failed_upload_also_removes_its_index():
     async def _validate_upload(filename, file_size):
         return {"valid": True}
 
-    async def _emit(*_args):
-        return None
-
     service.processing_service = MagicMock(validate_upload_file=_validate_upload)
     service.repository = MagicMock()
     service.repository.get_by_conversation_and_filename_key.return_value = failed
@@ -115,7 +111,6 @@ def test_replacing_a_failed_upload_also_removes_its_index():
     service.repository.delete.return_value = True
     service.repository.create.side_effect = RuntimeError("stop after the replace")
     service.index_service = MagicMock()
-    service._event_bus = SimpleNamespace(emit=_emit)
 
     with pytest.raises(RuntimeError, match="stop after the replace"):
         asyncio.run(

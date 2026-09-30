@@ -13,9 +13,9 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.concurrency import run_in_threadpool
 
 from app.core.dependency_injection import AppAutoInjector
-from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.core.exceptions.resource import ResourceNotFoundException
 from app.core.exceptions.validation import (
     DuplicateDocumentFilenameError,
@@ -51,7 +51,6 @@ async def _stage_create_and_enqueue_document(
     *,
     document_service: IDocumentService,
     document_processing_service: DocumentProcessingService,
-    current_user_id: UUID,
     file: UploadFile,
     conversation_id: UUID,
 ) -> DocumentUploadFileResult:
@@ -104,22 +103,6 @@ async def _stage_create_and_enqueue_document(
             if updated is not None:
                 document = updated
 
-        try:
-            await get_event_bus().emit(
-                DocumentEvent.UPLOAD_STARTED,
-                DocumentEventData(
-                    document_id=document.id,
-                    conversation_id=conversation_id,
-                    user_id=current_user_id,
-                    filename=file.filename,
-                    status="PROCESSING",
-                    metadata={"task_id": task_info.get("task_id")},
-                ),
-            )
-        except Exception:
-            # Best-effort telemetry: the document is created and queued either way.
-            logger.debug("Event emission failed for UPLOAD_STARTED", exc_info=True)
-
         return DocumentUploadFileResult(
             filename=display_name,
             status=DocumentUploadFileStatus.ACCEPTED,
@@ -171,7 +154,6 @@ async def _upload_documents_batch(
     *,
     document_service: IDocumentService,
     document_processing_service: DocumentProcessingService,
-    current_user_id: UUID,
     files: Iterable[UploadFile],
     conversation_id: UUID,
 ) -> DocumentBatchUploadResponse:
@@ -212,7 +194,6 @@ async def _upload_documents_batch(
         result = await _stage_create_and_enqueue_document(
             document_service=document_service,
             document_processing_service=document_processing_service,
-            current_user_id=current_user_id,
             file=upload,
             conversation_id=conversation_id,
         )
@@ -281,7 +262,6 @@ async def upload_document(
 
     Delegates to ``_upload_documents_batch`` so single- and multi-file
     paths share staging, duplicate detection, and enqueue behavior.
-    Emits the same ``DocumentEvent.UPLOAD_STARTED`` event as before.
     """
 
     ConversationValidationUtils(
@@ -291,7 +271,6 @@ async def upload_document(
     upload_result = await _upload_documents_batch(
         document_service=document_service,
         document_processing_service=document_processing_service,
-        current_user_id=current_user_id,
         files=[file],
         conversation_id=conversation_id,
     )
@@ -358,7 +337,6 @@ async def upload_documents(
     upload_result = await _upload_documents_batch(
         document_service=document_service,
         document_processing_service=document_processing_service,
-        current_user_id=current_user_id,
         files=files,
         conversation_id=conversation_id,
     )
@@ -368,6 +346,14 @@ async def upload_documents(
         message=_message_for_batch_result(upload_result),
         data=upload_result.model_dump(),
     )
+
+
+def _require_owned_task_document(session_factory: Any, user_id: UUID, task_id: str) -> None:
+    document = DocumentRepository(session_factory).get_by_processing_task_id(task_id)
+    if document is None:
+        raise ResourceNotFoundException(detail="Task not found")
+    # Raises AuthorizationException unless the caller owns the document's conversation.
+    DocumentValidationUtils(session_factory).validate_document_access(user_id, document.id)
 
 
 @router.get("/task/{task_id}", response_model=ApiResponse[dict[str, Any]])
@@ -384,14 +370,13 @@ async def get_task_status(
     associated with this task may query its status. A task with no linked
     document has no owner to check, so it is not found for everyone.
     """
-    doc_repo = DocumentRepository(document_service.repository.session_factory)
-    document = doc_repo.get_by_processing_task_id(task_id)
-    if document is None:
-        raise ResourceNotFoundException(detail="Task not found")
-    # Raises AuthorizationException unless the caller owns the document's conversation.
-    DocumentValidationUtils(
-        document_service.repository.session_factory
-    ).validate_document_access(current_user_id, document.id)
+    # The ownership lookup is sync DB code; the threadpool keeps it off the loop.
+    await run_in_threadpool(
+        _require_owned_task_document,
+        document_service.repository.session_factory,
+        current_user_id,
+        task_id,
+    )
 
     task_status = await document_processing_service.get_processing_status(task_id)
 

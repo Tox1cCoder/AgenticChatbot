@@ -23,7 +23,6 @@ from PIL import Image
 from pydantic import ValidationError
 
 from app.core.config import Settings
-from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.repositories.document_image import DocumentImageRepository
 from app.schemas.document_image import DocumentImageCreate, ImageCaptionSections
 from app.services.document_blocks import NormalizedBlock
@@ -78,7 +77,6 @@ class DocumentProcessingService:
         )
         self.collection_name = settings.qdrant_collection_name
         self.embedding_dimension = settings.rag_embedding_dimension
-        self._event_bus = get_event_bus()
         self._mineru_output_path = None
         self.gemini_client = None
         self._init_gemini()
@@ -220,19 +218,6 @@ class DocumentProcessingService:
             except Exception:
                 pass
             raise
-
-        try:
-            await self._event_bus.emit(
-                DocumentEvent.PROCESSING_STARTED,
-                DocumentEventData(
-                    document_id=UUID(document_id),
-                    filename=filename,
-                    status="PROCESSING",
-                    metadata={"task_id": task.id},
-                ),
-            )
-        except Exception:
-            logger.debug("Event emission failed for PROCESSING_STARTED", exc_info=True)
 
         return {
             "success": True,

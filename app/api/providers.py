@@ -14,7 +14,7 @@ from app.core.dependency_injection import AppAutoInjector
 from app.models.user import User
 from app.schemas.responses import ApiResponse
 from app.services.model_config_service import ModelConfigService
-from app.services.provider_service import ProviderService
+from app.services.provider_service import KEY_PREVIEW_MASK, ProviderService, key_preview
 from app.utils.api_error_helpers import translate_service_errors
 from app.utils.case_conversion import to_camel_case as to_camel
 
@@ -53,7 +53,8 @@ class ProviderResponse(CamelModel):
     created_at: str
     provider_metadata: dict[str, Any]
     key_preview: str = Field(
-        default="***", description="Last 4 characters of encrypted key for verification"
+        default=KEY_PREVIEW_MASK,
+        description="Last 4 characters of the API key, so the user can recognise it",
     )
 
 
@@ -129,11 +130,7 @@ async def add_provider(
             is_default=provider.is_default,
             created_at=provider.created_at.isoformat(),
             provider_metadata=provider.provider_metadata or {},
-            key_preview=(
-                f"...{provider.api_key_encrypted[-4:]}"
-                if len(provider.api_key_encrypted) >= 4
-                else "***"
-            ),
+            key_preview=key_preview(request.api_key),
         )
 
         return ApiResponse(
@@ -153,7 +150,7 @@ async def list_providers(
     List all provider configurations for the current user.
 
     Returns provider information without decrypted API keys.
-    Shows last 4 characters of encrypted key for verification.
+    Shows the last 4 characters of each API key so the user can recognise it.
     """
     with translate_service_errors(
         action="list providers",
@@ -171,7 +168,7 @@ async def list_providers(
                 is_default=p["is_default"],
                 created_at=p["created_at"],
                 provider_metadata=p.get("provider_metadata", {}),
-                key_preview=p.get("key_preview", "***"),
+                key_preview=p.get("key_preview", KEY_PREVIEW_MASK),
             )
             for p in providers
         ]

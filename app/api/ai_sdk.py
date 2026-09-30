@@ -311,7 +311,7 @@ def _build_ui_message_stream_response(
     ),
 )
 @AppAutoInjector.auto_inject()
-async def create_conversation_ai_sdk(
+def create_conversation_ai_sdk(
     conversation_data: ConversationCreate,
     conversation_service: IConversationService,
     current_user_id: UUID,
@@ -331,7 +331,7 @@ async def create_conversation_ai_sdk(
     ),
 )
 @AppAutoInjector.auto_inject()
-async def get_conversations_ai_sdk(
+def get_conversations_ai_sdk(
     conversation_service: IConversationService,
     current_user_id: UUID,
     pagination: ConversationPaginationParams,
@@ -360,7 +360,7 @@ async def get_conversations_ai_sdk(
     ),
 )
 @AppAutoInjector.auto_inject()
-async def get_conversation_ai_sdk(
+def get_conversation_ai_sdk(
     conversation_id: UUID,
     conversation_service: IConversationService,
     current_user_id: UUID,
@@ -381,7 +381,7 @@ async def get_conversation_ai_sdk(
     ),
 )
 @AppAutoInjector.auto_inject()
-async def update_conversation_ai_sdk(
+def update_conversation_ai_sdk(
     conversation_id: UUID,
     conversation_data: ConversationUpdate,
     conversation_service: IConversationService,
@@ -430,7 +430,7 @@ def delete_conversation_ai_sdk(
     ),
 )
 @AppAutoInjector.auto_inject()
-async def get_conversation_messages_ai_sdk(
+def get_conversation_messages_ai_sdk(
     conversation_id: UUID,
     message_service: IMessageService,
     current_user_id: UUID,

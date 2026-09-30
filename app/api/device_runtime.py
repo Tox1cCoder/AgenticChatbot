@@ -150,7 +150,16 @@ class DeviceRuntimeGateway:
             logger.warning(f"Tool result missing request_id from device {self.device_id}")
             return
 
-        await get_client_runtime_store().publish_result(payload)
+        accepted = await get_client_runtime_store().publish_result(
+            payload, device_id=self.device_id
+        )
+        if not accepted:
+            logger.warning(
+                "Refused tool result %s from device %s: the request was not dispatched to it",
+                request_id,
+                self.device_id,
+            )
+            return
 
         await self.send_message(WebSocketMessage.ack(request_id))
 

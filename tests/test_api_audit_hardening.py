@@ -29,6 +29,8 @@ from app.api.feedback import router as feedback_router
 from app.core.auth import get_current_user, get_current_user_id, get_refresh_token_user_id
 from app.core.container import Container, setup_auto_injection
 from app.core.exceptions import AuthorizationException, ResourceNotFoundException
+from app.repositories.utils.pagination import Paginator
+from app.schemas.conversation import ConversationRead
 from app.schemas.feedback import FeedbackRead
 from app.services.jwt_service import JwtService
 from app.services.widget_runtime import WidgetTokenService
@@ -335,19 +337,103 @@ def test_a_task_with_no_linked_document_is_not_found(monkeypatch):
     assert status_calls == []
 
 
+class _ThreadRecordingServices:
+    """Conversation and message services that record the thread each call ran on."""
+
+    def __init__(self) -> None:
+        self.threads: list[int] = []
+
+    def _ran(self) -> None:
+        self.threads.append(threading.get_ident())
+
+    @staticmethod
+    def _conversation(owner_id: UUID) -> ConversationRead:
+        now = datetime.now(timezone.utc)
+        return ConversationRead(
+            id=uuid4(),
+            created_at=now,
+            updated_at=now,
+            deleted_at=None,
+            owner_id=owner_id,
+            title="Plans",
+        )
+
+    def create_conversation(self, _data, user_id):
+        self._ran()
+        return self._conversation(user_id)
+
+    def get_by_id_for_user(self, _conversation_id, user_id):
+        self._ran()
+        return self._conversation(user_id)
+
+    def update_conversation(self, _conversation_id, user_id, _data):
+        self._ran()
+        return self._conversation(user_id)
+
+    def delete_conversation(self, _conversation_id, _user_id):
+        self._ran()
+        return True
+
+    def get_by_user_id(self, _user_id, **_kwargs):
+        self._ran()
+        return Paginator.create([], 0, 1, 10)
+
+    def get_conversation_messages(self, _conversation_id, _user_id, **_kwargs):
+        self._ran()
+        return Paginator.create([], 0, 1, 10)
+
+
+_CREATED = "Conversation created successfully"
+_RETRIEVED = "Conversation retrieved successfully"
+_LISTED = "Conversations retrieved successfully"
+_UPDATED = "Conversation updated successfully"
+_DELETED = "Conversation deleted successfully"
+
+
 @pytest.mark.parametrize(
-    "path", ["/conversations/{id}", "/ai/conversations/{id}"], ids=["canonical", "ai_sdk"]
+    ("method", "path", "body", "status_code", "message"),
+    [
+        ("post", "/conversations/", {"title": "Plans"}, 201, _CREATED),
+        ("get", "/conversations/{id}", None, 200, _RETRIEVED),
+        ("get", "/conversations/", None, 200, _LISTED),
+        (
+            "get",
+            "/conversations/{id}/messages",
+            None,
+            200,
+            "Conversation messages retrieved successfully",
+        ),
+        ("patch", "/conversations/{id}", {"title": "Renamed"}, 200, _UPDATED),
+        ("delete", "/conversations/{id}", None, 200, _DELETED),
+        ("post", "/ai/conversations", {"title": "Plans"}, 201, _CREATED),
+        ("get", "/ai/conversations", None, 200, _LISTED),
+        ("get", "/ai/conversations/{id}", None, 200, _RETRIEVED),
+        ("patch", "/ai/conversations/{id}", {"title": "Renamed"}, 200, _UPDATED),
+        ("delete", "/ai/conversations/{id}", None, 200, _DELETED),
+        ("get", "/ai/conversations/{id}/messages", None, 200, "Messages retrieved successfully"),
+    ],
+    ids=[
+        "create",
+        "get",
+        "list",
+        "messages",
+        "update",
+        "delete",
+        "ai_create",
+        "ai_list",
+        "ai_get",
+        "ai_update",
+        "ai_delete",
+        "ai_messages",
+    ],
 )
-def test_deleting_a_conversation_runs_the_sync_service_off_the_event_loop(path):
+def test_conversation_routes_run_the_sync_service_off_the_event_loop(
+    method, path, body, status_code, message
+):
     """An ``async def`` route calling sync DB code blocked every other request."""
     from app.api.ai_sdk import router as ai_sdk_router
 
-    service_threads: list[int] = []
-
-    class _Conversations:
-        def delete_conversation(self, conversation_id, user_id):
-            service_threads.append(threading.get_ident())
-
+    services = _ThreadRecordingServices()
     app = FastAPI()
     register_exception_handlers(app)
     app.include_router(conversations_router)
@@ -359,16 +445,69 @@ def test_deleting_a_conversation_runs_the_sync_service_off_the_event_loop(path):
         return {"ident": threading.get_ident()}
 
     with (
-        Container.conversation_service.override(providers.Object(_Conversations())),
+        Container.conversation_service.override(providers.Object(services)),
+        Container.message_service.override(providers.Object(services)),
+        Container.project_service.override(providers.Object(SimpleNamespace())),
         TestClient(app) as client,
     ):
         loop_ident = client.get("/loop-thread").json()["ident"]
-        response = client.delete(path.format(id=uuid4()))
+        response = client.request(method, path.format(id=uuid4()), json=body)
+
+    assert response.status_code == status_code
+    assert response.json()["message"] == message
+    assert len(services.threads) == 1
+    assert services.threads[0] != loop_ident
+
+
+def test_task_status_runs_its_ownership_lookup_off_the_event_loop(monkeypatch):
+    import app.api.documents as documents_api
+
+    lookup_threads: list[int] = []
+    document = SimpleNamespace(id=uuid4())
+
+    class _Documents:
+        def __init__(self, _session_factory):
+            pass
+
+        def get_by_processing_task_id(self, _task_id):
+            lookup_threads.append(threading.get_ident())
+            return document
+
+    class _Access:
+        def __init__(self, _session_factory):
+            pass
+
+        def validate_document_access(self, _user_id, _document_id):
+            lookup_threads.append(threading.get_ident())
+
+    class _Processing:
+        async def get_processing_status(self, task_id):
+            return {"task_id": task_id, "status": "SUCCESS"}
+
+    monkeypatch.setattr(documents_api, "DocumentRepository", _Documents)
+    monkeypatch.setattr(documents_api, "DocumentValidationUtils", _Access)
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(documents_router)
+    app.dependency_overrides[get_current_user_id] = lambda: uuid4()
+
+    @app.get("/loop-thread")
+    async def loop_thread():
+        return {"ident": threading.get_ident()}
+
+    document_service = SimpleNamespace(repository=SimpleNamespace(session_factory=None))
+    with (
+        Container.document_service.override(providers.Object(document_service)),
+        Container.document_processing_service.override(providers.Object(_Processing())),
+        TestClient(app) as client,
+    ):
+        loop_ident = client.get("/loop-thread").json()["ident"]
+        response = client.get("/documents/task/t-1")
 
     assert response.status_code == 200
-    assert response.json()["message"] == "Conversation deleted successfully"
-    assert len(service_threads) == 1
-    assert service_threads[0] != loop_ident
+    assert response.json()["data"] == {"task_id": "t-1", "status": "SUCCESS"}
+    assert len(lookup_threads) == 2
+    assert loop_ident not in lookup_threads
 
 
 @pytest.mark.parametrize("latest", [-1, 101])

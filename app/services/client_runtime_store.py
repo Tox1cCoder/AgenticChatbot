@@ -249,7 +249,18 @@ class BaseClientRuntimeStore:
     ) -> DeviceQueueMessage | None:
         raise NotImplementedError
 
-    async def publish_result(self, result: ToolDispatchResult) -> None:
+    async def publish_result(
+        self,
+        result: ToolDispatchResult,
+        *,
+        device_id: UUID | None = None,
+    ) -> bool:
+        """Hand a result to the dispatcher waiting on its request.
+
+        ``device_id`` names the device that sent the result. It is accepted
+        only when the request was dispatched to that device; any other device
+        is refused (returns False). Server-generated results pass no device.
+        """
         raise NotImplementedError
 
     async def fail_pending_requests(self, device_id: UUID, reason: str) -> None:
@@ -448,11 +459,20 @@ class InMemoryClientRuntimeStore(BaseClientRuntimeStore):
                 if message.request_id not in self._withdrawn_request_ids:
                     return message
 
-    async def publish_result(self, result: ToolDispatchResult) -> None:
+    async def publish_result(
+        self,
+        result: ToolDispatchResult,
+        *,
+        device_id: UUID | None = None,
+    ) -> bool:
         with self._lock:
+            bound_device_key = self._request_devices.get(result.request_id)
+            if device_id is not None and bound_device_key != self._device_key(device_id):
+                return False
             future = self._result_futures.get(result.request_id)
         if future is not None and not future.done():
             future.set_result(result)
+        return True
 
     async def fail_pending_requests(self, device_id: UUID, reason: str) -> None:
         device_key = self._device_key(device_id)
@@ -761,10 +781,17 @@ class RedisClientRuntimeStore(BaseClientRuntimeStore):
                 return message
         return None
 
-    async def publish_result(self, result: ToolDispatchResult) -> None:
+    async def publish_result(
+        self,
+        result: ToolDispatchResult,
+        *,
+        device_id: UUID | None = None,
+    ) -> bool:
         key = self._result_queue_key(result.request_id)
         request_device_key = self._request_device_key(result.request_id)
         device_id_value = await self._async.get(request_device_key)
+        if device_id is not None and device_id_value != str(device_id):
+            return False
 
         pipeline = self._async.pipeline()
         pipeline.rpush(key, result.model_dump_json())
@@ -776,6 +803,7 @@ class RedisClientRuntimeStore(BaseClientRuntimeStore):
             )
         pipeline.delete(request_device_key)
         await pipeline.execute()
+        return True
 
     async def fail_pending_requests(self, device_id: UUID, reason: str) -> None:
         request_ids = await self._async.smembers(self._pending_requests_key(device_id))

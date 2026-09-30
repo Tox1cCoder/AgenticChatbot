@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import logging
 import os
 import shutil
@@ -14,7 +13,6 @@ from celery import Task
 
 from app.core.config import get_settings
 from app.core.container import get_container
-from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.database.session import SessionLocal
 from app.models.conversation import Conversation
 from app.models.document import Document
@@ -64,26 +62,6 @@ def _mark_document(document_repo: DocumentRepository, document_id: str, status: 
         document_repo.update(UUID(document_id), update_data)
     except Exception as exc:
         logger.error(f"Failed to update document {document_id} status to {status}: {exc}")
-
-
-def _emit_failed(document_id: str, filename: str, task_id: str, exc: Exception):
-    try:
-        _run_async(
-            get_event_bus().emit(
-                DocumentEvent.PROCESSING_FAILED,
-                DocumentEventData(
-                    document_id=UUID(document_id),
-                    filename=filename,
-                    status="FAILED",
-                    error=str(exc),
-                    metadata={"task_id": task_id},
-                ),
-            )
-        )
-    except Exception:
-        logger.warning(
-            "Failed to emit PROCESSING_FAILED event for document %s", document_id, exc_info=True
-        )
 
 
 def _cleanup_parse_artifacts(temp_file_path: str, document_id: str):
@@ -240,9 +218,8 @@ def parse_document_task(self, document_id: str, temp_file_path: str, filename: s
             )
             raise self.retry(exc=exc, countdown=retry_delay) from exc
 
-        # Terminal failure — only mark FAILED and emit event when not retrying
+        # Terminal failure — only mark FAILED when not retrying
         _mark_document(document_repo, document_id, DocumentStatus.FAILED)
-        _emit_failed(document_id, filename, task_id, exc)
         logger.error(
             f"Document {document_id} ('{filename}') parse failed after {self.max_retries} attempts"
         )
@@ -396,7 +373,6 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
 
         # Mark document READY
         _mark_document(document_repo, document_id, DocumentStatus.READY)
-        updated_document = document_repo.get_by_id(UUID(document_id))
 
         total_s = time.monotonic() - index_start
         index_timings["total_s"] = total_s
@@ -421,33 +397,6 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             timings["upsert_s"],
             timings["total_s"],
         )
-
-        # Emit PROCESSING_COMPLETED event
-        with contextlib.suppress(Exception):
-            _run_async(
-                get_event_bus().emit(
-                    DocumentEvent.PROCESSING_COMPLETED,
-                    DocumentEventData(
-                        document_id=UUID(document_id),
-                        conversation_id=(
-                            updated_document.conversation_id if updated_document else None
-                        ),
-                        filename=filename,
-                        status="READY",
-                        metadata={
-                            "chunks_created": len(built_chunks),
-                            "chunks_stored": len(persisted_chunks),
-                            "images_stored": images_stored,
-                            "processing_time": timings["total_s"],
-                            "task_id": task_id,
-                            "artifact_id": artifact_id,
-                            "parse_artifact_id": artifact_id,
-                            "stage": "index",
-                            "timings": timings,
-                        },
-                    ),
-                )
-            )
 
         return {
             "success": True,
@@ -480,10 +429,9 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             # Reload artifact from disk on retry — never re-parse
             raise self.retry(exc=exc, countdown=retry_delay) from exc
 
-        # Terminal failure — only mark FAILED and emit event when not retrying
+        # Terminal failure — only mark FAILED when not retrying
         if document_id:
             _mark_document(document_repo, document_id, DocumentStatus.FAILED)
-            _emit_failed(document_id, filename or artifact_id, task_id, exc)
         else:
             logger.error(
                 "index_document_task: cannot mark document FAILED — document_id unknown "

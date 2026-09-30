@@ -2,7 +2,6 @@ import logging
 import unicodedata
 from uuid import UUID
 
-from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.core.exceptions.validation import (
     DuplicateDocumentFilenameError,
     FileValidationError,
@@ -55,7 +54,6 @@ class DocumentService(IDocumentService):
         self.processing_service = document_processing_service
         self.document_validation_utils = document_validation_utils
         self.index_service = document_index_service
-        self._event_bus = get_event_bus()
 
     async def create_document(self, document_data: DocumentCreate) -> DocumentResponse:
         document = self.repository.create(document_data)
@@ -99,20 +97,7 @@ class DocumentService(IDocumentService):
                 exc_info=True,
             )
 
-        deleted = self.repository.delete(document_id)
-
-        if deleted:
-            await self._event_bus.emit(
-                DocumentEvent.DELETED,
-                DocumentEventData(
-                    document_id=document_id,
-                    conversation_id=existing.conversation_id,
-                    filename=existing.filename,
-                    status="DELETED",
-                ),
-            )
-
-        return deleted
+        return self.repository.delete(document_id)
 
     async def get_documents_by_conversation(
         self, conversation_id: UUID, page: int = 1, page_size: int = 20

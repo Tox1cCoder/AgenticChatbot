@@ -42,12 +42,10 @@ from app.core.container import (
     get_container,
     setup_auto_injection,
 )
-from app.core.events import DocumentEvent, get_event_bus
 from app.database.migrations import upgrade_database
 from app.database.session import SessionLocal, get_engine
 from app.services.client_device_service import periodic_session_cleanup_task
 from app.services.client_runtime_store import close_client_runtime_store
-from app.services.document_event_listener import DocumentEventLogger
 from app.utils.exception_handler import register_exception_handlers
 from app.workers.celery_app import celery_app
 
@@ -450,18 +448,6 @@ def create_app() -> FastAPI:
     app.include_router(chat_images_router)
     app.include_router(web_images_router)
     app.include_router(widgets_router)
-
-    # Initialize and register event listeners
-    event_bus = get_event_bus()
-    doc_logger = DocumentEventLogger()
-    for evt in [
-        DocumentEvent.UPLOAD_STARTED,
-        DocumentEvent.PROCESSING_STARTED,
-        DocumentEvent.PROCESSING_COMPLETED,
-        DocumentEvent.PROCESSING_FAILED,
-        DocumentEvent.DELETED,
-    ]:
-        event_bus.register_listener(evt, doc_logger)
 
     return app
 

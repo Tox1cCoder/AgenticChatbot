@@ -10,7 +10,6 @@ All external I/O (DB, Qdrant, filesystem beyond tmp_path) is mocked.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +19,6 @@ from uuid import UUID, uuid4
 import pytest
 from PIL import Image
 
-from app.core.events import DocumentEvent
 from app.schemas.document import DocumentStatus
 from app.services.document_parse_service import DocumentParseService, ParseResult
 from app.services.document_processing_service import DocumentProcessingService
@@ -102,13 +100,6 @@ def _make_mock_doc_repo(monkeypatch, document: SimpleNamespace):
         lambda _session_factory: mock_repo,
     )
     return mock_repo
-
-
-def _make_mock_event_bus(monkeypatch):
-    mock_bus = MagicMock()
-    mock_bus.emit = AsyncMock()
-    monkeypatch.setattr("app.workers.document_processor.get_event_bus", lambda: mock_bus)
-    return mock_bus
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +288,6 @@ def test_parse_task_returns_artifact_id_string(tmp_path, monkeypatch):
     fake_doc = _fake_document(document_id)
     _make_mock_doc_repo(monkeypatch, fake_doc)
     _make_mock_session_local(monkeypatch)
-    _make_mock_event_bus(monkeypatch)
 
     fake_artifact = _fake_artifact(document_id, artifact_id=artifact_id)
     fake_parse_result = _minimal_parse_result(n_chunks=2)
@@ -351,7 +341,6 @@ def test_index_task_accepts_artifact_id_from_parse(tmp_path, monkeypatch):
 
     _make_mock_session_local(monkeypatch)
     mock_doc_repo = _make_mock_doc_repo(monkeypatch, fake_doc)
-    _make_mock_event_bus(monkeypatch)
 
     mock_artifact_repo = MagicMock()
     mock_artifact_repo.get_by_id.return_value = fake_artifact
@@ -422,7 +411,6 @@ def test_index_task_records_the_caption_stage_metric(tmp_path, monkeypatch):
 
     _make_mock_session_local(monkeypatch)
     _make_mock_doc_repo(monkeypatch, fake_doc)
-    _make_mock_event_bus(monkeypatch)
 
     mock_artifact_repo = MagicMock()
     mock_artifact_repo.get_by_id.return_value = fake_artifact
@@ -499,7 +487,6 @@ def test_index_task_persists_images_before_calling_index_document(tmp_path, monk
 
     _make_mock_session_local(monkeypatch)
     _make_mock_doc_repo(monkeypatch, fake_doc)
-    _make_mock_event_bus(monkeypatch)
 
     mock_artifact_repo = MagicMock()
     mock_artifact_repo.get_by_id.return_value = fake_artifact
@@ -589,7 +576,6 @@ def test_index_retry_does_not_call_parse_document(tmp_path, monkeypatch):
 
     _make_mock_session_local(monkeypatch)
     _make_mock_doc_repo(monkeypatch, fake_doc)
-    _make_mock_event_bus(monkeypatch)
 
     mock_artifact_repo = MagicMock()
     mock_artifact_repo.get_by_id.return_value = fake_artifact
@@ -641,7 +627,6 @@ def test_parse_task_marks_document_failed_on_value_error(tmp_path, monkeypatch):
 
     _make_mock_session_local(monkeypatch)
     mock_doc_repo = _make_mock_doc_repo(monkeypatch, fake_doc)
-    _make_mock_event_bus(monkeypatch)
 
     mock_container = MagicMock()
     mock_container.document_parse_artifact_repository.return_value = MagicMock()
@@ -679,7 +664,6 @@ def test_parse_task_marks_document_failed_on_value_error(tmp_path, monkeypatch):
 def test_index_task_marks_document_failed_when_artifact_not_found(monkeypatch):
     """index_document_task raises ValueError when artifact_id is unknown."""
     _make_mock_session_local(monkeypatch)
-    _make_mock_event_bus(monkeypatch)
 
     # doc_repo.get_by_id is not expected to be called (document_id unknown at that point)
     mock_doc_repo = MagicMock()
@@ -708,42 +692,6 @@ def test_index_task_marks_document_failed_when_artifact_not_found(monkeypatch):
 
     assert task_raised, "Task should have raised when artifact is not found"
     assert isinstance(raised_exc, ValueError)
-
-
-# ---------------------------------------------------------------------------
-# Test 4c — parse_document_task emits PROCESSING_FAILED event on terminal error
-# ---------------------------------------------------------------------------
-
-
-def test_parse_task_emits_failed_event_on_terminal_error(tmp_path, monkeypatch):
-    """Terminal parse failure must emit DocumentEvent.PROCESSING_FAILED."""
-    document_id = str(uuid4())
-    fake_doc = _fake_document(document_id)
-
-    _make_mock_session_local(monkeypatch)
-    _make_mock_doc_repo(monkeypatch, fake_doc)
-    mock_bus = _make_mock_event_bus(monkeypatch)
-
-    mock_container = MagicMock()
-    mock_container.document_parse_artifact_repository.return_value = MagicMock()
-    mock_container.document_chunk_builder.return_value = MagicMock()
-    monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
-
-    nonexistent = str(tmp_path / "nope.txt")
-
-    with contextlib.suppress(Exception):
-        celery_app.tasks["app.workers.document_processor.parse_document_task"].apply(
-            args=[document_id, nonexistent, "nope.txt"]
-        )
-
-    # _emit_failed calls get_event_bus().emit(DocumentEvent.PROCESSING_FAILED, ...)
-    # It runs in a _run_async() block so the AsyncMock is awaited.
-    assert mock_bus.emit.called, "event_bus.emit was never called"
-    first_call_args = mock_bus.emit.call_args_list[0]
-    emitted_event = first_call_args.args[0]
-    assert emitted_event == DocumentEvent.PROCESSING_FAILED, (
-        f"Expected PROCESSING_FAILED, got: {emitted_event}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +726,6 @@ def test_small_documents_complete_independently_of_large(tmp_path, monkeypatch):
         parse_result = _minimal_parse_result(n_chunks=1)
         return artifact, parse_result
 
-    _make_mock_event_bus(monkeypatch)
 
     for doc_id in all_doc_ids:
         artifact, parse_result = _make_per_doc_context(doc_id)

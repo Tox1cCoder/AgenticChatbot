@@ -2,6 +2,7 @@
 
 import logging
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from app.ai.mcp_integration import MCPManager, compute_catalog_version
 from app.core.exceptions.mcp import (
@@ -15,18 +16,44 @@ logger = logging.getLogger(__name__)
 _REDACTED = "***"
 
 
+def _redact_url(url: str) -> str:
+    """Mask query values and a userinfo password; parameter names stay visible.
+
+    A query part with no ``=`` is masked whole, since it may be the key itself.
+    A URL that cannot be parsed is masked whole.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return _REDACTED
+    netloc = parts.netloc
+    if parts.password is not None:
+        userinfo, host = netloc.rsplit("@", 1)
+        netloc = f"{userinfo.split(':', 1)[0]}:{_REDACTED}@{host}"
+    query = "&".join(
+        f"{segment.split('=', 1)[0]}={_REDACTED}" if "=" in segment else _REDACTED
+        for segment in parts.query.split("&")
+        if segment
+    )
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+
+
 def redact_server_config(config: dict[str, Any]) -> dict[str, Any]:
     """A server config safe to return to a client.
 
-    ``env`` and ``headers`` hold API keys and bearer tokens. Every signed-in
-    user can list servers, so their values are masked; the keys stay, so a
-    client can still see which variables a server is configured with.
+    ``env`` and ``headers`` hold API keys and bearer tokens, and an HTTP
+    server's ``url`` can carry one in its query string. Every signed-in user
+    can list servers, so their values are masked; the names stay, so a client
+    can still see which variables and parameters a server is configured with.
     """
     redacted = dict(config)
     for field in ("env", "headers"):
         values = redacted.get(field)
         if isinstance(values, dict):
             redacted[field] = dict.fromkeys(values, _REDACTED)
+    url = redacted.get("url")
+    if isinstance(url, str) and url:
+        redacted["url"] = _redact_url(url)
     return redacted
 
 

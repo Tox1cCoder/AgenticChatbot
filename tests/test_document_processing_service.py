@@ -45,7 +45,6 @@ def _build_service(tmp_path: Path) -> DocumentProcessingService:
     service.document_image_repository = MagicMock()
     service.document_index_service = None
     service.celery_app = MagicMock()
-    service._event_bus = MagicMock()
     service.gemini_client = None
     service._mineru_output_path = None
     service.recorder = None

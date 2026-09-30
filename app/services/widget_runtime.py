@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 MAX_WIDGET_STATE_BYTES = 256 * 1024  # 256 KB
 DEFAULT_WIDGET_TTL_SECONDS = 3600  # 1 hour
 WIDGET_TOKEN_TTL_SECONDS = 300  # 5 minutes
+# A Redis write that keeps losing its WATCH race gives up instead of spinning.
+_WATCH_RETRY_LIMIT = 10
 
 
 class WidgetStatus(str, Enum):
@@ -80,6 +82,13 @@ class WidgetRecord:
             "version": self.version,
             "connection_endpoint": f"/widgets/{self.widget_id}/connection",
         }
+
+
+def _kept_changing(widget_id: str) -> ValueError:
+    return ValueError(
+        f"Widget {widget_id} kept changing during the write "
+        f"({_WATCH_RETRY_LIMIT} attempts); try again"
+    )
 
 
 def _validate_state_size(state: dict[str, Any]) -> None:
@@ -364,7 +373,7 @@ class RedisWidgetStore:
 
         def _do_update():
             with self._redis.pipeline() as pipe:
-                while True:
+                for _attempt in range(_WATCH_RETRY_LIMIT):
                     try:
                         pipe.watch(key)
                         data = pipe.hgetall(key)
@@ -403,6 +412,7 @@ class RedisWidgetStore:
                         return self._to_record(data)
                     except self._watch_error:
                         continue
+            raise _kept_changing(widget_id)
 
         return await asyncio.to_thread(_do_update)
 
@@ -415,7 +425,7 @@ class RedisWidgetStore:
 
         def _do_patch():
             with self._redis.pipeline() as pipe:
-                while True:
+                for _attempt in range(_WATCH_RETRY_LIMIT):
                     try:
                         pipe.watch(key)
                         data = pipe.hgetall(key)
@@ -451,6 +461,7 @@ class RedisWidgetStore:
                         return self._to_record(data)
                     except self._watch_error:
                         continue
+            raise _kept_changing(widget_id)
 
         return await asyncio.to_thread(_do_patch)
 
@@ -458,30 +469,39 @@ class RedisWidgetStore:
         key = self._key(widget_id)
 
         def _do_close():
-            data = self._redis.hgetall(key)
-            if not data:
-                raise KeyError(f"Widget {widget_id} not found")
-            now = time.time()
-            current_version = int(data.get("version", 0))
-            ttl_seconds = int(data.get("ttl_seconds", DEFAULT_WIDGET_TTL_SECONDS))
-            session_key = self._session_key(str(data.get("session_id", "")))
-            self._redis.hset(
-                key,
-                mapping={
-                    "status": WidgetStatus.CLOSED.value,
-                    "version": current_version + 1,
-                    "updated_at": now,
-                    "expires_at": now + ttl_seconds,
-                },
-            )
-            self._redis.expire(key, ttl_seconds)
-            if session_key != self._session_key(""):
-                self._redis.expire(session_key, ttl_seconds)
-            data["status"] = WidgetStatus.CLOSED.value
-            data["version"] = current_version + 1
-            data["updated_at"] = now
-            data["expires_at"] = now + ttl_seconds
-            return self._to_record(data)
+            with self._redis.pipeline() as pipe:
+                for _attempt in range(_WATCH_RETRY_LIMIT):
+                    try:
+                        pipe.watch(key)
+                        data = pipe.hgetall(key)
+                        if not data:
+                            raise KeyError(f"Widget {widget_id} not found")
+                        now = time.time()
+                        new_version = int(data.get("version", 0)) + 1
+                        ttl_seconds = int(data.get("ttl_seconds", DEFAULT_WIDGET_TTL_SECONDS))
+                        session_key = self._session_key(str(data.get("session_id", "")))
+                        pipe.multi()
+                        pipe.hset(
+                            key,
+                            mapping={
+                                "status": WidgetStatus.CLOSED.value,
+                                "version": new_version,
+                                "updated_at": now,
+                                "expires_at": now + ttl_seconds,
+                            },
+                        )
+                        pipe.expire(key, ttl_seconds)
+                        if session_key != self._session_key(""):
+                            pipe.expire(session_key, ttl_seconds)
+                        pipe.execute()
+                        data["status"] = WidgetStatus.CLOSED.value
+                        data["version"] = new_version
+                        data["updated_at"] = now
+                        data["expires_at"] = now + ttl_seconds
+                        return self._to_record(data)
+                    except self._watch_error:
+                        continue
+            raise _kept_changing(widget_id)
 
         return await asyncio.to_thread(_do_close)
 

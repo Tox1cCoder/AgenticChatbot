@@ -14,7 +14,6 @@ contract only covers the post-completion message history endpoint.
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 from datetime import UTC, datetime
@@ -148,14 +147,12 @@ def _build_message_service(
 
 
 def _history_payload(message: SimpleNamespace, *, capable: bool) -> dict:
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            uuid4(),
-            _build_message_service([message]),
-            uuid4(),
-            MessagePaginationParams(),
-            inline_rich_response_v1=capable,
-        )
+    response = get_conversation_messages_ai_sdk(
+        uuid4(),
+        _build_message_service([message]),
+        uuid4(),
+        MessagePaginationParams(),
+        inline_rich_response_v1=capable,
     )
     return response.data.messages[0].model_dump(by_alias=True)
 
@@ -185,13 +182,11 @@ def test_ai_sdk_messages_expose_context_window_on_metadata():
     conversation_id = uuid4()
     current_user_id = uuid4()
 
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            conversation_id,
-            message_service,
-            current_user_id,
-            MessagePaginationParams(),
-        )
+    response = get_conversation_messages_ai_sdk(
+        conversation_id,
+        message_service,
+        current_user_id,
+        MessagePaginationParams(),
     )
 
     message_service.get_conversation_messages.assert_called_once()
@@ -241,13 +236,11 @@ def test_ai_sdk_messages_forwards_pagination_to_message_service():
         orderDirection="desc",
     )
 
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            conversation_id,
-            message_service,
-            current_user_id,
-            pagination,
-        )
+    response = get_conversation_messages_ai_sdk(
+        conversation_id,
+        message_service,
+        current_user_id,
+        pagination,
     )
 
     message_service.get_conversation_messages.assert_called_once_with(
@@ -274,13 +267,11 @@ def test_ai_sdk_messages_preserve_unknown_metadata_fields():
     assistant_msg = _build_assistant_message_with_context_window()
     message_service = _build_message_service([assistant_msg])
 
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            uuid4(),
-            message_service,
-            uuid4(),
-            MessagePaginationParams(),
-        )
+    response = get_conversation_messages_ai_sdk(
+        uuid4(),
+        message_service,
+        uuid4(),
+        MessagePaginationParams(),
     )
 
     ui_message = response.data.messages[0]
@@ -323,13 +314,11 @@ def test_ai_sdk_messages_scrub_legacy_renderer_fields():
     )
     message_service = _build_message_service([user_msg, assistant_msg])
 
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            uuid4(),
-            message_service,
-            uuid4(),
-            MessagePaginationParams(),
-        )
+    response = get_conversation_messages_ai_sdk(
+        uuid4(),
+        message_service,
+        uuid4(),
+        MessagePaginationParams(),
     )
 
     user_payload = response.data.messages[0].model_dump(by_alias=True)
@@ -361,13 +350,11 @@ def test_ai_sdk_messages_hide_v1_image_candidates_without_capability():
     }
     message_service = _build_message_service([assistant_msg])
 
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            uuid4(),
-            message_service,
-            uuid4(),
-            MessagePaginationParams(),
-        )
+    response = get_conversation_messages_ai_sdk(
+        uuid4(),
+        message_service,
+        uuid4(),
+        MessagePaginationParams(),
     )
 
     payload = response.data.messages[0].model_dump(by_alias=True)
@@ -380,13 +367,11 @@ def test_ai_sdk_messages_strip_rich_v1_fields_without_capability():
     assistant_msg = _build_assistant_message_with_rich_items()
     message_service = _build_message_service([assistant_msg])
 
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            uuid4(),
-            message_service,
-            uuid4(),
-            MessagePaginationParams(),
-        )
+    response = get_conversation_messages_ai_sdk(
+        uuid4(),
+        message_service,
+        uuid4(),
+        MessagePaginationParams(),
     )
 
     payload = response.data.messages[0].model_dump(by_alias=True)
@@ -401,14 +386,12 @@ def test_ai_sdk_messages_preserve_rich_v1_fields_with_capability():
     assistant_msg = _build_assistant_message_with_rich_items()
     message_service = _build_message_service([assistant_msg])
 
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            uuid4(),
-            message_service,
-            uuid4(),
-            MessagePaginationParams(),
-            inline_rich_response_v1=True,
-        )
+    response = get_conversation_messages_ai_sdk(
+        uuid4(),
+        message_service,
+        uuid4(),
+        MessagePaginationParams(),
+        inline_rich_response_v1=True,
     )
 
     payload = response.data.messages[0].model_dump(by_alias=True)

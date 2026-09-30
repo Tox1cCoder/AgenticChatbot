@@ -118,7 +118,6 @@ def test_batch_upload_all_accepted_returns_201():
     from app.api.documents import _status_code_for_batch_result, _upload_documents_batch
 
     conv = uuid4()
-    user = uuid4()
     document_service, processing_service = _build_dependencies()
 
     files = [
@@ -130,7 +129,6 @@ def test_batch_upload_all_accepted_returns_201():
         _upload_documents_batch(
             document_service=document_service,
             document_processing_service=processing_service,
-            current_user_id=user,
             files=files,
             conversation_id=conv,
         )
@@ -148,7 +146,6 @@ def test_batch_upload_rejects_existing_duplicate_and_accepts_sibling():
     from app.api.documents import _status_code_for_batch_result, _upload_documents_batch
 
     conv = uuid4()
-    user = uuid4()
     document_service, processing_service = _build_dependencies(
         existing_filename_keys={"existing.pdf"}
     )
@@ -162,7 +159,6 @@ def test_batch_upload_rejects_existing_duplicate_and_accepts_sibling():
         _upload_documents_batch(
             document_service=document_service,
             document_processing_service=processing_service,
-            current_user_id=user,
             files=files,
             conversation_id=conv,
         )
@@ -180,7 +176,6 @@ def test_batch_upload_rejects_later_in_batch_duplicates_of_same_filename():
     from app.api.documents import _status_code_for_batch_result, _upload_documents_batch
 
     conv = uuid4()
-    user = uuid4()
     document_service, processing_service = _build_dependencies()
 
     files = [
@@ -192,7 +187,6 @@ def test_batch_upload_rejects_later_in_batch_duplicates_of_same_filename():
         _upload_documents_batch(
             document_service=document_service,
             document_processing_service=processing_service,
-            current_user_id=user,
             files=files,
             conversation_id=conv,
         )
@@ -210,7 +204,6 @@ def test_batch_upload_all_duplicates_returns_409():
     from app.api.documents import _status_code_for_batch_result, _upload_documents_batch
 
     conv = uuid4()
-    user = uuid4()
     document_service, processing_service = _build_dependencies(
         existing_filename_keys={"a.pdf", "b.pdf"}
     )
@@ -224,7 +217,6 @@ def test_batch_upload_all_duplicates_returns_409():
         _upload_documents_batch(
             document_service=document_service,
             document_processing_service=processing_service,
-            current_user_id=user,
             files=files,
             conversation_id=conv,
         )
@@ -242,7 +234,6 @@ def test_batch_upload_all_validation_failures_returns_400():
     from app.core.exceptions.validation import FileValidationError
 
     conv = uuid4()
-    user = uuid4()
     document_service, processing_service = _build_dependencies()
 
     # Force a non-duplicate validation failure from staging.
@@ -260,7 +251,6 @@ def test_batch_upload_all_validation_failures_returns_400():
         _upload_documents_batch(
             document_service=document_service,
             document_processing_service=processing_service,
-            current_user_id=user,
             files=files,
             conversation_id=conv,
         )
@@ -277,7 +267,6 @@ def test_batch_upload_preserves_input_order():
     from app.api.documents import _upload_documents_batch
 
     conv = uuid4()
-    user = uuid4()
     document_service, processing_service = _build_dependencies()
 
     filenames = ["a.pdf", "b.pdf", "c.pdf", "d.pdf"]
@@ -287,7 +276,6 @@ def test_batch_upload_preserves_input_order():
         _upload_documents_batch(
             document_service=document_service,
             document_processing_service=processing_service,
-            current_user_id=user,
             files=files,
             conversation_id=conv,
         )
