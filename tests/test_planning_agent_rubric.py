@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from langchain_core.messages import AIMessage
 
@@ -279,4 +281,31 @@ async def test_generate_plan_marks_grader_error(monkeypatch):
 
     assert response.error is None
     assert response.metadata["planning_rubric"]["status"] == "grader_error"
-    assert "grader unavailable" in response.metadata["planning_rubric"]["error"]
+    # The metadata is persisted and published, so it names the failure's type
+    # and never carries the provider's own exception text.
+    assert "RuntimeError" in response.metadata["planning_rubric"]["error"]
+    assert "grader unavailable" not in json.dumps(response.metadata["planning_rubric"])
+
+
+@pytest.mark.asyncio
+async def test_graph_rubric_review_failure_names_the_type_not_the_text(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.ai.graph import MultiAgentWorkflow
+
+    async def _failing_review(**_kwargs):
+        raise RuntimeError("upstream said https://internal.example/?key=secret")
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.planning_agent = SimpleNamespace(review_todos_with_planning_rubric=_failing_review)
+    monkeypatch.setattr(workflow, "_latest_user_text", lambda _state: "plan it")
+
+    attempt = await workflow._review_planning_todos_with_rubric(
+        state={"context": {}, "messages": []},
+        todos=[{"id": "t1", "description": "x", "status": "pending"}],
+    )
+
+    metadata = attempt.metadata()
+    assert metadata["status"] == "grader_error"
+    assert "RuntimeError" in metadata["error"]
+    assert "internal.example" not in json.dumps(metadata)

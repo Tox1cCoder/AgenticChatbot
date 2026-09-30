@@ -172,6 +172,61 @@ async def test_rag_agent_preserves_current_assistant_tool_group_without_syntheti
 
 
 @pytest.mark.asyncio
+async def test_a_scoped_rag_worker_binds_only_its_allowed_tools():
+    """A dispatch's ``allowed_tool_ids`` narrows what the model is offered."""
+    from app.core.runtime_modeling import ResolvedRuntimeModelConfig
+
+    agent = object.__new__(RAGAgent)
+    agent.settings = type("S", (), {"agentic_preview_chars": 500})()
+    agent.agentic_max_iterations = 5
+    agent.tools = [SimpleNamespace(name="search_documents")]
+    agent.mcp_manager = None
+    agent._tools_generation_seen = -1
+    captured = {}
+
+    async def fake_invoke(**kwargs):
+        captured.update(kwargs)
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="answer"),
+            metadata={},
+        )
+
+    agent._invoke_agentic_rag_model = fake_invoke
+    agent._resolve_runtime_model_config = lambda *a, **kw: ResolvedRuntimeModelConfig(
+        agent_key="rag",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        temperature=0.7,
+        api_key=None,
+        key_source="settings",
+        source="agent_default",
+        capabilities={"supports_vision": False},
+    )
+    agent._create_fallback_runtime_config = lambda *a, **kw: None
+    agent._build_skills_suffix = lambda **kw: ""
+    agent._get_tools_for_binding = lambda **kw: [
+        SimpleNamespace(name="search_documents", metadata={}),
+        SimpleNamespace(name="delete_file", metadata={}),
+    ]
+
+    await agent._process_message_agentic(
+        AgentMessage(
+            role=MessageRole.USER,
+            content="What is revenue?",
+            metadata={
+                "original_query": "What is revenue?",
+                "allowed_tool_ids": ("search_documents",),
+            },
+        ),
+        "conv-1",
+    )
+
+    assert [tool.name for tool in captured["tools"]] == ["search_documents"]
+
+
+@pytest.mark.asyncio
 async def test_a_failed_rag_model_call_does_not_publish_the_exception_text():
     """The error content becomes the RAG answer, which is streamed and persisted."""
     from app.core.runtime_modeling import ResolvedRuntimeModelConfig
@@ -211,6 +266,11 @@ async def test_a_failed_rag_model_call_does_not_publish_the_exception_text():
 
     assert "SECRET123" not in response.message.content
     assert "RuntimeError" in response.message.content
+    # ``error`` and the metadata copy are persisted too, so they carry the
+    # type rather than the provider's text.
+    assert response.error == "RuntimeError"
+    assert response.metadata["error"] == "RuntimeError"
+    assert "SECRET123" not in response.model_dump_json()
 
 
 @pytest.mark.asyncio

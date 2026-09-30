@@ -721,3 +721,91 @@ async def test_rag_never_runs_a_tool_the_approval_policy_gates(monkeypatch):
     assert by_id["call-1"].content == RAG_APPROVAL_REFUSAL_TEXT
     assert by_id["call-1"].status == "error"
     assert by_id["call-2"].status == "success"
+
+
+# ----------------------------------------------------------------------
+# dispatch tool scope
+# ----------------------------------------------------------------------
+
+
+def _out_of_scope_then_answer() -> list:
+    return [
+        RagModelTurn(
+            tool_calls=(
+                _search_call("call-1"),
+                {"name": "delete_file", "id": "call-2", "args": {"path": "a.txt"}},
+            )
+        ),
+        RagModelTurn(text="The answer is 42.", answer=_answer("E1")),
+    ]
+
+
+async def test_a_rag_worker_never_runs_a_tool_outside_its_dispatch_scope():
+    """``allowed_tool_ids`` was carried on the request and never read.
+
+    The refusal is paired rather than dropped, for the same reason the budget
+    refusal is: an unanswered tool call is a provider error on the next call.
+    """
+    runtime = ScriptedRagRuntime(
+        turns=_out_of_scope_then_answer(), evidence=_evidence_payload("E1")
+    )
+    graph = _graph(runtime)
+    captured: dict = {}
+    original = runtime.model_turn
+
+    async def _capture(request, *, messages, **kwargs):
+        captured["messages"] = list(messages)
+        return await original(request, messages=messages, **kwargs)
+
+    runtime.model_turn = _capture
+
+    await graph.ainvoke(
+        _request(mode="worker", allowed_tool_ids=("search_documents",), task_id="t1")
+    )
+
+    assert [call["id"] for call in runtime.tool_calls_executed] == ["call-1"]
+    refusals = [
+        message
+        for message in captured["messages"]
+        if isinstance(message, ToolMessage) and message.tool_call_id == "call-2"
+    ]
+    assert len(refusals) == 1
+    assert refusals[0].status == "error"
+    assert refusals[0].content == "tool_not_authorized_for_this_worker"
+
+
+async def test_an_empty_scope_means_the_agents_own_scope_not_no_tools():
+    """Same reading as the specialist workers: empty is not a narrowing."""
+    runtime = ScriptedRagRuntime(
+        turns=_out_of_scope_then_answer(), evidence=_evidence_payload("E1")
+    )
+
+    await _graph(runtime).ainvoke(_request(mode="worker"))
+
+    assert [call["id"] for call in runtime.tool_calls_executed] == ["call-1", "call-2"]
+
+
+async def test_the_rag_model_is_only_offered_tools_inside_the_scope():
+    """The second layer: the model is told the scope, not only refused past it."""
+    captured = {}
+
+    class CapturingRagAgent:
+        async def process_message(self, message, conversation_id):
+            captured["message"] = message
+            return SimpleNamespace(
+                message=SimpleNamespace(tool_calls=[], content="done"), metadata={}
+            )
+
+    runtime = ProductionRagRuntime(
+        rag_agent=CapturingRagAgent(),
+        agent_lookup=lambda _name: None,
+        settings=SimpleNamespace(),
+    )
+
+    await runtime.model_turn(
+        _request(mode="worker", allowed_tool_ids=("search_documents",)),
+        messages=(),
+        evidence=None,
+    )
+
+    assert captured["message"].metadata["allowed_tool_ids"] == ("search_documents",)

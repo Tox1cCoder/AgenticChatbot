@@ -97,7 +97,7 @@ class ChatAgent(BaseAgent):
             return self._build_error_response(
                 message="I encountered an error processing your request.",
                 conversation_id=conversation_id,
-                error=f"{type(exc).__name__}: {exc}",
+                error=exc,
             )
 
     async def invoke_model(

@@ -784,6 +784,36 @@ async def test_base_agent_surfaces_second_overflow_after_exactly_one_retry(
     assert "private provider data" not in response.model_dump_json()
 
 
+@pytest.mark.asyncio
+async def test_base_agent_provider_failure_stores_the_type_not_the_text(monkeypatch) -> None:
+    """``AgentResponse.error`` and its metadata are persisted; provider text is not."""
+
+    class _FailingModel:
+        async def ainvoke(self, _messages, _config=None):
+            raise RuntimeError("upstream 500 at https://internal.example/?key=private-value")
+
+    agent, _model = _configure_boundary_agent(monkeypatch, max_input_tokens=10_000)
+    monkeypatch.setattr(
+        agent,
+        "_create_langchain_model_from_runtime",
+        lambda *_args, **_kwargs: (_FailingModel(), False),
+    )
+
+    response = await agent.invoke_model_with_history(
+        messages=[HumanMessage(content="current question")],
+        conversation_history=[],
+        persona=None,
+        disable_tools=True,
+    )
+
+    assert response.error == "RuntimeError"
+    assert response.metadata["error"] == "RuntimeError"
+    assert response.message.content == (
+        "I'm sorry, but I encountered an error processing your request."
+    )
+    assert "private-value" not in response.model_dump_json()
+
+
 def _gemini_fallback_runtime(max_input_tokens: int) -> ResolvedRuntimeModelConfig:
     runtime = _gemini_runtime_with_limit(max_input_tokens)
     return replace(runtime, api_key="fallback-key", key_source="test")

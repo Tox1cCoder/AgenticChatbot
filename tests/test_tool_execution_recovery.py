@@ -514,6 +514,223 @@ async def test_recover_missing_tool_does_not_bind_unloaded_server_tool(monkeypat
         reset_deferred_tool_state()
 
 
+class _RecordingServerTool:
+    def __init__(self, name: str, *, server: str, mutation: bool = False) -> None:
+        self.name = name
+        self.invocations: list[dict] = []
+        self.metadata = {
+            "tool_origin": "server_mcp",
+            "server_name": server,
+            "qualified_tool_id": f"{server}::{name}",
+            "mutation": mutation,
+        }
+
+    async def ainvoke(self, args):
+        self.invocations.append(args)
+        return "ran"
+
+
+def _patch_manager(monkeypatch, *tools) -> None:
+    class _Manager:
+        async def get_tools(self):
+            return list(tools)
+
+        def get_server_for_tool(self, tool):
+            return tool.metadata["server_name"]
+
+    async def _manager():
+        return _Manager()
+
+    monkeypatch.setattr("app.ai.mcp_registry.get_global_mcp_manager", _manager)
+
+
+def _allowlisted_search_agent(monkeypatch, allowlist: list[str]):
+    from app.ai.agents.chat_agent import ChatAgent
+
+    monkeypatch.setattr(settings, "search_agent_allowed_tools", allowlist)
+    agent = ChatAgent.__new__(ChatAgent)
+    agent.agent_config_key = "search"
+    agent.mcp_manager = None
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_raw_recovery_refuses_a_server_tool_outside_the_agent_allowlist(monkeypatch):
+    """With tool_search off, naming any live MCP tool used to re-bind it.
+
+    The agent allowlist decides what an agent may bind; recovery must not be a
+    second door around it.
+    """
+    monkeypatch.setattr(settings, "mcp_tool_search_enabled", False)
+    tool_b = _RecordingServerTool("tool_b", server="admin")
+    _patch_manager(monkeypatch, _RecordingServerTool("tool_a", server="calc"), tool_b)
+    agent = _allowlisted_search_agent(monkeypatch, ["tool_a"])
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-b", "name": "tool_b", "args": {}}],
+        tool_map={},
+        agent=agent,
+        conversation_id="conv-1",
+        user_id="user-1",
+    )
+
+    assert tool_b.invocations == []
+    assert outputs[0]["tool_call_id"] == "call-b"
+    assert json.loads(outputs[0]["content"])["status"] == "error"
+    assert artifacts[0]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_raw_recovery_still_binds_a_server_tool_the_allowlist_permits(monkeypatch):
+    monkeypatch.setattr(settings, "mcp_tool_search_enabled", False)
+    tool_a = _RecordingServerTool("tool_a", server="calc")
+    _patch_manager(monkeypatch, tool_a)
+    agent = _allowlisted_search_agent(monkeypatch, ["tool_a"])
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-a", "name": "tool_a", "args": {"x": 1}}],
+        tool_map={},
+        agent=agent,
+        conversation_id="conv-1",
+        user_id="user-1",
+    )
+
+    assert tool_a.invocations == [{"x": 1}]
+    assert artifacts[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_raw_recovery_without_an_agent_binds_nothing(monkeypatch):
+    """No agent means no scope to check a tool against, so nothing is re-bound."""
+    monkeypatch.setattr(settings, "mcp_tool_search_enabled", False)
+    tool_b = _RecordingServerTool("tool_b", server="admin")
+    _patch_manager(monkeypatch, tool_b)
+
+    outputs, _, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-b", "name": "tool_b", "args": {}}],
+        tool_map={},
+    )
+
+    assert tool_b.invocations == []
+    assert json.loads(outputs[0]["content"])["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_custom_agent_limited_to_tool_a_cannot_run_client_tool_b(monkeypatch):
+    """A custom agent's client tool refs are strict; recovery used to ignore them.
+
+    The device catalog holds every tool the sidecar exposes. Recovering from it
+    for a custom agent must go through the agent's own binding filter.
+    """
+    from app.ai.agents.custom_agent import CustomAgent
+    from app.ai.custom_agent_runtime import build_custom_agent_runtime_spec
+
+    monkeypatch.setattr(settings, "mcp_tool_search_enabled", False)
+
+    class _ClientTool:
+        def __init__(self, name):
+            self.name = name
+            self.invocations: list[dict] = []
+            self.metadata = {"tool_origin": "client_mcp"}
+
+        async def ainvoke(self, args):
+            self.invocations.append(args)
+            return "ran"
+
+    tool_a = _ClientTool("client__csv__profile")
+    tool_b = _ClientTool("client__fs__delete")
+    monkeypatch.setattr(
+        "app.ai.tool_execution.get_client_runtime_tools", lambda **_kwargs: [tool_a, tool_b]
+    )
+    monkeypatch.setattr("app.ai.tool_execution.is_client_tool", lambda _tool: True)
+    monkeypatch.setattr("app.ai.tool_execution.get_client_tool_device_id", lambda _t: "desk-1")
+
+    agent = CustomAgent(
+        build_custom_agent_runtime_spec(
+            {
+                "id": "00000000-0000-0000-0000-00000000000a",
+                "name": "Analyst",
+                "tool_refs": [
+                    {
+                        "type": "client",
+                        "device_id": "desk-1",
+                        "qualified_tool_id": "client__csv__profile",
+                    }
+                ],
+            }
+        )
+    )
+    # The agent's own restricted binding: only the selected client tool.
+    monkeypatch.setattr(agent, "_get_tools_for_binding", lambda **_kwargs: [tool_a])
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-b", "name": "client__fs__delete", "args": {"path": "/"}}],
+        tool_map={},
+        agent=agent,
+        device_id="desk-1",
+        conversation_id="conv-1",
+        user_id="user-1",
+    )
+
+    assert tool_b.invocations == []
+    assert outputs[0]["tool_call_id"] == "call-b"
+    assert json.loads(outputs[0]["content"])["status"] == "error"
+    assert artifacts[0]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_recovered_tool_that_needs_approval_is_refused_not_run(monkeypatch):
+    """The approval gate judged the call before recovery, with no metadata.
+
+    A mutation is gated by its metadata, so the gate saw an ordinary call and
+    let it through. Once recovery supplies the metadata the verdict changes,
+    and a call no human was ever asked about must not run.
+    """
+    monkeypatch.setattr(settings, "mcp_tool_search_enabled", False)
+    monkeypatch.setattr(settings, "hitl_tools_require_approval", [])
+    mutating = _RecordingServerTool("drop_table", server="db", mutation=True)
+    _patch_manager(monkeypatch, mutating)
+    agent = _allowlisted_search_agent(monkeypatch, [])
+    tool_map: dict = {}
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "drop_table", "args": {}}],
+        tool_map=tool_map,
+        agent=agent,
+        conversation_id="conv-1",
+        user_id="user-1",
+    )
+
+    assert mutating.invocations == []
+    payload = json.loads(outputs[0]["content"])
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "permission"
+    assert artifacts[0]["status"] == "error"
+    # Bound now, so the approval gate sees its real provenance next time.
+    assert tool_map["drop_table"] is mutating
+
+
+@pytest.mark.asyncio
+async def test_a_recovered_tool_the_gate_already_judged_by_name_still_runs(monkeypatch):
+    """A name-gated call was already interrupted for, and reached here approved."""
+    monkeypatch.setattr(settings, "mcp_tool_search_enabled", False)
+    monkeypatch.setattr(settings, "hitl_tools_require_approval", ["drop_table"])
+    mutating = _RecordingServerTool("drop_table", server="db", mutation=True)
+    _patch_manager(monkeypatch, mutating)
+    agent = _allowlisted_search_agent(monkeypatch, [])
+
+    _, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "drop_table", "args": {}}],
+        tool_map={},
+        agent=agent,
+        conversation_id="conv-1",
+        user_id="user-1",
+    )
+
+    assert mutating.invocations == [{}]
+    assert artifacts[0]["status"] == "success"
+
+
 @pytest.mark.asyncio
 async def test_execute_tool_calls_times_out_slow_tool(monkeypatch):
     monkeypatch.setattr(settings, "tool_execution_timeout", 0.01)

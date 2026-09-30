@@ -229,3 +229,31 @@ def test_the_failure_log_names_the_cause_not_only_the_code(caplog):
     assert "missing_credentials" in logged, (
         f"the cause was dropped from the operator log; got: {logged!r}"
     )
+
+
+async def test_a_validation_failure_carries_only_allowlisted_details():
+    """The validation node built its error by hand and skipped the allowlist.
+
+    ``exc.detail`` is uncontrolled text -- it can quote the rejected response --
+    so it belongs in the operator log, never in a payload a caller receives.
+    """
+    from types import SimpleNamespace
+
+    from app.ai.workflow.finalization import OutputValidationError, make_validate_output_node
+
+    leaked = "provider said: api_key=sk-live-123 in https://internal.example/debug"
+
+    class _RejectingValidator:
+        async def validate(self, outcome, state):
+            raise OutputValidationError("empty_public_content", leaked, retriable=True)
+
+    node = make_validate_output_node(_RejectingValidator())
+    command = await node({"agent_outcome": SimpleNamespace(agent_id="chat_agent")})
+
+    error = command.update["workflow_error"]
+    assert error.code == "response_validation_failed"
+    assert error.retriable is True
+    assert set(error.details) <= ALLOWED_ERROR_DETAIL_KEYS
+    assert error.details["reason"] == "empty_public_content"
+    assert error.details["agent"] == "chat_agent"
+    assert "sk-live-123" not in json.dumps(error.details)

@@ -405,9 +405,17 @@ class DeferredToolState:
         self,
         conversation_id: str | None,
         agent_key: str | None,
-    ) -> tuple[str, str]:
-        """Scope key for server tools."""
-        return (conversation_id or "", agent_key or "default")
+    ) -> tuple[str, str] | None:
+        """Scope key for server tools, or ``None`` when there is no conversation.
+
+        A missing id used to become ``""``: one scope shared by every user and
+        every id-less turn, so one user's loaded tools surfaced on another's.
+        There is no scope without a conversation; callers store nothing and
+        read nothing.
+        """
+        if not conversation_id:
+            return None
+        return (conversation_id, agent_key or "default")
 
     def _get_client_key(
         self,
@@ -415,10 +423,12 @@ class DeferredToolState:
         agent_key: str | None,
         device_id: str | None,
         session_id: str | None,
-    ) -> tuple[str, str, str, str]:
-        """Scope key for client tools."""
+    ) -> tuple[str, str, str, str] | None:
+        """Scope key for client tools, or ``None`` when there is no conversation."""
+        if not conversation_id:
+            return None
         return (
-            conversation_id or "",
+            conversation_id,
             agent_key or "default",
             device_id or "",
             session_id or "",
@@ -572,6 +582,9 @@ class DeferredToolState:
         generation = get_mcp_tools_generation()
         key = self._get_key(conversation_id, agent_key)
         loaded: list[ToolReference] = []
+        if key is None:
+            logger.debug("Not loading %d server tool(s): no conversation id", len(references))
+            return loaded
 
         with self._lock:
             self._maybe_sweep_locked()
@@ -615,7 +628,7 @@ class DeferredToolState:
         if max_tools is None:
             max_tools = settings.mcp_tool_search_max_loaded_tools_per_conversation
 
-        if not device_id:
+        if not device_id or not conversation_id:
             return []
 
         effective_session_id = session_id
@@ -633,8 +646,10 @@ class DeferredToolState:
             device_id,
             effective_session_id,
         )
-        catalog_version = self._current_catalog_version(device_id, user_id)
         loaded: list[ClientToolReference] = []
+        if client_key is None:
+            return loaded
+        catalog_version = self._current_catalog_version(device_id, user_id)
 
         with self._lock:
             self._maybe_sweep_locked()
@@ -680,6 +695,8 @@ class DeferredToolState:
     ) -> list[ToolReference]:
         """Server tools still loaded for a conversation, for model binding."""
         key = self._get_key(conversation_id, agent_key)
+        if key is None:
+            return []
         generation = get_mcp_tools_generation()
         ttl = settings.mcp_tool_search_loaded_tools_ttl_minutes
 
@@ -715,6 +732,8 @@ class DeferredToolState:
             return []
 
         client_key = self._get_client_key(conversation_id, agent_key, device_id, session_id)
+        if client_key is None:
+            return []
 
         with self._lock:
             scope = self._client_tool_scopes.get(client_key)
@@ -738,6 +757,8 @@ class DeferredToolState:
         (device_id, session_id) pair only server names are returned.
         """
         key = self._get_key(conversation_id, agent_key)
+        if key is None:
+            return []
         generation = get_mcp_tools_generation()
         ttl = settings.mcp_tool_search_loaded_tools_ttl_minutes
 
@@ -758,7 +779,7 @@ class DeferredToolState:
                     device_id,
                     session_id,
                 )
-                scope = self._client_tool_scopes.get(client_key)
+                scope = self._client_tool_scopes.get(client_key) if client_key else None
                 if scope:
                     scope.cleanup(ttl)
                     names.extend(scope.loaded)
@@ -776,6 +797,8 @@ class DeferredToolState:
         not loaded for this conversation.
         """
         key = self._get_key(conversation_id, agent_key)
+        if key is None:
+            return False
 
         with self._lock:
             tool_set = self._conversation_tools.get(key)
@@ -791,6 +814,8 @@ class DeferredToolState:
     ) -> str | None:
         """Server backing a loaded tool, keyed by public call name."""
         key = self._get_key(conversation_id, agent_key)
+        if key is None:
+            return None
 
         with self._lock:
             tool_set = self._conversation_tools.get(key)
@@ -811,6 +836,8 @@ class DeferredToolState:
         manager, which knows it under its raw name rather than the alias.
         """
         key = self._get_key(conversation_id, agent_key)
+        if key is None:
+            return None
 
         with self._lock:
             tool_set = self._conversation_tools.get(key)
@@ -847,7 +874,7 @@ class DeferredToolState:
 
         with self._lock:
             server_tools: list[dict[str, object]] = []
-            tool_set = self._conversation_tools.get(server_key)
+            tool_set = self._conversation_tools.get(server_key) if server_key else None
             if tool_set:
                 tool_set.cleanup(ttl, generation)
                 for tool in tool_set.loaded.values():
@@ -871,7 +898,7 @@ class DeferredToolState:
                     device_id,
                     session_id,
                 )
-                scope = self._client_tool_scopes.get(client_key)
+                scope = self._client_tool_scopes.get(client_key) if client_key else None
                 if scope:
                     scope.cleanup(ttl)
                     for client_tool in scope.list_tools():
@@ -1074,12 +1101,15 @@ class DeferredToolState:
         Returns:
             Number of scopes removed (server and client combined).
         """
-        conv_id = conversation_id or ""
+        if not conversation_id:
+            # Nothing is ever stored without a conversation id.
+            return 0
+        conv_id = conversation_id
         cleared = 0
 
         with self._lock:
             if agent_key:
-                key = self._get_key(conversation_id, agent_key)
+                key = (conv_id, agent_key)
                 if self._conversation_tools.pop(key, None) is not None:
                     cleared += 1
                 client_keys = [

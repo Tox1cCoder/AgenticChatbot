@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -121,6 +122,23 @@ _WIDGET_TOOL_NAMES = {
     "widget_close",
     "session_list_widgets",
 }
+
+
+_STABLE_ERROR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,63}")
+
+
+def agent_error_code(exc: BaseException) -> str:
+    """What a persisted error field may say about an exception.
+
+    A stable string ``code`` the exception declares (``ContextBudgetExceededError``
+    and several provider SDK errors carry one), else the type name. Never the
+    message: it is uncontrolled provider text. A ``code`` that is not a short
+    identifier is ignored for the same reason.
+    """
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and _STABLE_ERROR_CODE.fullmatch(code):
+        return code
+    return type(exc).__name__
 
 
 def _get_effective_tool_allowlist(agent_key: str) -> list[str]:
@@ -1917,11 +1935,11 @@ class BaseAgent(ABC):
                 error=e.code,
             )
         except Exception as e:
-            logger.error(f"Error invoking model with history: {e}")
+            logger.error("Error invoking model with history: %s", e)
             return self._build_error_response(
                 message="I encountered an error processing your request.",
                 conversation_id=conversation_id,
-                error=str(e),
+                error=e,
             )
 
     def _augment_response_metadata(self, metadata: dict[str, Any]) -> None:
@@ -2091,8 +2109,27 @@ class BaseAgent(ABC):
         return f"{base}{build_runtime_time_context_block()}"
 
     def _build_error_response(
-        self, message: str, conversation_id: str | None, error: str | None = None
+        self,
+        message: str,
+        conversation_id: str | None,
+        error: str | BaseException | None = None,
     ) -> AgentResponse:
+        """Build the apology response for a failed turn.
+
+        ``error`` is either a stable code the caller chose, or the exception
+        itself. An exception is stored as :func:`agent_error_code` -- the error
+        field and its metadata copy are persisted and streamed, and provider
+        text can carry URLs, request ids and key fragments -- while its detail
+        goes to the log.
+        """
+        if isinstance(error, BaseException):
+            logger.warning(
+                "%s returned an error response: %s: %s",
+                self.agent_id,
+                type(error).__name__,
+                error,
+            )
+            error = agent_error_code(error)
         return AgentResponse(
             agent_type=self.agent_type,
             agent_id=self.agent_id,

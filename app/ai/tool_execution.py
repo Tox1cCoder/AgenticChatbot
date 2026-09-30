@@ -996,30 +996,186 @@ async def _recover_missing_tool(
             )
             return None
 
-        try:
-            from .mcp_registry import get_global_mcp_manager
-
-            manager = await get_global_mcp_manager()
-            if manager is not None:
-                for server_tool in await manager.get_tools():
-                    if getattr(server_tool, "name", None) == tool_name:
-                        tool_map[tool_name] = server_tool
-                        logger.debug(
-                            "Recovered missing server tool '%s' from MCP manager",
-                            tool_name,
-                        )
-                        return server_tool
-        except Exception as exc:
-            logger.warning("Failed recovering missing server tool '%s': %s", tool_name, exc)
-        return None
+        return await _recover_raw_server_tool(
+            tool_name=tool_name, tool_map=tool_map, agent=agent, device_id=device_id
+        )
 
     if not device_id:
         return None
 
+    return _recover_client_tool(
+        tool_name=tool_name,
+        tool_map=tool_map,
+        agent=agent,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        device_id=device_id,
+        tool_scope=tool_scope,
+    )
+
+
+#: What the model reads when recovery bound a tool the approval gate never saw.
+RECOVERED_TOOL_APPROVAL_REFUSAL = (
+    "Tool {name} requires the user's approval, and approval was not requested "
+    "for this call. It was not run."
+)
+
+
+def _requires_approval(
+    tool_call: dict[str, Any],
+    tool_map: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    mcp_manager: Any = None,
+) -> bool:
+    from .hitl_config import identity_requires_approval, resolve_call_identity
+
+    identity = resolve_call_identity(tool_call, tool_map=tool_map, mcp_manager=mcp_manager)
+    return identity_requires_approval(identity, policy)
+
+
+async def _recover_with_approval_check(
+    tool_call: dict[str, Any],
+    *,
+    tool_map: dict[str, Any],
+    policy: dict[str, Any],
+    agent: Any | None,
+    conversation_id: str | None,
+    user_id: str | None,
+    device_id: str | None,
+    tool_scope: str | None,
+) -> tuple[Any | None, bool]:
+    """Recover a missing tool, and say whether it now needs an unasked approval.
+
+    The approval gate runs before execution, on the turn's map -- where a
+    missing tool has no metadata, so a mutation or a server rule looks like an
+    ordinary call. Re-running the policy on the recovered tool closes that.
+
+    Only a verdict that *changed* refuses the call. A call the gate already
+    gated by name was interrupted for, and reached here approved; refusing it
+    would override the human.
+    """
+    gated_before = _requires_approval(tool_call, tool_map, policy=policy)
+    tool = await _recover_missing_tool(
+        tool_name=str(tool_call.get("name") or ""),
+        tool_map=tool_map,
+        agent=agent,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        device_id=device_id,
+        tool_scope=tool_scope,
+    )
+    if tool is None or gated_before:
+        return tool, False
+    manager = None
     try:
-        for client_tool in get_client_runtime_tools(user_id=user_id, device_id=device_id):
-            candidate_name = getattr(client_tool, "name", None)
-            if candidate_name != tool_name:
+        from .mcp_registry import get_global_mcp_manager
+
+        manager = await get_global_mcp_manager()
+    except Exception as exc:  # noqa: BLE001 - identity falls back to tool metadata
+        logger.debug("MCP manager unavailable while re-checking approval: %s", exc)
+    return tool, _requires_approval(tool_call, tool_map, policy=policy, mcp_manager=manager)
+
+
+def _agent_permits_server_tool(
+    agent: Any, tool: Any, *, manager: Any, device_id: str | None
+) -> bool:
+    """Whether the agent's own binding filter would ever have bound this tool.
+
+    Recovery re-binds a tool the model named but the turn's map lacks. It must
+    apply the filter that built the map -- the per-agent allowlist (with its
+    widget exclusion) and a custom agent's spec -- or naming a tool becomes a
+    way around both.
+    """
+    filter_by_allowlist = getattr(agent, "_filter_tools_by_allowlist", None)
+    if callable(filter_by_allowlist):
+        if not filter_by_allowlist([tool]):
+            return False
+    else:
+        agent_key = getattr(agent, "agent_config_key", None)
+        allowlist = list(getattr(settings, f"{agent_key}_agent_allowed_tools", None) or [])
+        if allowlist:
+            server_name = manager.get_server_for_tool(tool) if manager is not None else None
+            if getattr(tool, "name", None) not in allowlist and server_name not in allowlist:
+                return False
+
+    spec = getattr(agent, "spec", None)
+    if spec is not None:
+        from .custom_agent_runtime import filter_tools_for_custom_agent
+
+        kept, _ = filter_tools_for_custom_agent([tool], spec, request_device_id=device_id)
+        return bool(kept)
+    return True
+
+
+async def _recover_raw_server_tool(
+    *,
+    tool_name: str,
+    tool_map: dict[str, Any],
+    agent: Any | None,
+    device_id: str | None,
+) -> Any | None:
+    """Re-bind a live server MCP tool by exact name, inside the agent's scope.
+
+    With no agent there is no scope to check the tool against, so nothing is
+    re-bound: an unscoped call is not an authorized one.
+    """
+    if agent is None:
+        logger.info("Refused raw recovery of '%s': no agent scope", tool_name)
+        return None
+    try:
+        from .mcp_registry import get_global_mcp_manager
+
+        manager = await get_global_mcp_manager()
+        if manager is None:
+            return None
+        refused = False
+        for server_tool in await manager.get_tools():
+            if getattr(server_tool, "name", None) != tool_name:
+                continue
+            if not _agent_permits_server_tool(
+                agent, server_tool, manager=manager, device_id=device_id
+            ):
+                refused = True
+                continue
+            tool_map[tool_name] = server_tool
+            logger.debug("Recovered missing server tool '%s' from MCP manager", tool_name)
+            return server_tool
+        if refused:
+            logger.info("Refused recovery of '%s': outside the agent's tool scope", tool_name)
+    except Exception as exc:
+        logger.warning("Failed recovering missing server tool '%s': %s", tool_name, exc)
+    return None
+
+
+def _recover_client_tool(
+    *,
+    tool_name: str,
+    tool_map: dict[str, Any],
+    agent: Any | None,
+    conversation_id: str | None,
+    user_id: str | None,
+    device_id: str,
+    tool_scope: str | None,
+) -> Any | None:
+    """Re-bind a device tool by exact name.
+
+    A custom agent recovers only from its own restricted binding: the device
+    catalog holds every tool the sidecar exposes, while the agent may use only
+    the client tools its refs select.
+    """
+    try:
+        if getattr(agent, "spec", None) is not None and hasattr(agent, "_get_tools_for_binding"):
+            candidates = agent._get_tools_for_binding(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+                tool_scope=tool_scope,
+            )
+        else:
+            candidates = get_client_runtime_tools(user_id=user_id, device_id=device_id)
+        for client_tool in candidates:
+            if getattr(client_tool, "name", None) != tool_name:
                 continue
             tool_map[tool_name] = client_tool
             logger.debug(
@@ -1545,6 +1701,7 @@ async def execute_tool_calls(
     conversation_id: str | None = None,
     user_id: str | None = None,
     tool_scope: str | None = None,
+    hitl_policy: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     """
     Execute a list of tool calls and return outputs, artifacts, and images.
@@ -1568,6 +1725,10 @@ async def execute_tool_calls(
         agent: Optional agent instance for tool map refresh
         conversation_id: Optional conversation ID for tool map refresh
         user_id: Optional user ID for tool map refresh
+        hitl_policy: The turn's approval policy, re-applied to a tool that
+            recovery binds after the approval gate ran. Defaults to the global
+            policy, which is exact for server tools: per-user rules only
+            address client tools, whose identity the gate reads from the name.
 
     Returns:
         Tuple of (outputs, artifacts, images).
@@ -1585,6 +1746,12 @@ async def execute_tool_calls(
         device_id=device_id,
         tool_scope=tool_scope,
     )
+    if isinstance(hitl_policy, dict):
+        approval_policy = hitl_policy
+    else:
+        from .hitl_config import build_global_policy
+
+        approval_policy = build_global_policy()
 
     def _append_tool_error_output(
         *,
@@ -1691,15 +1858,39 @@ async def execute_tool_calls(
 
         tool = tool_map.get(tool_name)
         if not tool:
-            tool = await _recover_missing_tool(
-                tool_name=tool_name,
+            tool, needs_unasked_approval = await _recover_with_approval_check(
+                tool_call,
                 tool_map=tool_map,
+                policy=approval_policy,
                 agent=agent,
                 conversation_id=conversation_id,
                 user_id=user_id,
                 device_id=device_id,
                 tool_scope=tool_scope,
             )
+            if tool and needs_unasked_approval:
+                message = RECOVERED_TOOL_APPROVAL_REFUSAL.format(name=tool_name)
+                summary = ToolErrorSummary(
+                    error_type=ToolErrorKind.PERMISSION.value,
+                    failure_retryable=False,
+                    message=message,
+                    hint="Tell the user this action needs their approval.",
+                    attempts=1,
+                )
+                model_content, artifact_detail = build_tool_error_payloads(
+                    summary,
+                    tool_name=tool_name,
+                    exception=PermissionError(message),
+                    policy_retry_allowed=False,
+                )
+                _append_tool_error_output(
+                    tool_call_id=tool_id,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    model_content=model_content,
+                    artifact_detail=artifact_detail,
+                )
+                continue
         if not tool:
             if tool_name.startswith(CLIENT_TOOL_PREFIX):
                 summary = ToolErrorSummary(

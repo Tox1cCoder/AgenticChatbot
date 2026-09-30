@@ -49,12 +49,27 @@ from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..token_counter import TokenCounter
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..utils import coerce_response_text
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, agent_error_code
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ...usage.recorder import ModelUsageRecorder
+
+
+def _within_dispatch_scope(tools: list[BaseTool], allowed_tool_ids: Any) -> list[BaseTool]:
+    """The bound tools a dispatch's ``allowed_tool_ids`` permits.
+
+    Empty or absent means the agent's own scope, as for every worker. The same
+    identity match ``WorkerToolScopeMiddleware`` filters specialist bindings
+    with; the RAG graph separately refuses any call outside the scope.
+    """
+    allowed = frozenset(str(tool_id) for tool_id in (allowed_tool_ids or ()))
+    if not allowed:
+        return tools
+    from ..workflow.middleware import tool_identities
+
+    return [tool for tool in tools if tool_identities(tool) & allowed]
 
 
 class RAGAgent(BaseAgent):
@@ -1278,6 +1293,9 @@ class RAGAgent(BaseAgent):
             device_id=request_device_id,
             include_hand_off=handoff_bound,
         )
+        tools_to_bind = _within_dispatch_scope(
+            tools_to_bind, message.metadata.get("allowed_tool_ids")
+        )
 
         # Build messages list with conversation history
         messages = [SystemMessage(content=system_prompt)]
@@ -1351,10 +1369,12 @@ class RAGAgent(BaseAgent):
             return response
         except Exception as e:
             logger.error("Error in agentic RAG processing", exc_info=True)
+            # Persisted with the message: the code or type, never provider text.
+            error_code = agent_error_code(e)
             error_metadata = {
                 "conversation_id": conversation_id,
                 "agentic_mode": True,
-                "error": str(e),
+                "error": error_code,
             }
             self._apply_runtime_metadata(error_metadata, runtime_config)
             return AgentResponse(
@@ -1367,5 +1387,5 @@ class RAGAgent(BaseAgent):
                     content=f"Error during document exploration ({type(e).__name__}).",
                 ),
                 metadata=error_metadata,
-                error=str(e),
+                error=error_code,
             )

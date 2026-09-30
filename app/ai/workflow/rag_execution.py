@@ -472,9 +472,13 @@ class RagExecutionGraph:
         last = messages[-1] if messages else None
         tool_calls = [dict(call) for call in (getattr(last, "tool_calls", None) or [])]
 
+        # Scope before budget and approval: an unauthorized call neither
+        # spends the budget nor reaches a human, because approving it would
+        # not make it authorized.
+        tool_calls, refused = _split_out_of_scope_calls(state["request"], tool_calls)
+
         accountant = self._accountant(state)
         affordable: list[dict[str, Any]] = []
-        refused: list[ToolMessage] = []
         for call in tool_calls:
             if accountant.note_tool_call().allowed:
                 affordable.append(call)
@@ -721,6 +725,9 @@ class ProductionRagRuntime:
                 "device_id": request.device_id,
                 "rag_force_final_response": bool(force_final),
                 "run_config": run_config,
+                # Offer only in-scope tools; ``_rag_tools`` still refuses any
+                # call outside the scope, since a bound set can be widened.
+                "allowed_tool_ids": tuple(request.allowed_tool_ids),
             },
             attachments=list(request.attachments),
         )
@@ -803,6 +810,9 @@ class ProductionRagRuntime:
                         agent=agent,
                         conversation_id=request.conversation_id,
                         user_id=request.user_id,
+                        # The policy ``_split_gated_calls`` judged with, so a
+                        # tool recovered during execution is judged the same way.
+                        hitl_policy=_rag_policy(request),
                     )
                 artifacts.extend(produced_artifacts)
                 images.extend(produced_images)
@@ -901,6 +911,52 @@ RAG_APPROVAL_REFUSAL_TEXT = (
 )
 
 
+#: What the model reads for a call outside its dispatch scope. The same text
+#: ``WorkerToolScopeMiddleware`` answers with, so a worker is refused the same
+#: way whichever graph runs it.
+RAG_SCOPE_REFUSAL_TEXT = "tool_not_authorized_for_this_worker"
+
+
+def _split_out_of_scope_calls(
+    request: RagExecutionRequest,
+    calls: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[ToolMessage]]:
+    """Separate calls inside ``request.allowed_tool_ids`` from paired refusals.
+
+    Empty means "this agent's own scope", as it does for specialist workers
+    (``specialists._worker_tool_scope``); a non-empty set is a real narrowing.
+    Matching is by call name, like ``WorkerToolScopeMiddleware``'s refusal.
+    """
+    allowed = frozenset(str(tool_id) for tool_id in request.allowed_tool_ids or ())
+    if not allowed:
+        return calls, []
+    permitted: list[dict[str, Any]] = []
+    refused: list[ToolMessage] = []
+    for call in calls:
+        name = str(call.get("name") or "")
+        if name in allowed:
+            permitted.append(call)
+            continue
+        refused.append(
+            ToolMessage(
+                content=RAG_SCOPE_REFUSAL_TEXT,
+                tool_call_id=str(call.get("id") or ""),
+                name=name or "tool",
+                status="error",
+            )
+        )
+    if refused:
+        logger.info("RAG refused %d out-of-scope tool call(s)", len(refused))
+    return permitted, refused
+
+
+def _rag_policy(request: RagExecutionRequest) -> dict[str, Any]:
+    """The approval policy this RAG run is judged under."""
+    from app.ai.hitl_config import policy_from_context
+
+    return policy_from_context({"hitl_policy": request.hitl_policy})
+
+
 async def _split_gated_calls(
     request: RagExecutionRequest,
     calls: list[dict[str, Any]],
@@ -912,10 +968,10 @@ async def _split_gated_calls(
     instead of executed: running it would bypass the policy every specialist
     enforces through ``ToolApprovalMiddleware``.
     """
-    from app.ai.hitl_config import calls_requiring_approval, policy_from_context
+    from app.ai.hitl_config import calls_requiring_approval
     from app.ai.workflow.middleware import _mcp_manager
 
-    policy = policy_from_context({"hitl_policy": request.hitl_policy})
+    policy = _rag_policy(request)
     gated_ids = calls_requiring_approval(
         calls, policy=policy, tool_map=tool_map, mcp_manager=await _mcp_manager()
     )

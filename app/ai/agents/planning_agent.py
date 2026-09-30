@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Iterable
 from textwrap import dedent
@@ -43,6 +44,8 @@ from .base_agent import BaseAgent
 
 if TYPE_CHECKING:
     from ...usage.recorder import ModelUsageRecorder
+
+logger = logging.getLogger(__name__)
 
 
 #: The only tool names Planning's model node has a branch for. Anything else
@@ -745,10 +748,13 @@ class PlanningAgent(BaseAgent):
             raw_text = coerce_response_text(getattr(raw_response, "content", ""))
             return parse_planning_rubric_evaluation(raw_text, iteration=iteration)
         except Exception as exc:
+            # The explanation lands in persisted, published rubric metadata, so
+            # it names the type; the provider's text stays in the log.
+            logger.warning("Planning rubric grader failed: %s", exc)
             return PlanningRubricEvaluation(
                 iteration=iteration,
                 result="grader_error",
-                explanation=f"Planning rubric grader failed: {exc}",
+                explanation=f"Planning rubric grader failed ({type(exc).__name__}).",
                 criteria=[],
             )
 

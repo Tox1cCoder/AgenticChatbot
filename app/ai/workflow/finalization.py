@@ -31,6 +31,7 @@ from app.ai.workflow.contracts import (
     WorkerResult,
     WorkflowError,
 )
+from app.ai.workflow.errors import workflow_error
 from app.observability.routing import get_routing_metrics_recorder
 
 logger = logging.getLogger(__name__)
@@ -388,22 +389,22 @@ def make_validate_output_node(
         try:
             validated = await validator.validate(outcome, state)
         except OutputValidationError as exc:
-            logger.warning("Output validation failed: %s (%s)", exc.reason, exc.detail)
+            agent_id = getattr(outcome, "agent_id", None)
+            # ``exc.detail`` is uncontrolled text that can quote the rejected
+            # response, so it goes to the operator log only. The payload keeps
+            # the allowlisted reason and agent, which is what tells one
+            # occurrence apart from another.
+            logger.warning(
+                "Output validation failed: %s agent=%s (%s)", exc.reason, agent_id, exc.detail
+            )
             return Command(
                 update={
                     "execution_phase": "failed",
-                    "workflow_error": WorkflowError(
-                        code="response_validation_failed",
+                    "workflow_error": workflow_error(
+                        "response_validation_failed",
                         retriable=exc.retriable,
                         request_id=request_id,
-                        # ``{"reason": ...}`` alone named the symptom and
-                        # nothing else, so one occurrence was indistinguishable
-                        # from any other and none could be diagnosed.
-                        details={
-                            "reason": exc.reason,
-                            "detail": exc.detail,
-                            "agent_id": getattr(outcome, "agent_id", None),
-                        },
+                        details={"reason": exc.reason, "agent": agent_id},
                     ),
                 },
                 goto="finalize",

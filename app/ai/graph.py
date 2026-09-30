@@ -1585,6 +1585,8 @@ class MultiAgentWorkflow(
             )
         except Exception as exc:  # noqa: BLE001 - a grader outage is not a plan failure
             logger.warning("Planning rubric review failed: %s", exc)
+            # Rubric metadata is persisted and published: the type, not the text.
+            reason = f"Planning rubric review failed ({type(exc).__name__})."
             return PlanningRubricAttempt(
                 status="grader_error",
                 iterations=previous_iterations,
@@ -1592,8 +1594,8 @@ class MultiAgentWorkflow(
                 rubric=FALLBACK_PLANNING_RUBRIC,
                 rubric_source="fallback",
                 evaluations=[],
-                feedback=f"Planning rubric review failed: {exc}",
-                error=f"Planning rubric review failed: {exc}",
+                feedback=reason,
+                error=reason,
             )
 
     async def _planning_review_rubric(self, state: GraphState, todos: list[dict[str, Any]]):

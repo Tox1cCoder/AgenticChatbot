@@ -470,3 +470,76 @@ class TestCallNameIdentity:
 
         tool = tool_set.loaded["dual__search"]
         assert (tool.tool_name, tool.server_name, tool.generation) == ("find", "tavily", 2)
+
+
+# ---------------------------------------------------------------------------
+# 8. No conversation, no scope
+# ---------------------------------------------------------------------------
+
+
+class TestMissingConversationId:
+    """A missing conversation id used to key the scope ``""`` -- shared by
+    every user and every conversation that also had none. Nothing may be
+    stored there, and nothing may be read back from it."""
+
+    @pytest.mark.parametrize("missing", [None, ""])
+    def test_server_tools_are_not_stored_without_a_conversation(self, missing):
+        state = DeferredToolState()
+
+        loaded = state.autoload(missing, AGENT, [_server_ref()])
+
+        assert loaded == []
+        assert state._conversation_tools == {}
+        assert state.get_loaded(missing, AGENT) == []
+        assert state.get_all_loaded_tool_names(missing, AGENT) == []
+        assert state.get_server_for_loaded_tool(missing, AGENT, "brave__search") is None
+        assert state.get_raw_tool_name_for_loaded_tool(missing, AGENT, "brave__search") is None
+        assert state.mark_tool_used(missing, AGENT, "brave__search") is False
+
+    @pytest.mark.parametrize("missing", [None, ""])
+    def test_client_tools_are_not_stored_without_a_conversation(self, missing):
+        state = DeferredToolState()
+
+        loaded = state.autoload_client_tools(
+            conversation_id=missing,
+            agent_key=AGENT,
+            references=[_client_ref()],
+            device_id="dev-a",
+            session_id="sess-a",
+        )
+
+        assert loaded == []
+        assert state._client_tool_scopes == {}
+        assert (
+            state.get_loaded_client_tools(missing, AGENT, device_id="dev-a", session_id="sess-a")
+            == []
+        )
+
+    def test_one_users_tools_never_surface_on_another_users_id_less_turn(self):
+        """The cross-user read: user A loads with no id, user B reads with none."""
+        state = DeferredToolState()
+        state.autoload(None, AGENT, [_server_ref()])
+
+        assert state.get_loaded(None, AGENT) == []
+        snapshot = state.snapshot(None, AGENT)
+        assert snapshot["server_tools"] == []
+
+    def test_a_snapshot_is_not_restored_into_the_shared_scope(self):
+        state = DeferredToolState()
+        snapshot = {
+            "runtime_id": RUNTIME_ID,
+            "server_tools": [
+                {
+                    "tool_name": "search",
+                    "server_name": "brave",
+                    "call_name": "brave__search",
+                    "generation": 0,
+                }
+            ],
+            "client_tools": [],
+        }
+
+        restored = state.restore(None, AGENT, snapshot)
+
+        assert restored == {"server_tools": 0, "client_tools": 0}
+        assert state._conversation_tools == {}
