@@ -21,6 +21,9 @@ from app.models.hitl_interrupt import HITLInterrupt, HITLInterruptStatus
 from app.models.tool_approval_setting import ToolApprovalSetting
 from app.models.user import User
 from app.repositories.hitl_interrupt import HITLInterruptRepository
+from tests.database_isolation import requires_test_database
+
+pytestmark = requires_test_database
 
 
 def _build_app(user_id):

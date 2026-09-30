@@ -21,6 +21,7 @@ from app.models.project import Project
 from app.models.user import User
 from app.models.user_memory import UserMemory
 from app.repositories.user_memory import UserMemoryRepository
+from tests.database_isolation import requires_test_database
 
 
 @pytest.fixture
@@ -179,7 +180,7 @@ class TestProjectResolution:
 # ---------------------------------------------------------------------------
 
 
-pytestmark = pytest.mark.selector_event_loop
+pytestmark = [requires_test_database, pytest.mark.selector_event_loop]
 
 
 class TestAsyncTwins:

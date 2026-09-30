@@ -17,6 +17,9 @@ from app.models.project import Project, ProjectCustomAgent
 from app.models.user import User
 from app.repositories.custom_agent import CustomAgentRepository
 from app.repositories.project import ProjectRepository
+from tests.database_isolation import requires_test_database
+
+pytestmark = requires_test_database
 
 
 @pytest.fixture

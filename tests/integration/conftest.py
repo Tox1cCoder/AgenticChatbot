@@ -17,51 +17,24 @@ rows. Pointed at the app database, that is not merely untidy:
 The guard is unconditional rather than per-module. A module that only touches
 its own ``uuid4`` rows today is one edit away from not doing so, and the cost
 of being wrong is someone's data.
+
+``tests/conftest.py`` already refuses this at configure time for the whole suite.
+The check stays here because the cost of it silently going missing is the same.
+It compares against the application database as configured *before* the suite
+rebinds ``DATABASE_URL``: after the rebind ``settings.database_url`` is the test
+database itself, so comparing against it would refuse every run.
 """
 
 from __future__ import annotations
 
-import os
-
-import pytest
-from sqlalchemy.engine import make_url
-
-
-def _same_database(left: str, right: str) -> bool:
-    """Whether two URLs address the same host/port/database.
-
-    Driver prefix and credentials are ignored on purpose: ``postgresql://`` and
-    ``postgresql+psycopg://`` pointing at the same database are the same
-    database, and a different password does not make it a different one.
-    """
-    try:
-        first, second = make_url(left), make_url(right)
-    except Exception:  # noqa: BLE001 - an unparseable URL is not a match
-        return False
-    return (
-        (first.host or "") == (second.host or "")
-        and (first.port or 5432) == (second.port or 5432)
-        and (first.database or "") == (second.database or "")
-    )
+from tests import database_isolation
 
 
 def pytest_collection_modifyitems(config, items):
     """Fail the integration suite outright when it is aimed at the app database."""
-    test_url = os.getenv("TEST_DATABASE_URL")
+    test_url = database_isolation.configured_test_database_url()
     if not test_url:
         return
-
-    from app.core.config import settings
-
-    app_url = getattr(settings, "database_url", "") or ""
-    if not app_url or not _same_database(test_url, app_url):
-        return
-
-    target = make_url(test_url)
-    raise pytest.UsageError(
-        "TEST_DATABASE_URL points at the application database "
-        f"({target.host}:{target.port or 5432}/{target.database}). These tests run "
-        "Base.metadata.create_all and delete seeded rows, so they must never run there. "
-        "Create a dedicated database (for example `createdb chatbot_test`) and set "
-        "TEST_DATABASE_URL to it."
+    database_isolation.refuse_application_database(
+        test_url, database_isolation.application_database_url()
     )

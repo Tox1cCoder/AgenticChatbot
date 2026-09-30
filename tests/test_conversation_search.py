@@ -29,7 +29,7 @@ NOW = datetime.now(timezone.utc)
 
 
 @pytest.fixture
-def env():
+def env(require_test_database):
     """Two projects, one loose conversation, and a second user."""
     db = Database(settings.database_url)
     sf = db.session

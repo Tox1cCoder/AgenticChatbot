@@ -320,7 +320,7 @@ class _Env:
 
 
 @pytest.fixture
-def env():
+def env(require_test_database):
     e = _Env()
     try:
         yield e

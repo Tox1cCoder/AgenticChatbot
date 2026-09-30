@@ -6,6 +6,9 @@ from sqlalchemy import create_engine, inspect, text
 from app.core.config import settings
 from app.models import *  # noqa: F401,F403
 from app.models.base import Base
+from tests.database_isolation import requires_test_database
+
+pytestmark = requires_test_database
 
 EXTERNAL_TABLES = {
     "alembic_version",

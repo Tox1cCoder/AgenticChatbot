@@ -48,7 +48,7 @@ def test_factory_defaults_project_id_to_none():
 
 
 @pytest.fixture
-def membership_env():
+def membership_env(require_test_database):
     db = Database(settings.database_url)
     sf = db.session
     owner_id = uuid4()

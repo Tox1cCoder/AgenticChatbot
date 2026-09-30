@@ -18,6 +18,9 @@ from app.models.custom_agent import ConversationCustomAgent, CustomAgent
 from app.models.project import Project, ProjectCustomAgent
 from app.models.user import User
 from app.utils.exception_handler import register_exception_handlers
+from tests.database_isolation import requires_test_database
+
+pytestmark = requires_test_database
 
 
 def _build_app(user_id):

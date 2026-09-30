@@ -21,12 +21,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 from app.ai.graph import create_workflow
 from app.ai.workflow.graph_builder import BASE_SPECIALIST_NODES, PLANNING_ENTRY_NODE
 from app.ai.workflow.planning_execution import PLANNING_NODE_NAMES
 from app.core.config import settings
+from tests.database_isolation import requires_test_database
 
 # Node names, not public agent IDs: Planning's node is ``planning_model``.
 # Read from the builder so this cannot drift away from the graph it describes.
@@ -127,8 +128,13 @@ def _engine():
     return create_engine(settings.database_url)
 
 
+@requires_test_database
 def test_no_live_checkpoint_write_schedules_removed_summarize_node():
     with _engine().connect() as conn:
+        # LangGraph's checkpointer creates this table at runtime, not Alembic, so a
+        # test database built by migrations may have no checkpoints to inspect.
+        if not inspect(conn).has_table("checkpoint_writes"):
+            pytest.skip("the test database has no LangGraph checkpoint tables")
         pending = conn.execute(
             text("SELECT COUNT(*) FROM checkpoint_writes WHERE channel = 'summarize'")
         ).scalar_one()

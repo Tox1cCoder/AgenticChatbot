@@ -15,8 +15,9 @@ from app.database.session import SessionLocal
 from app.models.enums import MessageRole
 from app.repositories.message import MessageRepository
 from app.schemas.message import MessageCreate
+from tests.database_isolation import requires_test_database
 
-pytestmark = pytest.mark.selector_event_loop
+pytestmark = [requires_test_database, pytest.mark.selector_event_loop]
 
 
 @pytest.fixture

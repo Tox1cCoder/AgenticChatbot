@@ -13,6 +13,8 @@ import tempfile
 
 import pytest
 
+from tests import database_isolation
+
 # Set this before pytest imports application modules. Client settings otherwise
 # fall through to the developer's live LOCALAPPDATA profile, where enabled MCP
 # processes must never be started by the test suite.
@@ -38,6 +40,12 @@ atexit.register(_PYTEST_RUNTIME.cleanup)
 os.environ["LANGSMITH_TRACING"] = "false"
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
+# Tests that open real sessions must never reach the application database: they seed
+# and delete rows by id. With TEST_DATABASE_URL set, DATABASE_URL is rebound to it
+# here, before any ``app`` import, so the whole suite uses the test database. Without
+# it, DB-backed tests are skipped by the gates in tests/database_isolation.py.
+database_isolation.bind_suite_to_test_database()
+
 # Client settings also read a dotenv file, defaulting to the repository's own
 # .env.client. Whatever a developer keeps in that file would otherwise leak into
 # the suite, so point the loader at an empty file instead.
@@ -45,6 +53,12 @@ _PYTEST_CLIENT_ENV_FILE = os.path.join(_PYTEST_RUNTIME.name, "client-settings-em
 with open(_PYTEST_CLIENT_ENV_FILE, "w", encoding="utf-8") as _handle:
     _handle.write("")
 os.environ["CLIENT_ENV_FILE"] = _PYTEST_CLIENT_ENV_FILE
+
+# The sidecar refuses requests without its per-launch token, from a non-loopback Host
+# (TestClient sends "testserver") or from a foreign Origin. Hundreds of sidecar tests
+# predate that and exercise the routes behind it, so the suite turns the checks off;
+# tests/client_backend/test_request_trust.py turns them on and covers them.
+os.environ["CLIENT_TRUST_CHECKS_ENABLED"] = "false"
 
 
 class FakePopen:
@@ -88,6 +102,11 @@ def pytest_configure(config):
         "selector_event_loop: run this async test on a SelectorEventLoop "
         "(required for async psycopg on Windows)",
     )
+    test_url = database_isolation.configured_test_database_url()
+    if test_url:
+        database_isolation.refuse_application_database(
+            test_url, database_isolation.application_database_url()
+        )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -133,31 +152,23 @@ def pytest_asyncio_loop_factories(config, item):
     return {"proactor": asyncio.ProactorEventLoop}
 
 
+@pytest.fixture
+def require_test_database() -> None:
+    """Skip a test (or the DB fixture that requests this) without a test database."""
+    database_isolation.skip_unless_test_database()
+
+
 @pytest.fixture(scope="session")
 def _async_db_available() -> bool:
-    """Probe the async engine once per session."""
-    from sqlalchemy import text
-
-    from app.database.async_session import AsyncSessionLocal
-
-    async def probe() -> bool:
-        try:
-            async with AsyncSessionLocal() as session:
-                await session.execute(text("select 1"))
-            return True
-        except Exception:
-            return False
-
-    if sys.platform == "win32":
-        return asyncio.run(probe(), loop_factory=asyncio.SelectorEventLoop)
-    return asyncio.run(probe())
+    """Probe the async engine once per session; never without a test database."""
+    return database_isolation.async_test_database_available()
 
 
 @pytest.fixture
-def require_async_db(_async_db_available: bool) -> None:
-    """Skip a test that needs a reachable PostgreSQL."""
+def require_async_db(require_test_database: None, _async_db_available: bool) -> None:
+    """Skip a test that needs a reachable test PostgreSQL."""
     if not _async_db_available:
-        pytest.skip("async PostgreSQL is not reachable")
+        pytest.skip("TEST_DATABASE_URL is set but its PostgreSQL is not reachable")
 
 
 @pytest.fixture

@@ -24,6 +24,9 @@ from app.repositories.project import ProjectRepository
 from app.schemas.project import ProjectCreate, ProjectUpdate
 from app.services.project_service import ProjectService
 from app.utils.validation.conversation_validation import ConversationValidationUtils
+from tests.database_isolation import requires_test_database
+
+pytestmark = requires_test_database
 
 
 @pytest.fixture

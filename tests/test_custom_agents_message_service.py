@@ -45,7 +45,7 @@ class _FakeModelConfig:
 
 
 @pytest.fixture
-def paused_env():
+def paused_env(require_test_database):
     db = Database(settings.database_url)
     session_factory = db.session
     owner_id = uuid4()

@@ -54,7 +54,7 @@ def _build_app(user_id):
 
 
 @pytest.fixture
-def api():
+def api(require_test_database):
     db = Database(settings.database_url)
     sf = db.session
     owner_id = uuid4()
