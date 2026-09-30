@@ -289,7 +289,7 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | `postgresql://localhost:5432/chatbot` | SQLAlchemy DSN |
-| `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | Uvicorn bind |
+| `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Uvicorn bind; set `0.0.0.0` to accept LAN connections |
 | `ENVIRONMENT` | `development` | `development` / `staging` / `production` |
 | `SECRET_KEY` | *(ephemeral in dev)* | Must be set in production |
 | `JWT_ALGORITHM` | `HS256` | |

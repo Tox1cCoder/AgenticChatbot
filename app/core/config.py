@@ -248,8 +248,8 @@ class Settings(BaseSettings):
 
     # API settings
     api_host: str = Field(
-        default="0.0.0.0",
-        description="API host",
+        default="127.0.0.1",
+        description="API bind address; set 0.0.0.0 explicitly to accept LAN connections",
     )
     api_port: int = Field(
         default=8000,
