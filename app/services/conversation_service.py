@@ -6,6 +6,8 @@ import logging
 from typing import Any
 from uuid import UUID
 
+import anyio.from_thread
+
 from app.factories.conversation_factory import ConversationFactory
 from app.interfaces.conversation_service_interface import IConversationService
 from app.repositories.conversation import ConversationRepository
@@ -210,15 +212,26 @@ class ConversationService(IConversationService):
 
         The task is held in ``_BACKGROUND_TASKS`` until it finishes: the loop
         keeps only a weak reference, so an unreferenced task can be collected
-        mid-delete. Without a running loop nothing is scheduled; the checkpoint
-        retention sweep deletes the threads of soft-deleted conversations.
+        mid-delete. The delete routes are sync, so FastAPI calls this from its
+        worker threadpool; the task is then handed to the event loop, which also
+        owns the checkpointer's async pool. With no loop at all (Celery, scripts)
+        nothing is scheduled; the checkpoint retention sweep deletes the threads
+        of soft-deleted conversations.
         """
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
-            logger.info("No event loop; checkpoint thread %s is left to the sweep", thread_id)
+            try:
+                anyio.from_thread.run_sync(self._spawn_checkpoint_cleanup, thread_id)
+            except RuntimeError:
+                logger.info("No event loop; checkpoint thread %s is left to the sweep", thread_id)
             return
-        task = loop.create_task(self._delete_checkpoint_thread_async(thread_id))
+        self._spawn_checkpoint_cleanup(thread_id)
+
+    def _spawn_checkpoint_cleanup(self, thread_id: str) -> None:
+        task = asyncio.get_running_loop().create_task(
+            self._delete_checkpoint_thread_async(thread_id)
+        )
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
 

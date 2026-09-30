@@ -8,6 +8,7 @@ import warnings
 from types import SimpleNamespace
 from uuid import uuid4
 
+import anyio
 import pytest
 
 import app.services.conversation_service as module
@@ -50,6 +51,24 @@ async def test_the_cleanup_task_is_held_until_it_finishes():
 
     assert checkpoints.deleted == [str(conversation_id)]
     assert not module._BACKGROUND_TASKS
+
+
+@pytest.mark.asyncio
+async def test_a_delete_from_a_worker_thread_still_cleans_up_on_the_loop():
+    """The delete routes are sync, so FastAPI runs them in its threadpool."""
+    checkpoints = _Checkpoints()
+    conversation_id = uuid4()
+    service = _service(checkpoints)
+
+    deleted = await anyio.to_thread.run_sync(
+        service.delete_conversation, conversation_id, uuid4()
+    )
+
+    assert deleted is True
+    assert len(module._BACKGROUND_TASKS) == 1
+    checkpoints.release.set()
+    await asyncio.gather(*module._BACKGROUND_TASKS)
+    assert checkpoints.deleted == [str(conversation_id)]
 
 
 def test_without_an_event_loop_nothing_is_left_unawaited():
