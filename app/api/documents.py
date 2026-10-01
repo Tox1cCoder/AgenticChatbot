@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import Iterable
 from pathlib import Path
@@ -30,7 +31,7 @@ from app.schemas.document import (
     DocumentUploadFileStatus,
 )
 from app.schemas.responses.api_response import ApiResponse
-from app.services.document_processing_service import DocumentProcessingService
+from app.services.document_processing_service import DocumentProcessingService, reap_upload_task
 from app.services.document_service import normalize_document_filename
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.document_validation import DocumentValidationUtils
@@ -81,6 +82,7 @@ async def _stage_create_and_enqueue_document(
         )
 
     staged_file_path = Path(staged_upload["temp_file_path"])
+    queued = False
 
     try:
         document = await document_service.validate_and_create_document(
@@ -90,12 +92,27 @@ async def _stage_create_and_enqueue_document(
             conversation_id=conversation_id,
         )
 
-        task_info = await document_processing_service.start_processing_task(
-            str(document.id),
-            str(staged_file_path),
-            file.filename or "unknown",
-            staged_upload["file_size"],
+        enqueue_task = asyncio.create_task(
+            document_processing_service.start_processing_task(
+                str(document.id),
+                str(staged_file_path),
+                file.filename or "unknown",
+                staged_upload["file_size"],
+            )
         )
+        try:
+            task_info = await asyncio.shield(enqueue_task)
+        except asyncio.CancelledError:
+            # A broker publish may already be running in a thread. Wait for
+            # its outcome before deciding whether the request still owns the
+            # staged file or has transferred it to the processing worker.
+            try:
+                await reap_upload_task(enqueue_task)
+                queued = True
+            except Exception:
+                pass
+            raise
+        queued = True
 
         task_id = task_info.get("task_id")
         if task_id:
@@ -110,14 +127,12 @@ async def _stage_create_and_enqueue_document(
             processing=task_info,
         )
     except DuplicateDocumentFilenameError as exc:
-        _safe_unlink(staged_file_path)
         return _rejection_from_duplicate(display_name, exc)
     except FileValidationError as exc:
-        _safe_unlink(staged_file_path)
         return _rejection_from_validation(display_name, exc)
-    except Exception:
-        _safe_unlink(staged_file_path)
-        raise
+    finally:
+        if not queued:
+            await run_in_threadpool(_safe_unlink, staged_file_path)
 
 
 async def _require_conversation_access(

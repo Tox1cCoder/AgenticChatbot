@@ -48,6 +48,18 @@ _IMAGE_CAPTION_STRUCTURED_PROMPT = (
 )
 
 
+async def reap_upload_task(task: asyncio.Task) -> Any:
+    """Obtain the worker outcome even if its waiting request is cancelled again."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Cancelling the waiter cannot stop disk/broker work in a thread.
+            # Keep ownership until that work has a definitive result.
+            continue
+    return task.result()
+
+
 class DocumentProcessingService:
     def __init__(
         self,
@@ -134,7 +146,6 @@ class DocumentProcessingService:
         self._validate_file_extension(filename)
 
         temp_dir = Path(os.getcwd()) / self.settings.temp_storage_path
-        temp_dir.mkdir(parents=True, exist_ok=True)
         temp_file_path = self._staged_temp_path(uuid.uuid4().hex, filename, temp_dir)
 
         bytes_written = 0
@@ -144,20 +155,20 @@ class DocumentProcessingService:
             if hasattr(upload_file, "seek"):
                 await upload_file.seek(0)
 
-            with temp_file_path.open("wb") as staged_file:
-                while True:
-                    chunk = await upload_file.read(1024 * 1024)
-                    if not chunk:
-                        break
+            await self._staging_disk_call(self._initialize_staged_upload, temp_file_path)
+            while True:
+                chunk = await upload_file.read(1024 * 1024)
+                if not chunk:
+                    break
 
-                    bytes_written += len(chunk)
-                    if bytes_written > max_size_bytes:
-                        raise ValueError(
-                            f"File size ({bytes_written} bytes) exceeds maximum allowed "
-                            f"size of {self.settings.max_file_size_mb}MB"
-                        )
+                bytes_written += len(chunk)
+                if bytes_written > max_size_bytes:
+                    raise ValueError(
+                        f"File size ({bytes_written} bytes) exceeds maximum allowed "
+                        f"size of {self.settings.max_file_size_mb}MB"
+                    )
 
-                    staged_file.write(chunk)
+                await self._staging_disk_call(self._append_staged_upload, temp_file_path, chunk)
 
             validation = await self.validate_upload_file(filename, bytes_written)
             return {
@@ -165,13 +176,32 @@ class DocumentProcessingService:
                 "file_size": bytes_written,
                 "file_info": validation,
             }
-        except Exception:
-            try:
-                if temp_file_path.exists():
-                    temp_file_path.unlink()
-            except Exception:
-                pass
+        except BaseException:
+            with contextlib.suppress(OSError):
+                await self._staging_disk_call(temp_file_path.unlink, missing_ok=True)
             raise
+
+    @staticmethod
+    async def _staging_disk_call(operation, *args, **kwargs):
+        # Cancellation must not race an unfinished write with removal of its
+        # path. Reap the worker before the caller's cleanup unlinks the file.
+        task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await reap_upload_task(task)
+            raise
+
+    @staticmethod
+    def _initialize_staged_upload(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+
+    @staticmethod
+    def _append_staged_upload(path: Path, chunk: bytes) -> None:
+        with path.open("ab") as staged_file:
+            staged_file.write(chunk)
 
     async def start_processing_task(
         self,
@@ -182,7 +212,7 @@ class DocumentProcessingService:
     ) -> dict[str, Any]:
         validation = await self.validate_upload_file(filename, file_size)
         staged_path = Path(temp_file_path)
-        if not staged_path.is_file():
+        if not await asyncio.to_thread(staged_path.is_file):
             raise FileNotFoundError(f"Staged upload file not found: {temp_file_path}")
 
         logger.debug(
@@ -199,11 +229,8 @@ class DocumentProcessingService:
                 self._enqueue_processing_chain, document_id, str(staged_path), filename
             )
         except Exception:
-            try:
-                if staged_path.is_file():
-                    staged_path.unlink()
-            except Exception:
-                pass
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(staged_path.unlink, missing_ok=True)
             raise
 
         return {
