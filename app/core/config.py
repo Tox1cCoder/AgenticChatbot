@@ -1232,13 +1232,6 @@ class Settings(BaseSettings):
         default=30,
         description="Timeout for individual tool calls in seconds",
     )
-    tool_execution_consecutive_errors_limit: int = Field(
-        default=3,
-        description=(
-            "Maximum repeated same tool/error/argument outputs before forcing "
-            "final no-tools synthesis."
-        ),
-    )
 
     # Tool Execution Policy Configuration (origin-aware timeout/retry policy)
     tool_execution_policies: dict[str, ToolExecutionPolicyOverride] = Field(
@@ -1967,7 +1960,6 @@ class Settings(BaseSettings):
         "react_agent_recursion_limit",
         "planning_rubric_max_iterations",
         "agentic_max_iterations",
-        "tool_execution_consecutive_errors_limit",
         "celery_worker_concurrency",
         "celery_worker_prefetch_multiplier",
         "celery_worker_max_tasks_per_child",

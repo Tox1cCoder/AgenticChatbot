@@ -1,0 +1,2 @@
+# Evaluation manifests/reviews authenticate exact fixture bytes across platforms.
+eval/** text=auto eol=lf

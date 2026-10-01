@@ -21,7 +21,6 @@ from .project import (
     ProjectValidationError,
 )
 from .resource import ResourceNotFoundException
-from .skills import SkillNotFoundError
 from .validation import FileValidationError, ValidationException
 
 __all__ = [
@@ -38,7 +37,6 @@ __all__ = [
     "ToolExecutionError",
     "ServerConfigurationError",
     "PauseReason",
-    "SkillNotFoundError",
     "CustomAgentValidationError",
     "CustomAgentForbiddenError",
     "CustomAgentNotFoundError",
