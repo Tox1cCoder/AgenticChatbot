@@ -243,6 +243,13 @@ class Settings(BaseSettings):
         description="Environment",
     )
 
+    @field_validator("environment", mode="before")
+    @classmethod
+    def _normalize_environment(cls, value: object) -> str:
+        # Every check compares against lowercase names; normalize once so
+        # "Development" means the same thing to all of them.
+        return str(value or "development").strip().lower() or "development"
+
     # Security
     secret_key: str = Field(
         repr=False,

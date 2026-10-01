@@ -89,3 +89,13 @@ def test_development_keeps_its_permissive_defaults():
 
     assert settings.secret_key == "short"
     assert settings.cors_origins == []
+
+
+@pytest.mark.parametrize("spelling", ["Development", " development ", "DEVELOPMENT"])
+def test_the_environment_name_is_normalized_once_for_every_check(spelling):
+    """The security checks compared the raw value while the production check
+    lowered it, so ``Development`` was a deployment to one and not the other."""
+    settings = _settings(environment=spelling, secret_key="short", cors_origins=[])
+
+    assert settings.environment == "development"
+    assert settings.secret_key == "short"
