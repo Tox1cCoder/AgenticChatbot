@@ -277,18 +277,6 @@ class TestProjectResolution:
         assert repo.resolve_project_id(ids.owner, ids.foreign) is None
 
 
-pytestmark = pytest.mark.selector_event_loop
-
-
-class TestAsyncTwins:
-    async def test_aread_matches_read(self, env):
-        repo, _sf, ids = env
-        expected = repo.read(ids.owner, ids.pref, project_id=ids.project_a)
-        actual = await repo.aread(ids.owner, ids.pref, project_id=ids.project_a)
-        assert actual[0] == expected[0]
-        assert [line.content for line in actual[1]] == [line.content for line in expected[1]]
-
-
 # ---------------------------------------------------------------------------
 # Tool surface
 # ---------------------------------------------------------------------------

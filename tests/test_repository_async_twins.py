@@ -124,11 +124,6 @@ async def test_conversation_aget_by_id_returns_none_for_missing(
     assert await conversation_repository.aget_by_id(uuid4()) is None
 
 
-async def test_document_acount_matches_sync(document_repository, seeded_conversation_id):
-    expected = document_repository.count_by_conversation(seeded_conversation_id)
-    assert await document_repository.acount_by_conversation(seeded_conversation_id) == expected
-
-
 # ── Phase 2: repositories on the rest of the pre-first-token path ───────────
 
 

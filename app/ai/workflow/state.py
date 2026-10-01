@@ -153,9 +153,18 @@ class WorkflowState(TypedDict):
     agent_outcome: NotRequired[ResponseOutcome | None]
     worker_results: NotRequired[Annotated[list[WorkerResult], append_worker_results]]
     execution_phase: NotRequired[ExecutionPhase]
+    # Which epoch of this turn is running: 0 for the first, advanced by the
+    # continuation pause on every rollover, automatic or human. The source of
+    # truth for the epoch -- the pause payload carries it, the generations row
+    # records it when the pause is persisted, and a Continue is fenced against
+    # it. Undeclared, LangGraph dropped the pause node's update and every pause
+    # reported epoch 0.
+    execution_epoch: NotRequired[int]
     # What this epoch spent, and what the turn has spent overall. Written by the
     # specialist wrapper from the outcome; read to decide whether a validated
-    # answer is a finished one or a continuable partial.
+    # answer is a finished one or a continuable partial. The continuation pause
+    # writes the next epoch's starting budget, so the turn totals and the epoch
+    # count survive the rollover.
     execution_budget: NotRequired[dict[str, Any] | None]
     # Complete tool rounds from an earlier epoch of this turn, written by the
     # continuation pause. Plain replacement, not accumulation: each pause

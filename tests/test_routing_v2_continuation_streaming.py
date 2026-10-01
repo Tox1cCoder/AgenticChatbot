@@ -379,7 +379,8 @@ async def test_continue_resumes_the_exact_checkpoint_with_a_fresh_epoch():
     ]
 
     assert resumed["epoch"] == 1, "the resumed epoch did not advance"
-    assert resumed["budget"] is None, "the spent budget was carried into the new epoch"
+    assert resumed["budget"]["exhausted_by"] is None, "the spent budget was carried forward"
+    assert resumed["budget"]["epochs_used"] == 2, "the new epoch was not counted"
     assert "complete" in [event.type for event in events]
     assert all(event.type != "error" for event in events)
 

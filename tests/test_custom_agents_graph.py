@@ -449,35 +449,41 @@ def test_build_multi_agent_activity_block_has_identity_and_roster():
     assert "search_agent" in block
 
 
-def test_agent_trail_records_router_selection_and_handoff():
-    wf = _workflow()
-    rid = f"custom_agent:{uuid4()}"
-    state = _multi_custom_state("chat_agent", [rid])
-    state["custom_agents"][rid]["name"] = "Legal Reviewer"
+def test_activity_block_lists_the_turns_accepted_transitions():
+    """The trail is the turn's ``agent_history``: the router's pick, then hand-offs.
 
-    # Simulate the router having selected chat_agent for this turn.
-    wf._record_agent_invocation(state, "chat_agent", via="router")
-    # Then chat_agent hands off to the custom agent.
-    wf._record_agent_invocation(state, rid, via="handoff")
+    It used to read ``context["agents_invoked"]``, which only a deleted hand-off
+    interpreter ever wrote, so the section was always missing.
+    """
+    from app.ai.workflow.contracts import AgentTransition
 
-    trail = state["context"]["agents_invoked"]
-    assert [e["id"] for e in trail] == ["chat_agent", rid]
-    assert trail[0]["via"] == "router"
-    assert trail[1]["via"] == "handoff"
-    assert trail[1]["name"] == "Legal Reviewer"
-
-
-def test_activity_block_reflects_handoff_trail():
     wf = _workflow()
     rid = f"custom_agent:{uuid4()}"
     state = _multi_custom_state(rid, [rid])
     state["custom_agents"][rid]["name"] = "Legal Reviewer"
-    wf._record_agent_invocation(state, "chat_agent", via="router")
-    wf._record_agent_invocation(state, rid, via="handoff")
+    state["agent_history"] = [
+        AgentTransition(from_agent_id=None, to_agent_id="chat_agent", source="router"),
+        AgentTransition(
+            from_agent_id="chat_agent", to_agent_id=rid, source="handoff", tool_call_id="t1"
+        ),
+    ]
 
     block = wf._build_multi_agent_activity_block(state, rid)
 
     assert block is not None
-    # The active custom agent can now see who was involved this turn.
-    assert "Chat Agent" in block
-    assert "Legal Reviewer" in block
+    trail = block.split("Agents involved in this turn so far, in order:\n", 1)[1]
+    assert trail.splitlines() == [
+        "- Chat Agent — selected by the router",
+        "- Legal Reviewer — received via hand_off",
+    ]
+
+
+def test_activity_block_has_no_trail_before_any_transition():
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid, [rid])
+
+    block = wf._build_multi_agent_activity_block(state, rid)
+
+    assert block is not None
+    assert "Agents involved in this turn" not in block

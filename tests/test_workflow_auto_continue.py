@@ -86,12 +86,20 @@ async def test_auto_continue_never_stops_to_ask():
 
 @pytest.mark.asyncio
 async def test_auto_continue_still_resets_the_epoch_budget():
-    """The ladder is unchanged -- each epoch gets its own room and only its own."""
+    """The ladder is unchanged -- each epoch gets its own room and only its own.
+
+    The rolled budget is the next epoch's, not an absent one: clearing it also
+    cleared the epoch count, and the per-turn epoch cap never fired.
+    """
     node = make_continuation_pause_node(interrupt_fn=_Interrupt(), auto_continue=True)
 
     command = await node(_paused_state())
+    budget = command.update["execution_budget"]
 
-    assert command.update["execution_budget"] is None
+    assert budget["exhausted_by"] is None
+    assert budget["forced_synthesis"] is False
+    assert (budget["model_calls"], budget["tool_calls"]) == (0, 0)
+    assert (budget["execution_epoch"], budget["epochs_used"]) == (1, 2)
 
 
 @pytest.mark.asyncio

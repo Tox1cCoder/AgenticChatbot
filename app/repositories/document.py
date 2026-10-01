@@ -140,25 +140,6 @@ class DocumentRepository(RepositorySessionMixin):
             return True
 
     @staticmethod
-    def _count_by_conversation_in_session(db, conversation_id: UUID) -> int:
-        """Counting body shared by both transports.
-
-        This repository queries directly rather than through a strategy, so the
-        query itself lives here.
-        """
-        return db.query(Document).filter(Document.conversation_id == conversation_id).count()
-
-    def count_by_conversation(self, conversation_id: UUID) -> int:
-        """Count documents for a conversation"""
-        return self._run(lambda db: self._count_by_conversation_in_session(db, conversation_id))
-
-    async def acount_by_conversation(self, conversation_id: UUID) -> int:
-        """Async twin of :meth:`count_by_conversation`."""
-        return await self._arun(
-            lambda db: self._count_by_conversation_in_session(db, conversation_id)
-        )
-
-    @staticmethod
     def _routing_descriptors_in_session(db, conversation_id: UUID, limit: int) -> list[dict]:
         """Metadata-only document projection shared by both transports.
 

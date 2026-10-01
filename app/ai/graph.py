@@ -870,8 +870,6 @@ class MultiAgentWorkflow(
         Canvas state and attached custom agents are *context*: they widen what
         the router can choose, and never preselect an agent.
         """
-        self._reset_agent_trail(state)
-
         conversation_id = state.get("conversation_id")
         active_canvas = await self._get_active_canvas_snapshot(
             conversation_id, state.get("user_id")
@@ -1591,6 +1589,12 @@ class MultiAgentWorkflow(
             "turn_id": getattr(turn_identity, "turn_id", None),
             "task_id": active_agent_id,
         }
+        # The budget the continuation pause opened this epoch with. Absent on a
+        # first epoch. Without it every epoch's accountant started from nothing,
+        # so the turn totals and the epoch count never got past one epoch.
+        execution_budget = state.get("execution_budget")
+        if isinstance(execution_budget, dict) and execution_budget:
+            extras["execution_budget"] = dict(execution_budget)
         if node_name == "canvas_agent":
             previous_artifact = await self._get_active_canvas_snapshot(conversation_id, user_id)
             extras["previous_artifact"] = previous_artifact
@@ -1693,6 +1697,7 @@ class MultiAgentWorkflow(
                 hitl_policy=dict(request.hitl_policy or {}),
                 attachments=list(request.attachments),
                 mode="public",
+                execution_budget=request.extras.get("execution_budget"),
                 logical_turn_id=state_view.logical_turn_id(),
             )
         )

@@ -269,21 +269,6 @@ class ConversationSearchRepository(RepositorySessionMixin):
             )
         )
 
-    async def aread(
-        self,
-        user_id: str,
-        conversation_id: str,
-        project_id: str | None = None,
-        max_messages: int = 30,
-        max_chars_per_message: int = 600,
-    ) -> tuple[str | None, list[TranscriptLine], int] | None:
-        """Async twin of :meth:`read`."""
-        return await self._arun(
-            self._read_work(
-                user_id, project_id, conversation_id, max_messages, max_chars_per_message
-            )
-        )
-
     def resolve_project_id(self, user_id: str, conversation_id: str | None) -> str | None:
         """The project a conversation belongs to, ownership-checked."""
         if not conversation_id:

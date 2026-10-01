@@ -10,6 +10,7 @@ from app.ai.agents.custom_agent import CustomAgent, build_custom_specialist_defi
 from app.ai.custom_agent_runtime import build_custom_agent_runtime_spec, is_custom_runtime_id
 from app.ai.hand_off_tool import create_hand_off_tool
 from app.ai.schemas import GraphState, GraphStateView
+from app.ai.workflow.contracts import AgentTransition
 
 
 class CustomAgentsMixin:
@@ -112,61 +113,36 @@ class CustomAgentsMixin:
             lines.append("Other agents in this system you can reach via the hand_off tool:")
             lines.extend(f"- {target}: {desc}" for target, desc in roster.items())
 
-        trail = GraphStateView(state).context().get("agents_invoked")
-        if isinstance(trail, list) and trail:
-            via_labels = {
-                "router": "selected by the router",
-                "handoff": "received via hand_off",
-                "preselected": "resumed for this turn",
-                "sticky": "continuing from the previous turn",
-            }
-            lines.append("Agents involved in this turn so far, in order:")
-            for entry in trail:
-                if not isinstance(entry, dict):
-                    continue
-                name = entry.get("name") or entry.get("id") or "unknown"
-                via_label = via_labels.get(entry.get("via"), entry.get("via") or "")
-                suffix = f" — {via_label}" if via_label else ""
-                lines.append(f"- {name}{suffix}")
-
+        lines.extend(self._agent_trail_lines(state, custom_agents))
         return "\n".join(lines)
 
-    def _reset_agent_trail(self, state: GraphState) -> None:
-        """Clear the per-turn invocation trail (called at the start of routing)."""
-        context = state.get("context")
-        if not isinstance(context, dict):
-            context = {}
-        context["agents_invoked"] = []
-        state["context"] = context
+    @staticmethod
+    def _agent_trail_lines(state: GraphState, custom_agents: dict[str, Any]) -> list[str]:
+        """Who has held this turn so far, read from its ``agent_history``.
 
-    def _record_agent_invocation(
-        self,
-        state: GraphState,
-        agent_id: str | None,
-        *,
-        via: str,
-    ) -> None:
-        """Append an agent to this turn's invocation trail (context.agents_invoked)."""
-        if not agent_id:
-            return
-        context = state.get("context")
-        if not isinstance(context, dict):
-            context = {}
-        trail = context.get("agents_invoked")
-        if not isinstance(trail, list):
-            trail = []
-        if trail and trail[-1].get("id") == agent_id and trail[-1].get("via") == via:
-            return
-        identity = agent_identity(agent_id, GraphStateView(state).custom_agents())
-        entry: dict[str, Any] = {
-            "id": agent_id,
-            "name": identity["name"] if identity else agent_id,
-            "kind": identity["kind"] if identity else "base",
-            "via": via,
+        The accepted-transition audit trail the router and the transition
+        resolver append to, so it cannot disagree with what actually ran. It is
+        turn-local by construction: every turn runs on its own checkpoint
+        thread.
+        """
+        history = [
+            transition
+            for transition in (state.get("agent_history") or [])
+            if isinstance(transition, AgentTransition)
+        ]
+        if not history:
+            return []
+        via_labels = {
+            "router": "selected by the router",
+            "handoff": "received via hand_off",
+            "resume": "resumed for this turn",
         }
-        trail.append(entry)
-        context["agents_invoked"] = trail
-        state["context"] = context
+        lines = ["Agents involved in this turn so far, in order:"]
+        for transition in history:
+            identity = agent_identity(transition.to_agent_id, custom_agents)
+            name = identity["name"] if identity else transition.to_agent_id
+            lines.append(f"- {name} — {via_labels.get(transition.source, transition.source)}")
+        return lines
 
     def _build_custom_agent(
         self,

@@ -42,10 +42,6 @@ class DocumentIndexGenerationRepository:
             db.refresh(generation)
         return generation
 
-    def get(self, generation_id: UUID) -> DocumentIndexGeneration | None:
-        with self.session_factory() as db:
-            return db.get(DocumentIndexGeneration, generation_id)
-
     def get_active(self, document_id: UUID) -> DocumentIndexGeneration | None:
         with self.session_factory() as db:
             return (

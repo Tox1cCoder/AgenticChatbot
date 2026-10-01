@@ -168,6 +168,11 @@ class GenerationControlService:
 
         The continuation id is minted here and is single-use: consuming it is
         what stops a replayed Continue from opening a second epoch.
+
+        The row takes the graph's epoch here. The graph owns the epoch and
+        rolls it without asking whenever auto-continue is on, so a row that
+        only advanced on human Continues would lease a Continue against an
+        epoch the checkpoint left long ago, and the pause node would refuse it.
         """
         blocked = bool(command.continuation_block_reason)
         values: dict[str, Any] = {
@@ -177,6 +182,8 @@ class GenerationControlService:
             "continuation_id": None if blocked else uuid.uuid4(),
             "continuation_block_reason": command.continuation_block_reason,
         }
+        if command.execution_epoch is not None:
+            values["execution_epoch"] = command.execution_epoch
         if command.research_accounting is not None:
             values["research_accounting"] = command.research_accounting
         if command.execution_budget is not None:
@@ -343,8 +350,9 @@ class GenerationControlService:
             lease = ContinuationLease(
                 snapshot=advanced,
                 execution_epoch=advanced.execution_epoch,
-                # The epoch the graph is still in. The row moved; the checkpoint
-                # did not, and the pause node advances it itself on resume.
+                # The epoch the graph is still in, which `mark_continuable`
+                # recorded from the pause. The row moved; the checkpoint did
+                # not, and the pause node advances it itself on resume.
                 paused_epoch=snapshot.execution_epoch,
                 checkpoint_thread_id=context.checkpoint_thread_id,
                 active_agent_id=context.active_agent_id,

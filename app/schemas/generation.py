@@ -140,6 +140,11 @@ class MarkContinuable(BaseModel):
     ``research_accounting`` is carried here, not left in process memory: the
     Continue may be served by a different worker, and an absent budget looks to
     that worker exactly like a fresh turn with a full quota.
+
+    ``execution_epoch`` is the epoch the *graph* paused in. The graph is the
+    source of truth for it and rolls epochs the row never sees, so the row
+    records it here; ``prepare_continue`` then leases from the epoch the
+    checkpoint is really in. ``None`` leaves the row's epoch as it is.
     """
 
     generation_id: UUID
@@ -149,6 +154,7 @@ class MarkContinuable(BaseModel):
     assistant_message_id: UUID
     research_accounting: dict[str, Any] | None = None
     execution_budget: dict[str, Any] | None = None
+    execution_epoch: int | None = Field(default=None, ge=0)
     continuation_block_reason: str | None = Field(default=None, max_length=128)
 
 
@@ -193,7 +199,9 @@ class ContinuationLease(BaseModel):
       node fences the resume against its own state and advances the epoch
       itself, so the value sent back into the graph is this one. Passing the
       leased epoch instead is refused as stale, and the refusal looks exactly
-      like a legitimately expired continuation.
+      like a legitimately expired continuation. It equals the graph's epoch
+      only because ``mark_continuable`` records the graph's epoch on the row:
+      the graph also rolls epochs on its own, which the row never sees.
     """
 
     model_config = ConfigDict(frozen=True)

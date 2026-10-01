@@ -31,6 +31,25 @@ def test_ephemeral_counter_store_is_one_shot_bounded_and_expiring(monkeypatch):
     assert len(store) == 0
 
 
+def test_an_agents_untaken_evidence_counters_stay_bounded_across_turns():
+    """A counter whose tool round never runs is never taken, and nothing discards it.
+
+    That happens whenever RAG validates instead of running the tools it was
+    asked for (forced synthesis, the iteration ceiling) or fails in between.
+    The agent's store is what keeps those from accumulating: it is the bounded,
+    expiring one, so a long-lived agent holds at most its cap however many
+    turns leave a counter behind.
+    """
+    from app.ai.agents.rag_agent import RAGAgent
+
+    agent = object.__new__(RAGAgent)
+    for _ in range(500):
+        agent._register_evidence_token_counter(TokenCounter(), provider="gemini", model="m")
+
+    assert isinstance(agent._ephemeral_evidence_counters, EphemeralTokenCounterStore)
+    assert len(agent._ephemeral_evidence_counters) <= 32
+
+
 def test_openai_uses_model_tokenizer_for_text():
     counter = TokenCounter()
     text = "Conversation compaction counts the actual model tokens."

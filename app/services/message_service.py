@@ -147,6 +147,18 @@ def _is_blank(value: Any) -> bool:
     return value in (None, "")
 
 
+def _paused_epoch(payload: dict[str, Any]) -> int | None:
+    """The graph's epoch from a pause payload, or ``None`` if it names none.
+
+    ``None`` leaves the row's epoch untouched rather than guessing one: a wrong
+    epoch on the row is a Continue the pause node will refuse.
+    """
+    value = payload.get("execution_epoch")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _pending_action_counts(pending_requests: list[Any]) -> dict[str, int]:
     """How many pending requests share each action name.
 
@@ -538,6 +550,12 @@ class MessageService(IMessageService):
             "mutation_outcome_unknown" if payload.get("mutation_outcome_unknown") else None
         )
 
+        # The row's turn id first: it is the key the Continue side restores the
+        # accounting under, and a snapshot read under any other key comes back
+        # empty -- which reads to the next epoch as a full fresh quota.
+        logical_turn_id = getattr(generation, "logical_turn_id", None) or payload.get(
+            "logical_turn_id"
+        )
         try:
             offered = await self._amark_generation_continuable(
                 generation,
@@ -545,8 +563,9 @@ class MessageService(IMessageService):
                 assistant_message_id=bot_message_id,
                 execution_budget=budget,
                 research_accounting=self._research_accounting_snapshot(
-                    payload.get("logical_turn_id"), conversation_id
+                    logical_turn_id, conversation_id
                 ),
+                execution_epoch=_paused_epoch(payload),
                 block_reason=block_reason,
             )
         except Exception:
@@ -731,6 +750,7 @@ class MessageService(IMessageService):
         assistant_message_id: UUID,
         execution_budget: dict[str, Any] | None = None,
         research_accounting: dict[str, Any] | None = None,
+        execution_epoch: int | None = None,
         block_reason: str | None = None,
     ):
         """Offer Continue on a partial answer that is already persisted.
@@ -761,6 +781,7 @@ class MessageService(IMessageService):
                 assistant_message_id=assistant_message_id,
                 execution_budget=execution_budget,
                 research_accounting=research_accounting,
+                execution_epoch=execution_epoch,
                 continuation_block_reason=block_reason,
             )
         )

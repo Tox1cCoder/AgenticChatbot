@@ -378,6 +378,7 @@ async def test_continuing_advances_the_epoch_and_returns_to_the_same_agent():
 
 
 async def test_continuing_clears_the_spent_budget():
+    """The epoch's counters reset; the turn's totals and epoch count do not."""
     from app.ai.workflow.continuation import make_continuation_pause_node
 
     node = make_continuation_pause_node(
@@ -385,9 +386,25 @@ async def test_continuing_clears_the_spent_budget():
         interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 0}
     )
 
-    command = await node(_paused_state())
+    command = await node(
+        _paused_state(
+            execution_budget={
+                "exhausted_by": "tool_calls",
+                "forced_synthesis": True,
+                "tool_calls": 12,
+                "turn_tool_calls": 12,
+            }
+        )
+    )
+    budget = command.update["execution_budget"]
 
-    assert command.update["execution_budget"] is None
+    assert (budget["tool_calls"], budget["exhausted_by"], budget["forced_synthesis"]) == (
+        0,
+        None,
+        False,
+    )
+    assert budget["turn_tool_calls"] == 12
+    assert budget["epochs_used"] == 2
 
 
 async def test_continuing_carries_the_evidence_forward():

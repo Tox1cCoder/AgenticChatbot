@@ -1198,13 +1198,6 @@ class BaseAgent(ABC):
             return counter
         return TokenCounter()
 
-    def _discard_evidence_token_counter(self, descriptor: dict[str, Any] | None) -> None:
-        """Release an unused live counter after final/error/approval paths."""
-        store = getattr(self, "_ephemeral_evidence_counters", None)
-        if isinstance(store, EphemeralTokenCounterStore):
-            reference = descriptor.get("reference") if isinstance(descriptor, dict) else None
-            store.discard(reference)
-
     def _build_compaction_callbacks(self, conversation_id: str, user_id: str):
         coordinator = self._get_request_compaction_coordinator()
         if coordinator is None:

@@ -50,8 +50,12 @@ class ContinuationPausePayload(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     type: Literal["execution_budget_exhausted"] = "execution_budget_exhausted"
+    #: Always empty from the graph, which never learns the generation row's id.
+    #: The message service owns the row and fills it where it needs one.
     generation_id: str
     logical_turn_id: str
+    #: The graph's own epoch, which is the one a Continue is fenced against.
+    #: The service records it on the row when it persists the pause.
     execution_epoch: int = Field(ge=0)
     active_agent_id: str
     validated_content: str
@@ -175,6 +179,11 @@ def make_continuation_pause_node(
     genuinely exhausted turn produces. Stop is unaffected -- the streaming
     consumer polls it at every tool and subagent boundary, not here.
 
+    Every epoch starts here, rolled or human, so this is where the epoch is
+    counted: ``execution_epoch`` advances and the next budget comes from
+    ``begin_epoch``, which is what lets ``validate_output`` stop offering
+    epochs once ``generation_total_epochs_per_turn`` is spent.
+
     Every refusal goes to ``finalize`` rather than raising. This node sits on
     the only path a paused turn can leave by, so raising here would strand the
     turn active with nothing running -- and ``finalize`` is the single terminal
@@ -206,6 +215,7 @@ def make_continuation_pause_node(
         return bool(getattr(settings, "generation_auto_continue", True))
 
     async def continuation_pause(state: dict[str, Any], runtime: Any = None) -> Any:
+        from app.ai.schemas import GraphStateView
         from app.ai.workflow.specialists import resolve_node_for_agent_id
 
         outcome = state.get("agent_outcome")
@@ -214,8 +224,8 @@ def make_continuation_pause_node(
         active_agent_id = state.get("active_agent_id")
         epoch = int(state.get("execution_epoch") or 0)
         payload = ContinuationPausePayload(
-            generation_id=str(state.get("generation_id") or ""),
-            logical_turn_id=str(state.get("logical_turn_id") or ""),
+            generation_id="",
+            logical_turn_id=GraphStateView(state).logical_turn_id() or "",
             execution_epoch=epoch,
             active_agent_id=str(active_agent_id or ""),
             validated_content=_validated_content(outcome),
@@ -278,7 +288,7 @@ def make_continuation_pause_node(
         return Command(
             update={
                 "execution_epoch": epoch + 1,
-                "execution_budget": None,
+                "execution_budget": _next_epoch_budget(payload.budget, epoch + 1),
                 "execution_phase": "executing",
                 "carried_messages": carry_messages(
                     list(getattr(getattr(outcome, "provenance", None), "private_messages", ()))
@@ -299,6 +309,37 @@ def make_continuation_pause_node(
 def _validated_content(outcome: Any) -> str:
     message = getattr(getattr(outcome, "response", None), "message", None)
     return str(getattr(message, "content", "") or "")
+
+
+def _next_epoch_budget(budget: dict[str, Any], next_epoch: int) -> dict[str, Any]:
+    """The budget the next epoch starts from: its own room back, nothing more.
+
+    Clearing the budget instead -- what this node used to do -- also cleared
+    the turn totals and the epoch count, so ``epochs_used`` never passed 1 and
+    ``generation_total_epochs_per_turn`` never ended a turn: auto-continue was
+    bounded only by the recursion limit. ``begin_epoch`` resets the per-epoch
+    counters and records the epoch from the graph's own number, so even an
+    unreadable budget cannot reset the count.
+    """
+    from pydantic import ValidationError
+
+    from app.ai.workflow.execution_budget import (
+        ExecutionBudgetAccountant,
+        ExecutionBudgetLimits,
+        ExecutionBudgetState,
+    )
+    from app.core.config import settings
+
+    carried: ExecutionBudgetState | None = None
+    if budget:
+        try:
+            carried = ExecutionBudgetState.model_validate(budget)
+        except ValidationError:
+            logger.warning("Unreadable execution budget at an epoch boundary; turn totals restart")
+    accountant = ExecutionBudgetAccountant(
+        limits=ExecutionBudgetLimits.from_settings(settings), state=carried
+    )
+    return accountant.begin_epoch(next_epoch).model_dump(mode="json")
 
 
 def _mutation_outcome_unknown(outcome: Any) -> bool:
