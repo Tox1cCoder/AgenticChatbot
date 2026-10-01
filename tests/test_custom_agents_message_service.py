@@ -152,12 +152,12 @@ def test_resume_revalidation_conflicts_when_custom_agent_detached():
         # Agent no longer attached -> resume conflict (409).
         detached = _bare_message_service(_FakeCustomAgentSvc({}))
         with pytest.raises(CustomHTTPException) as exc_info:
-            detached._revalidate_resume_custom_agent(owner, conv)
+            detached._revalidate_resume_custom_agent(owner, conv, rid)
         assert exc_info.value.status_code == 409
 
         # Still attached -> no conflict.
         attached = _bare_message_service(_FakeCustomAgentSvc({rid: {"name": "X"}}))
-        attached._revalidate_resume_custom_agent(owner, conv)
+        attached._revalidate_resume_custom_agent(owner, conv, rid)
     finally:
         registry._store.pop(str(msg_id), None)
 

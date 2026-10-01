@@ -358,7 +358,7 @@ async def test_closing_claimed_resume_stream_marks_interrupt_failed_for_client_d
     await stream.aclose()
 
     assert ("failed", interrupt_id, "client_disconnect") in lifecycle_events
-    assert registry.calls == [(user_id, conversation_id)]
+    assert registry.calls == []  # A legacy thread without a turn ID cannot clear other approvals.
 
 
 @pytest.mark.asyncio
@@ -399,7 +399,7 @@ async def test_claimed_resume_setup_exception_marks_failed_and_yields_typed_erro
     assert events[-1].data["error_code"] == "INTERRUPT_FAILED"
     assert events[-1].data["status_code"] == 500
     assert events[-1].data["error"] == "Response generation failed (RuntimeError)."
-    assert registry.calls == [(user_id, conversation_id)]
+    assert registry.calls == []  # A legacy thread without a turn ID cannot clear other approvals.
 
 
 @pytest.mark.asyncio
@@ -433,7 +433,7 @@ async def test_claimed_incomplete_resume_stream_clears_paused_registry(monkeypat
 
     assert events[-1].type == "error"
     assert ("failed", interrupt_id, "stream_incomplete") in lifecycle_events
-    assert registry.calls == [(user_id, conversation_id)]
+    assert registry.calls == []  # A legacy thread without a turn ID cannot clear other approvals.
 
 
 @pytest.mark.asyncio

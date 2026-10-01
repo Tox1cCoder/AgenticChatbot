@@ -527,6 +527,7 @@ class Container(containers.DeclarativeContainer):
 
     generation_control_service = providers.Factory(
         GenerationControlService,
+        hitl_interrupt_repository=hitl_interrupt_repository,
         repository=generation_repository,
         bus=generation_control_bus,
         stop_wait_seconds=settings.generation_stop_wait_seconds,

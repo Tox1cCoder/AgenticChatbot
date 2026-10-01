@@ -161,7 +161,9 @@ class GenerationControlService:
         repository: Any,
         bus: Any,
         stop_wait_seconds: float = 5.0,
+        hitl_interrupt_repository: Any = None,
     ) -> None:
+        self._hitl_interrupt_repository = hitl_interrupt_repository
         self._repository = repository
         self._bus = bus
         self._stop_wait_seconds = max(0.0, float(stop_wait_seconds))
@@ -415,6 +417,7 @@ class GenerationControlService:
                 expected_version=snapshot.version,
                 values={
                     "status": GenerationStatus.CONTINUING,
+                    "producer_token": current_producer_token(),
                     "execution_epoch": snapshot.execution_epoch + 1,
                     "continuation_available": False,
                     "continuation_id": None,
@@ -521,7 +524,25 @@ class GenerationControlService:
         )
         if result is None:
             raise StaleCommand("another command changed this generation first")
+        if snapshot.continuation_block_reason == APPROVAL_PAUSE_REASON:
+            await self.invalidate_pending_approval(result, user_id=command.user_id)
         return result
+
+    async def invalidate_pending_approval(self, snapshot, *, user_id):
+        """Expire only this owner's approvals on this generation's checkpoint thread."""
+        if self._hitl_interrupt_repository is None:
+            return
+        context = await self._repository.aget_resume_context(
+            snapshot.generation_id, user_id, snapshot.conversation_id
+        )
+        if context is not None:
+            await asyncio.to_thread(
+                self._hitl_interrupt_repository.expire_pending_for_thread,
+                user_id=user_id,
+                conversation_id=snapshot.conversation_id,
+                thread_id=context.checkpoint_thread_id,
+                resolution_source="generation_stopped",
+            )
 
     async def _request_worker_stop(
         self, command: StopGenerationCommand, snapshot: GenerationSnapshot

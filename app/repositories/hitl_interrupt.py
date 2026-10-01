@@ -160,6 +160,35 @@ class HITLInterruptRepository:
             )
             db.commit()
 
+    def expire_pending_for_thread(
+        self,
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        thread_id: str,
+        resolution_source: str = "generation_stopped",
+    ) -> int:
+        """Invalidate pending approvals only on the stopped owner's exact thread."""
+        now = datetime.now(UTC)
+        with self.session_factory() as db:
+            result = db.execute(
+                update(HITLInterrupt)
+                .where(
+                    HITLInterrupt.user_id == user_id,
+                    HITLInterrupt.conversation_id == conversation_id,
+                    HITLInterrupt.thread_id == thread_id,
+                    HITLInterrupt.status == HITLInterruptStatus.PENDING,
+                )
+                .values(
+                    status=HITLInterruptStatus.EXPIRED,
+                    resolution_source=resolution_source,
+                    resolved_at=now,
+                    updated_at=now,
+                )
+            )
+            db.commit()
+            return result.rowcount
+
     def expire_pending_if_due_for_user(self, interrupt_id: str, user_id: UUID) -> bool:
         """Expire an owned pending interrupt only when its stored expiry is due."""
         now = datetime.now(UTC)
