@@ -53,6 +53,7 @@ Content-Type: application/json
 | `content` | string | Fallback user text when `messages` is empty. |
 | `userId` | string | Client hint only. Ownership and user-aware features use the authenticated JWT identity, never this field. |
 | `inlineRichResponseV1` | boolean | Rich-response v1 capability flag. `inline_rich_response_v1` is an accepted equivalent. **Required for rich UI**: without it the response contains no `rich_items`, no markers, no widgets, no canvas. |
+| `streamWebAnswerV1` | boolean | Opt in to live web-answer `text-delta` chunks. The client must handle `data-answer-reconcile` and replacement `data-answer-preview` events. Default `false`. |
 | `deviceId` | string | Injected by the sidecar for local runtime tools. `device_id` is an accepted equivalent. |
 
 Unknown extra fields are accepted and ignored.
@@ -176,6 +177,8 @@ Event catalog:
 | `data-continuation`, `data-node-complete` | yes | Planning-loop progress. |
 | `data-rich-items` | yes | Live rich-item upserts (capable requests only; see emission rules). |
 | `data-image-preview` | yes | Early-delivery image preview while generation is still running. |
+| `data-answer-preview` | yes | Provisional web-answer text while citation validation is pending. |
+| `data-answer-reconcile` | yes | Authoritative saved web-answer text, or an empty string when the streamed draft is discarded. |
 | `data-subagent` | yes | Live worker progress. |
 | `data-assistant-message` | no | Final assistant message side-channel (metadata + parts). |
 | `data-interrupt` | no | HITL pause. Terminal. |
@@ -193,6 +196,50 @@ Text:
 { "type": "text-delta", "id": "text-part-id", "delta": "hello" }
 { "type": "text-end", "id": "text-part-id" }
 ```
+
+Without `streamWebAnswerV1`, web-search answers can stream provisional text
+before the validated answer is ready. These chunks are **not** AI SDK
+`text-delta` parts and must never be
+saved as the assistant message. Handle them in `useChat({ onData })` as display
+state for the current turn:
+
+```json
+{ "type": "data-answer-preview", "data": { "operation": "replace", "text": "First draft" }, "transient": true }
+{ "type": "data-answer-preview", "data": { "operation": "append", "text": " continues" }, "transient": true }
+{ "type": "data-answer-preview", "data": { "operation": "clear" }, "transient": true }
+```
+
+`replace` starts a draft or replaces it if the model makes a correction;
+`append` extends the current draft. `clear` removes the draft before the
+authoritative `text-delta`, on interruption, or on failure. The server also
+clears an active preview when the stream ends. Render the draft only while the
+current assistant message has no authoritative text. Clear local draft state
+on `clear`, `text-delta`, finish, abort, error, and when loading history. The
+final validated answer may still arrive as one large `text-delta`; the preview
+is what gives the reader progressive text during web research. Clients that
+ignore this custom event retain the existing final-answer behavior.
+
+Clients that send `streamWebAnswerV1: true` receive the first web-answer model
+run as ordinary `text-delta` chunks after a web tool completes. The final
+validated answer is **not** appended as another `text-delta`. Instead, the
+stream sends:
+
+```json
+{ "type": "data-answer-reconcile", "data": { "messageId": "<assistant-message-uuid>", "content": "<persisted final text>" }, "transient": true }
+```
+
+On `data-answer-reconcile`, replace the displayed draft for that message ID
+with `content` in application render state; AI SDK's accumulated text part is
+append-only and does not replace itself. An empty `content` discards the draft
+after an error or interrupt. If citation validation starts a second model run,
+its chunks arrive
+as `data-answer-preview` `replace`/`append` operations; show those over the
+first run's draft until reconciliation. Streamed drafts can contain unrendered
+`[[source:S#]]`/`[[image:I#]]` tokens or text that fails the final citation
+check. Do not persist them; the reconciliation event and message history carry
+the finalized text. Clear the local override on abort and when a history
+refresh supplies the persisted message. Clients that cannot replace a draft
+must leave `streamWebAnswerV1` unset.
 
 Reasoning:
 

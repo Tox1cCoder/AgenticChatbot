@@ -66,6 +66,14 @@ class AISDKChatRequest(BaseModel):
             "`data-rich-items` stream parts, and persisted `rich_items` metadata."
         ),
     )
+    stream_web_answer_v1: bool = Field(
+        default=False,
+        alias="streamWebAnswerV1",
+        description=(
+            "Stream web answer drafts as text-delta parts. The client must handle "
+            "data-answer-reconcile to replace the draft with the persisted final text."
+        ),
+    )
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
@@ -582,6 +590,7 @@ async def chat_ui_message_stream(
         inline_rich_response_v1=(
             inline_rich_response_v1 and getattr(settings, "inline_rich_response_enabled", False)
         ),
+        stream_web_answer_v1=bool(payload.stream_web_answer_v1),
     )
 
     def event_source():

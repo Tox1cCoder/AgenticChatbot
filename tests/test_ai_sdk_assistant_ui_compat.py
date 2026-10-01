@@ -127,3 +127,46 @@ async def test_chat_endpoint_passes_inline_rich_response_capability_to_message_s
     assert len(message_service.calls) == 1
     message_create, _called_user_id, _kwargs = message_service.calls[0]
     assert message_create.inline_rich_response_v1 is True
+
+
+@pytest.mark.asyncio
+async def test_chat_endpoint_web_stream_capability_emits_live_text_deltas():
+    class FakeMessageService:
+        def create_message_stream(self, *_args, **_kwargs):
+            async def source():
+                yield make_event(
+                    "answer_preview", sequence=1, data={"operation": "replace", "text": "Live "}
+                )
+                yield make_event(
+                    "answer_preview", sequence=2, data={"operation": "append", "text": "answer"}
+                )
+                yield make_event("message_delta", sequence=3, data={"text": "Final answer"})
+                yield make_event(
+                    "complete",
+                    sequence=4,
+                    data={"message": {"id": "m-1", "content": "Final answer"}},
+                )
+
+            return source()
+
+    response = await chat_ui_message_stream(
+        conversation_id=uuid4(),
+        payload=AISDKChatRequest(
+            messages=[{"role": "user", "content": "Search"}],
+            streamWebAnswerV1=True,
+        ),
+        message_service=FakeMessageService(),
+        current_user_id=uuid4(),
+    )
+    body = "".join([chunk async for chunk in response.body_iterator])
+    payloads = [
+        json.loads(line[6:])
+        for line in body.splitlines()
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+
+    assert [part["delta"] for part in payloads if part.get("type") == "text-delta"] == [
+        "Live ",
+        "answer",
+    ]
+    assert any(part.get("type") == "data-answer-reconcile" for part in payloads)

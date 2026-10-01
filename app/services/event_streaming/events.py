@@ -25,6 +25,8 @@ StreamEventType = Literal[
     "generation_status",
     "message_start",
     "message_delta",
+    # Transient draft text for web turns. The validated message_delta remains authoritative.
+    "answer_preview",
     "message_end",
     "reasoning_start",
     "reasoning_delta",

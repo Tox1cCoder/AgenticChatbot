@@ -70,6 +70,9 @@ class StreamProjectionContext:
     # Web answers are held until terminal output validation. This flips before
     # the first web tool runs, so an uncited draft can never escape in deltas.
     requires_web: bool = False
+    web_tool_completed: bool = False
+    preview_started: bool = False
+    preview_run_id: str | None = None
     # Applies the server's citation rule to answer text as it arrives, using
     # the same helper the renderer uses on the finished answer. Per stream:
     # one turn's retrieved ids authorize that turn's citations and no other's.
@@ -80,7 +83,9 @@ class StreamProjectionContext:
     rich_marker_filter: RichMarkerStreamFilter = field(default_factory=RichMarkerStreamFilter)
 
 
-def _publish_answer_text(delta: str, ctx: StreamProjectionContext):
+def _publish_answer_text(
+    delta: str, ctx: StreamProjectionContext, *, run_id: str | None = None
+):
     """Emit answer text once both marker rules can be applied to it.
 
     A marker split across chunks would otherwise reach the reader half-judged,
@@ -88,6 +93,17 @@ def _publish_answer_text(delta: str, ctx: StreamProjectionContext):
     released by ``flush_answer_text`` when the stream ends.
     """
     if ctx.requires_web:
+        if ctx.web_tool_completed:
+            operation = (
+                "replace"
+                if not ctx.preview_started or (run_id is not None and run_id != ctx.preview_run_id)
+                else "append"
+            )
+            ctx.preview_started = True
+            ctx.preview_run_id = run_id
+            yield make_event(
+                "answer_preview", sequence=0, data={"operation": operation, "text": delta}
+            )
         return
     publishable = ctx.citation_filter.feed(ctx.rich_marker_filter.feed(delta))
     if publishable:
@@ -239,11 +255,20 @@ class GraphPublicStreamProjector:
 
         if etype == "message_delta":
             ctx.internal_content_only = False
+            if (
+                ctx.requires_web
+                and ctx.preview_started
+                and event.run_id is not None
+                and event.run_id != ctx.preview_run_id
+            ):
+                # A grounding repair is a new model run. Deduplicate its
+                # chunks within that run, not against the preceding draft.
+                ctx.accumulated_content = ""
             ctx.accumulated_content, delta = _consume_stream_text_chunk(
                 ctx.accumulated_content, data.get("text", "")
             )
             if delta and not ctx.suppress_tokens:
-                yield from _publish_answer_text(delta, ctx)
+                yield from _publish_answer_text(delta, ctx, run_id=event.run_id)
             return
 
         if etype == "reasoning_delta":
@@ -283,6 +308,7 @@ class GraphPublicStreamProjector:
         if etype == "tool_execution_end":
             if event.tool_name in {"web_search", "web_open"}:
                 ctx.requires_web = True
+                ctx.web_tool_completed = True
             tool_call_id = event.tool_call_id
             dedupe_key = str(tool_call_id) if tool_call_id else None
             if dedupe_key and dedupe_key in ctx.emitted_tool_result_ids:
@@ -682,6 +708,9 @@ class GraphPublicStreamProjector:
                         last_state_values=ctx.last_state_values,
                         emitted_tool_result_ids=ctx.emitted_tool_result_ids,
                     ):
+                        if legacy_tool_end.get("name") in {"web_search", "web_open"}:
+                            ctx.requires_web = True
+                            ctx.web_tool_completed = True
                         yield self._tool_execution_end_event(
                             tool_call_id=legacy_tool_end.get("tool_call_id"),
                             tool_name=legacy_tool_end.get("name"),

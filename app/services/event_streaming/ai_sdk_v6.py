@@ -106,6 +106,7 @@ class AISDKV6StreamState:
         reasoning_id: str,
         *,
         inline_rich_response_v1: bool = False,
+        stream_web_answer_v1: bool = False,
     ) -> None:
         self.message_id = message_id
         self.text_id = text_id
@@ -113,6 +114,11 @@ class AISDKV6StreamState:
         self.text_started = False
         self.reasoning_started = False
         self.any_text_delta = False
+        self.preview_active = False
+        self.stream_web_answer_v1 = bool(stream_web_answer_v1)
+        self.web_answer_streamed = False
+        self.web_repair_mode = False
+        self.web_reconciled = False
         self.tool_seq = 0
         self.pending_tool_call_ids: list[str] = []
         self.inline_rich_response_v1 = bool(inline_rich_response_v1)
@@ -165,6 +171,20 @@ class AISDKV6StreamAdapter:
 
     async def _terminate(self) -> AsyncGenerator[str, None]:
         state = self._state
+        if state.web_answer_streamed and not state.web_reconciled:
+            state.web_reconciled = True
+            yield _sse(
+                {
+                    "type": "data-answer-reconcile",
+                    "data": {"messageId": state.message_id, "content": ""},
+                    "transient": True,
+                }
+            )
+        if state.preview_active:
+            state.preview_active = False
+            yield _sse(
+                {"type": "data-answer-preview", "data": {"operation": "clear"}, "transient": True}
+            )
         if state.text_started:
             yield _sse({"type": "text-end", "id": state.text_id})
         if state.reasoning_started:
@@ -201,7 +221,7 @@ class AISDKV6StreamAdapter:
                         queue.get(),
                         timeout=self._heartbeat_interval,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield make_event("heartbeat", sequence=0)
                     continue
 
@@ -221,6 +241,91 @@ class AISDKV6StreamAdapter:
         state = self._state
         etype = event.type
         data = event.data or {}
+
+        if state.stream_web_answer_v1 and etype == "answer_preview":
+            operation = data.get("operation")
+            if operation == "clear":
+                if state.web_answer_streamed:
+                    state.web_repair_mode = True
+                    yield _sse(
+                        {
+                            "type": "data-answer-preview",
+                            "data": {"operation": "clear"},
+                            "transient": True,
+                        }
+                    )
+                return
+            chunk = data.get("text")
+            if operation not in {"replace", "append"} or not isinstance(chunk, str) or not chunk:
+                return
+            if operation == "replace" and state.web_answer_streamed:
+                state.web_repair_mode = True
+            if state.web_repair_mode:
+                yield _sse(
+                    {
+                        "type": "data-answer-preview",
+                        "data": {"operation": operation, "text": chunk},
+                        "transient": True,
+                    }
+                )
+            else:
+                state.web_answer_streamed = True
+                state.any_text_delta = True
+                yield _sse({"type": "text-delta", "id": state.text_id, "delta": chunk})
+            return
+
+        if state.stream_web_answer_v1 and state.web_answer_streamed and etype == "message_delta":
+            # The graph replays the fully grounded answer after the model run.
+            # Completion carries it as a replacement, so this is not appended.
+            return
+
+        if (
+            state.web_answer_streamed
+            and not state.web_reconciled
+            and etype in {"error", "interrupt"}
+        ):
+            state.web_reconciled = True
+            yield _sse(
+                {
+                    "type": "data-answer-reconcile",
+                    "data": {"messageId": state.message_id, "content": ""},
+                    "transient": True,
+                }
+            )
+
+        if state.preview_active and etype in {"message_delta", "complete", "error", "interrupt"}:
+            state.preview_active = False
+            yield _sse(
+                {"type": "data-answer-preview", "data": {"operation": "clear"}, "transient": True}
+            )
+
+        if etype == "answer_preview":
+            operation = data.get("operation")
+            if operation == "clear":
+                if state.preview_active:
+                    state.preview_active = False
+                    yield _sse(
+                        {
+                            "type": "data-answer-preview",
+                            "data": {"operation": "clear"},
+                            "transient": True,
+                        }
+                    )
+                return
+            if operation not in {"replace", "append"}:
+                return
+            text = data.get("text")
+            if not isinstance(text, str) or not text:
+                return
+            state.preview_active = True
+            yield _sse(
+                {
+                    "type": "data-answer-preview",
+                    "data": {"operation": operation, "text": text},
+                    "transient": True,
+                }
+            )
+            return
 
         if etype == "message_delta":
             delta = data.get("text") or ""
@@ -583,6 +688,19 @@ class AISDKV6StreamAdapter:
                 message,
                 image_parts=file_parts,
                 is_v1=is_v1,
+            )
+
+        if state.web_answer_streamed and isinstance(message, dict):
+            state.web_reconciled = True
+            yield _sse(
+                {
+                    "type": "data-answer-reconcile",
+                    "data": {
+                        "messageId": state.message_id,
+                        "content": str(message.get("content") or ""),
+                    },
+                    "transient": True,
+                }
             )
 
         if not state.any_text_delta:
