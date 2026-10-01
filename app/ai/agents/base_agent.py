@@ -1690,14 +1690,13 @@ class BaseAgent(ABC):
         )
         return llm_with_tools, bound_tools
 
-    def _rebind_turn_tools(
-        self,
-        llm: Any,
-        binding: _ToolBindingRequest,
-        *,
-        include_hand_off: bool | None,
-    ) -> Any:
-        """Bind tools to a replacement model after a provider error."""
+    def _rebind_turn_tools(self, llm: Any, binding: _ToolBindingRequest) -> Any:
+        """Bind tools to a replacement model after a provider error.
+
+        A replacement model must be offered exactly the tools the caller allowed:
+        dropping ``excluded_tool_names`` or ``include_hand_off`` here handed a
+        fallback turn tools the caller had excluded.
+        """
         if binding.disable_tools:
             return llm
         return self._get_llm_with_tools(
@@ -1706,7 +1705,8 @@ class BaseAgent(ABC):
             internal_tools=binding.internal_tools,
             user_id=binding.user_id,
             device_id=binding.device_id,
-            include_hand_off=include_hand_off,
+            include_hand_off=binding.include_hand_off,
+            excluded_tool_names=binding.excluded_tool_names,
         )
 
     def _assemble_turn_messages(
@@ -1838,16 +1838,13 @@ class BaseAgent(ABC):
                     if fallback_runtime is None:
                         raise
                     return await self._invoke_turn_on_fallback_provider(
-                        turn,
-                        fallback_runtime,
-                        call_model,
-                        include_hand_off=turn.binding.include_hand_off,
+                        turn, fallback_runtime, call_model
                     )
             fallback_runtime = self._provider_error_fallback(turn.runtime_config)
             if fallback_runtime is None:
                 raise
             return await self._invoke_turn_on_fallback_provider(
-                turn, fallback_runtime, call_model, include_hand_off=None
+                turn, fallback_runtime, call_model
             )
 
     async def _invoke_turn_with_overflow_retry(
@@ -1891,9 +1888,7 @@ class BaseAgent(ABC):
             user_id=turn.binding.user_id,
             enable_reasoning_summary=False,
         )
-        llm_with_tools = self._rebind_turn_tools(
-            llm, turn.binding, include_hand_off=turn.binding.include_hand_off
-        )
+        llm_with_tools = self._rebind_turn_tools(llm, turn.binding)
         return await call_model(llm_with_tools, turn.langchain_messages)
 
     def _provider_error_fallback(
@@ -1915,8 +1910,6 @@ class BaseAgent(ABC):
         turn: _ModelTurn,
         fallback_runtime: ResolvedRuntimeModelConfig,
         call_model: _CallModel,
-        *,
-        include_hand_off: bool | None,
     ) -> Any:
         turn.runtime_config = fallback_runtime
         # Build the fallback model before the preflight so the budget is
@@ -1928,9 +1921,7 @@ class BaseAgent(ABC):
             enable_reasoning_summary=False,
         )
         await self._preflight_turn(turn, llm)
-        llm_with_tools = self._rebind_turn_tools(
-            llm, turn.binding, include_hand_off=include_hand_off
-        )
+        llm_with_tools = self._rebind_turn_tools(llm, turn.binding)
         return await call_model(llm_with_tools, turn.langchain_messages)
 
     def _build_turn_response(

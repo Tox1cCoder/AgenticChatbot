@@ -920,6 +920,58 @@ async def test_provider_error_fallback_preflight_uses_the_fallback_models_counte
 
 
 @pytest.mark.asyncio
+async def test_a_provider_fallback_binds_the_same_tools_the_caller_allowed(monkeypatch) -> None:
+    """The fallback re-bind dropped ``excluded_tool_names`` (and ``include_hand_off``),
+    so a failing primary provider handed the turn tools the caller had excluded."""
+    agent = _BoundaryAgent(agent_config_key="chat")
+    primary = _OverflowlessFailingModel()
+    fallback_model = _GeminiCapturingModel()
+    created: list[object] = []
+    bindings: list[dict] = []
+
+    monkeypatch.setattr(agent, "_init_tools", AsyncMock())
+    monkeypatch.setattr(
+        agent,
+        "_resolve_runtime_model_config",
+        lambda *_args, **_kwargs: _runtime_with_limit(60_000),
+    )
+
+    def _create_model(*_args, **_kwargs):
+        model = primary if not created else fallback_model
+        created.append(model)
+        return (model, False)
+
+    def _record_binding(llm, **kwargs):
+        bindings.append(kwargs)
+        return llm
+
+    monkeypatch.setattr(agent, "_create_langchain_model_from_runtime", _create_model)
+    monkeypatch.setattr(
+        agent,
+        "_create_fallback_runtime_config",
+        lambda *_args, **_kwargs: _gemini_fallback_runtime(60_000),
+    )
+    monkeypatch.setattr(agent, "_get_llm_with_tools", _record_binding)
+    monkeypatch.setattr(agent, "_get_tools_for_binding", lambda **_kwargs: [])
+
+    response = await agent.invoke_model_with_history(
+        messages=[HumanMessage(content="current question")],
+        conversation_history=[],
+        persona=None,
+        include_hand_off=False,
+        excluded_tool_names={"web_search"},
+    )
+
+    assert response.message.content == "within budget"
+    assert primary.calls >= 1 and fallback_model.calls, "the fallback must have answered"
+    assert len(bindings) >= 2
+    primary_binding, fallback_binding = bindings[0], bindings[-1]
+    assert "web_search" in primary_binding["excluded_tool_names"]
+    assert fallback_binding.get("excluded_tool_names") == primary_binding["excluded_tool_names"]
+    assert fallback_binding.get("include_hand_off") is False
+
+
+@pytest.mark.asyncio
 async def test_reasoning_summary_fallback_preflight_uses_the_fallback_models_counter(
     monkeypatch,
 ) -> None:
