@@ -719,6 +719,10 @@ async def _receive_client_messages(
             msg = json.loads(raw)
         except json.JSONDecodeError:
             continue
+        if not isinstance(msg, dict):
+            # Valid JSON that is not an object ("[]", "1") is ignored like invalid
+            # JSON; it used to raise here and silently end the connection.
+            continue
 
         msg_type = msg.get("type")
 

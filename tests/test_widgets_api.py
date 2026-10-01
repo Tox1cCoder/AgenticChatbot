@@ -357,6 +357,40 @@ def test_widget_websocket_sync_and_user_patch(widget_test_client):
     assert persisted.state["selection"] == "alpha"
 
 
+def test_widget_websocket_ignores_json_that_is_not_an_object(widget_test_client):
+    """``[]`` or ``1`` used to raise inside the handler and drop the connection."""
+    client, store, token_service = widget_test_client
+    created = asyncio.run(
+        store.create(
+            TEST_SESSION_ID_2,
+            {
+                "html": "<button>Alpha</button>",
+                "height": 540,
+                "items": [{"id": "alpha", "label": "Alpha"}],
+                "selection": None,
+            },
+            title="Pick One",
+        )
+    )
+    token, _expires_at = token_service.mint(
+        widget_id=created.widget_id,
+        session_id=created.session_id,
+        user_id=str(TEST_USER_ID),
+    )
+
+    with client.websocket_connect(
+        f"/widgets/{created.widget_id}/connect?session_id={created.session_id}&token={token}"
+    ) as websocket:
+        assert websocket.receive_json()["type"] == "widget_state_sync"
+        for not_an_object in ("[]", "1", '"x"', "null"):
+            websocket.send_text(not_an_object)
+        websocket.send_json({"type": "user_state_patch", "patch": {"selection": "alpha"}})
+        updated = websocket.receive_json()
+
+    assert updated["type"] == "widget_update"
+    assert updated["state"]["selection"] == "alpha"
+
+
 # ---------------------------------------------------------------------------
 # Cross-user adoption (2026-09 audit, Task 9)
 # ---------------------------------------------------------------------------
