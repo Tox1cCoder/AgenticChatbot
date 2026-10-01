@@ -33,7 +33,7 @@ from app.repositories.utils.pagination import Paginator
 from app.schemas.conversation import ConversationRead
 from app.schemas.feedback import FeedbackRead
 from app.services.jwt_service import JwtService
-from app.services.widget_runtime import WidgetTokenService
+from app.services.widget_tokens import WidgetTokenService
 from app.utils.exception_handler import register_exception_handlers
 from tests.token_state_stub import stub_token_states
 

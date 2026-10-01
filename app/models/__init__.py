@@ -28,6 +28,7 @@ from app.models.message import Message
 from app.models.model_provider import ModelProvider
 from app.models.model_usage import ModelUsageEvent, ModelUsageMinute
 from app.models.project import Project, ProjectCustomAgent
+from app.models.server_secret import ServerSecret
 from app.models.skill_setting import SkillSetting
 from app.models.task_plan import TaskPlan
 from app.models.tool_approval import DecisionType, ToolApproval
@@ -83,4 +84,5 @@ __all__ = [
     "WebImageReference",
     "Project",
     "ProjectCustomAgent",
+    "ServerSecret",
 ]

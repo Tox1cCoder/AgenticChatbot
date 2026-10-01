@@ -1,10 +1,20 @@
+"""Key configuration: optional in every environment, validated when it is set.
+
+An unset key is not a weak key: ``app.core.server_secrets`` resolves it from the
+``server_secrets`` table. An explicitly configured one is used as given, so it
+is the one that must be strong.
+"""
+
+import base64
+
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import Settings, _load_or_create_dev_secret_key
+from app.core.config import Settings
 
 _STRONG_KEY = "k" * 32
 _ORIGINS = ["https://chat.example.com"]
+_FERNET_KEY = base64.urlsafe_b64encode(b"f" * 32).decode()
 
 
 def _settings(**overrides) -> Settings:
@@ -13,6 +23,7 @@ def _settings(**overrides) -> Settings:
     # machine rather than from the test.
     values = {
         "secret_key": _STRONG_KEY,
+        "model_encryption_key": _FERNET_KEY,
         "cors_origins": _ORIGINS,
         "environment": "production",
         "api_debug": False,
@@ -22,37 +33,41 @@ def _settings(**overrides) -> Settings:
     return Settings(_env_file=None, **values)
 
 
-def test_dev_secret_key_is_generated_and_persisted(tmp_path):
-    key_path = tmp_path / ".dev_secret_key"
+@pytest.mark.parametrize("environment", ["development", "staging", "production"])
+@pytest.mark.parametrize("unset", ["", "   "])
+def test_an_unset_secret_key_is_left_for_the_database(environment, unset):
+    settings = _settings(environment=environment, secret_key=unset)
 
-    first = _load_or_create_dev_secret_key(key_path)
-
-    assert first
-    assert key_path.read_text(encoding="utf-8").strip() == first
-
-
-def test_dev_secret_key_is_stable_across_calls(tmp_path):
-    """A server restart must reuse the persisted key, not mint a new one that
-    would invalidate every previously issued token."""
-    key_path = tmp_path / ".dev_secret_key"
-
-    first = _load_or_create_dev_secret_key(key_path)
-    second = _load_or_create_dev_secret_key(key_path)
-
-    assert first == second
+    assert settings.secret_key == ""
 
 
-def test_dev_secret_key_reuses_existing_file(tmp_path):
-    key_path = tmp_path / ".dev_secret_key"
-    key_path.write_text("preexisting-key-value", encoding="utf-8")
-
-    assert _load_or_create_dev_secret_key(key_path) == "preexisting-key-value"
+def test_the_placeholder_secret_key_counts_as_unset_in_development():
+    assert _settings(environment="development", secret_key="secret-key").secret_key == ""
 
 
 @pytest.mark.parametrize("environment", ["production", "staging"])
-def test_a_short_secret_key_is_refused_outside_development(environment):
+@pytest.mark.parametrize("weak", ["k" * 31, "secret-key"])
+def test_a_short_secret_key_is_refused_outside_development(environment, weak):
     with pytest.raises(ValidationError, match="at least 32 characters"):
-        _settings(environment=environment, secret_key="k" * 31)
+        _settings(environment=environment, secret_key=weak)
+
+
+@pytest.mark.parametrize("environment", ["development", "production"])
+def test_the_model_encryption_key_is_optional(environment):
+    assert _settings(environment=environment, model_encryption_key="").model_encryption_key == ""
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["not-a-fernet-key", base64.urlsafe_b64encode(b"short").decode(), "%%%%"],
+)
+def test_a_configured_model_encryption_key_must_be_a_fernet_key(invalid):
+    with pytest.raises(ValidationError, match="MODEL_ENCRYPTION_KEY"):
+        _settings(model_encryption_key=invalid)
+
+
+def test_a_configured_model_encryption_key_is_kept_as_given():
+    assert _settings(model_encryption_key=f" {_FERNET_KEY} ").model_encryption_key == _FERNET_KEY
 
 
 @pytest.mark.parametrize("origins", [[], ["*"], ["https://chat.example.com", "*"], [""]])

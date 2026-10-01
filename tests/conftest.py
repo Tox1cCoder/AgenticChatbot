@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import base64
 import os
 import sys
 import tempfile
@@ -39,6 +40,15 @@ atexit.register(_PYTEST_RUNTIME.cleanup)
 # ``langsmith.run_helpers.tracing_context``; see tests/test_tool_trace_parenting.py.
 os.environ["LANGSMITH_TRACING"] = "false"
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
+
+# An unset key is resolved from the ``server_secrets`` table (app/core/server_secrets.py),
+# and a configured one always wins. Fixed test values keep every token and cipher in the
+# suite off the database and off the developer's real keys. tests/test_server_secrets.py
+# clears them to exercise the stored and generated paths.
+os.environ["SECRET_KEY"] = "pytest-signing-key-not-used-outside-the-test-suite"
+os.environ["MODEL_ENCRYPTION_KEY"] = base64.urlsafe_b64encode(
+    b"pytest-model-encryption-key-0000"
+).decode()
 
 # Tests that open real sessions must never reach the application database: they seed
 # and delete rows by id. With TEST_DATABASE_URL set, DATABASE_URL is rebound to it

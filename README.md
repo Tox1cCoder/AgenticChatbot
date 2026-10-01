@@ -188,7 +188,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 At least one **LLM provider credential** is required for real AI execution:
 
 - `GEMINI_API_KEY` — the default provider, wired via `langchain-google-genai`
-- per-user OpenAI / Anthropic keys managed through [`/providers`](app/api/providers.py) once `MODEL_ENCRYPTION_KEY` is set
+- per-user OpenAI / Anthropic keys managed through [`/providers`](app/api/providers.py), encrypted at rest (see [Signing and encryption keys](#signing-and-encryption-keys))
 
 Optional: `TAVILY_API_KEY` for web search agent, `BRAVE_SEARCH_API_KEY` for image search, `LANGSMITH_API_KEY` for tracing.
 
@@ -248,12 +248,13 @@ cp .env.example .env
 cp .env.client.example .env.client   # if running the local client backend
 ```
 
-### 3. Generate a provider-key encryption key
+### 3. Signing and encryption keys (optional)
 
-Per-user provider API keys are encrypted at rest with Fernet. Generate and set `MODEL_ENCRYPTION_KEY`:
+Leave `SECRET_KEY` and `MODEL_ENCRYPTION_KEY` unset and the server generates both on first start and stores them in the database. To keep them out of database backups instead, set them yourself (see [Signing and encryption keys](#signing-and-encryption-keys)):
 
 ```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+python -c "import secrets; print(secrets.token_urlsafe(48))"                               # SECRET_KEY
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # MODEL_ENCRYPTION_KEY
 ```
 
 ### 4. Start infrastructure
@@ -291,11 +292,25 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | `DATABASE_URL` | `postgresql://localhost:5432/chatbot` | SQLAlchemy DSN |
 | `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Uvicorn bind; set `0.0.0.0` to accept LAN connections |
 | `ENVIRONMENT` | `development` | `development` / `staging` / `production` |
-| `SECRET_KEY` | *(ephemeral in dev)* | Must be set in production |
+| `SECRET_KEY` | *(generated, stored in `server_secrets`)* | Token signing key. Set, it always wins and is never stored; outside development it must be ≥32 characters. See [Signing and encryption keys](#signing-and-encryption-keys) |
 | `JWT_ALGORITHM` | `HS256` | |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `600` | |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | |
 | `CORS_ORIGINS` | `[]` | JSON list; `["*"]` allows any origin |
+
+### Signing and encryption keys
+
+`SECRET_KEY` signs access, refresh and widget tokens; `MODEL_ENCRYPTION_KEY` encrypts the provider API keys in `model_providers`. `app/core/server_secrets.py` resolves each one from the first of:
+
+1. **The environment.** A configured value always wins and is never copied into the database.
+2. **Its row in `server_secrets`** (`signing_key` / `model_encryption_key`).
+3. **A new key**, generated and inserted with `ON CONFLICT (name) DO NOTHING`, then read back, so replicas and Celery workers that start together keep the same one. On first start in development, an existing `.dev_secret_key` file (written by earlier versions; nothing creates it any more) is stored as the signing key instead, so current sessions stay valid.
+
+The API resolves both keys at startup, right after the migrations, and each Celery worker when it starts, so requests never read the database for a key. Startup fails with an error naming the variable when a key cannot be resolved: the database is unreachable with nothing configured, or provider API keys are already stored but `MODEL_ENCRYPTION_KEY` is unset and no key is stored. Nothing is ever signed or encrypted with an empty key.
+
+- **Backups contain the keys.** With either key generated, anyone holding a database backup can forge tokens for any user and decrypt every stored provider API key. Set both in the environment when that matters.
+- **Rotating the signing key:** `DELETE FROM server_secrets WHERE name = 'signing_key'`, then restart every API and worker process. A new key is generated and every user is logged out. With `SECRET_KEY` set, change it instead.
+- **Never delete the `model_encryption_key` row while providers exist.** The stored provider keys cannot be decrypted without it, and startup then refuses to generate a replacement. To move it into the environment, set `MODEL_ENCRYPTION_KEY` to the stored value first. The `e983df693ada` downgrade refuses to drop the table while it would strand provider keys.
 
 ### Providers & models
 
@@ -309,7 +324,7 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | `BRAVE_IMAGE_SEARCH_TIMEOUT_SECONDS` | `2.5` | Per-request timeout for image search |
 | `BRAVE_IMAGE_SEARCH_DEFAULT_SAFESEARCH` | `strict` | Brave safesearch level (`off` or `strict`) |
 | `REMOTE_IMAGE_ENRICHMENT_ENABLED` | `true` | Enables optional Brave-backed remote image enrichment for rich responses |
-| `MODEL_ENCRYPTION_KEY` | — | Fernet key for per-user provider credentials |
+| `MODEL_ENCRYPTION_KEY` | *(generated, stored in `server_secrets`)* | Fernet key that encrypts per-user provider API keys. Set, it always wins, is never stored, and must be a valid Fernet key. Never generated while provider keys are already stored. See [Signing and encryption keys](#signing-and-encryption-keys) |
 | `RAG_AGENT_MODEL` | `gemini-3.1-pro-preview` | |
 | `CHAT_AGENT_MODEL` | `gemini-3-flash-preview` | |
 | `SEARCH_AGENT_MODEL` | `gemini-3-flash-preview` | |
@@ -564,7 +579,7 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 
 ## Database Migrations
 
-Migrations are Alembic-managed (single head, currently `371ffaf3a087`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
+Migrations are Alembic-managed (single head, currently `9b132832d676`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
 
 ```bash
 alembic upgrade head
@@ -797,7 +812,7 @@ the Celery worker's log.
 
 ### Per-user credentials
 
-`POST /providers` stores an API key for a provider type (`gemini`, `openai`, `anthropic`). Keys are encrypted with `MODEL_ENCRYPTION_KEY` before persisting in `model_providers` and never returned in plaintext. Supporting endpoints:
+`POST /providers` stores an API key for a provider type (`gemini`, `openai`, `anthropic`). Keys are encrypted with the provider-key encryption key (`MODEL_ENCRYPTION_KEY`, or the generated one in `server_secrets`; see [Signing and encryption keys](#signing-and-encryption-keys)) before persisting in `model_providers` and never returned in plaintext. Supporting endpoints:
 
 - `GET /providers` — list provider records
 - `GET /providers/{provider_type}`
@@ -1671,7 +1686,8 @@ If both runs show similar times, the service is restarting between requests
 | `Router Gemini client not initialized` | Missing `GEMINI_API_KEY`. Set it or register a Gemini provider via `POST /providers`. |
 | SSE disconnects after 60 s | Some proxies buffer; deploy with HTTP/2 or disable proxy buffering. The in-app heartbeat is 1 s. |
 | Checkpoint table errors on startup | Ensure `langgraph-checkpoint-postgres` migrations run by not disabling `ENABLE_LANGGRAPH_CHECKPOINTS` before first boot. |
-| Provider key decryption fails | `MODEL_ENCRYPTION_KEY` changed. Re-create provider records or restore the prior key. |
+| Provider key decryption fails | The encryption key changed: `MODEL_ENCRYPTION_KEY` was edited, or it was removed while the providers were encrypted with it. Restore the prior key (in the environment, or the `model_encryption_key` row in `server_secrets`), or re-create the provider records. |
+| Startup fails: `provider API keys are already encrypted with a key that is not configured` | `MODEL_ENCRYPTION_KEY` is unset and `server_secrets` holds no key, but `model_providers` holds encrypted keys. Set `MODEL_ENCRYPTION_KEY` to the key that encrypted them; the server will not generate one that cannot read them. |
 | Windows + async + `localhost` Redis | The config normaliser rewrites `localhost` → `127.0.0.1` automatically on `win32`. |
 | Document uploads stuck in `processing` | Celery worker not running: `python -m app.workers.start_worker`. Check `/health/celery`. |
 | Multiple uploads process one at a time | Check the worker startup banner. On Windows, pool must be `threads` (or another parallel pool); `solo` is single-task debug mode. Set `CELERY_WORKER_POOL=threads` or leave at `auto`. |

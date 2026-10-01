@@ -26,6 +26,7 @@ from app.ai.model_context import (
 )
 from app.ai.reasoning_controls import resolve_reasoning_control
 from app.core.config import settings
+from app.core.server_secrets import get_model_encryption_key
 from app.models.model_provider import ModelProvider
 from app.repositories.model_provider import ModelProviderRepository
 
@@ -98,21 +99,10 @@ class ProviderService:
 
     def __init__(self, provider_repository: ModelProviderRepository):
         self.repository = provider_repository
-
-        if not settings.model_encryption_key:
-            raise ValueError(
-                "MODEL_ENCRYPTION_KEY must be configured in environment. "
-                "Generate one with: python -c 'from cryptography.fernet import Fernet; "
-                "print(Fernet.generate_key().decode())'"
-            )
-
-        try:
-            self.cipher = Fernet(settings.model_encryption_key.encode())
-        except Exception as e:
-            raise ValueError(
-                "Invalid MODEL_ENCRYPTION_KEY format. Must be 32 url-safe "
-                f"base64-encoded bytes. Error: {e}"
-            ) from e
+        # Never empty and already validated as a Fernet key: a configured one by
+        # Settings, a stored one by app.core.server_secrets, which raises rather
+        # than return nothing.
+        self.cipher = Fernet(get_model_encryption_key())
 
     def _normalize_provider_type(self, provider_type: str) -> str:
         normalized = str(provider_type or "").strip().lower()

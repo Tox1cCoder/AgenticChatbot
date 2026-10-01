@@ -1,6 +1,7 @@
+import base64
+import binascii
 import logging
 import os
-import secrets
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -37,35 +38,11 @@ else:
         os.environ[_tracing_var] = "false"
 
 
-_DEV_SECRET_KEY_PATH = Path(__file__).resolve().parents[2] / ".dev_secret_key"
-
-
-def _load_or_create_dev_secret_key(key_path: Path | None = None) -> str:
-    """Return a stable development signing key, persisted across restarts.
-
-    A fresh random key on every process start would invalidate all previously
-    issued access/refresh tokens, forcing everyone to re-authenticate on each
-    reload (the root cause of recurring 401s in development). Persisting the key
-    to a gitignored local file keeps sessions stable between restarts. Production
-    never reaches this path — it hard-requires an explicit ``SECRET_KEY``.
-    """
-    path = key_path or _DEV_SECRET_KEY_PATH
-    try:
-        existing = path.read_text(encoding="utf-8").strip()
-        if existing:
-            return existing
-    except OSError:
-        pass
-    generated = secrets.token_urlsafe(48)
-    try:
-        path.write_text(generated, encoding="utf-8")
-    except OSError:
-        logging.getLogger(__name__).warning(
-            "Could not persist development SECRET_KEY to %s; auth sessions will "
-            "reset on every restart. Set SECRET_KEY explicitly to avoid this.",
-            path,
-        )
-    return generated
+#: The placeholder older ``.env`` files carried. Development treats it as unset;
+#: elsewhere it is refused as too short, as any explicit weak key is.
+_PLACEHOLDER_SECRET_KEY = "secret-key"
+#: Fernet's own key rule: 32 bytes, url-safe base64.
+_FERNET_KEY_BYTES = 32
 
 
 def _inject_redis_password(url: str, password: str) -> str:
@@ -270,7 +247,11 @@ class Settings(BaseSettings):
     secret_key: str = Field(
         repr=False,
         default="",
-        description="Secret key for security",
+        description=(
+            "Token signing key. Unset, the server generates one and stores it in the "
+            "server_secrets table (app/core/server_secrets.py); set, it always wins and "
+            "must be at least 32 characters outside development."
+        ),
     )
     jwt_algorithm: str = Field(
         default="HS256",
@@ -379,7 +360,9 @@ class Settings(BaseSettings):
         repr=False,
         default="",
         description=(
-            "Fernet encryption key for storing provider API keys (32 url-safe base64-encoded bytes)"
+            "Fernet key (32 url-safe base64-encoded bytes) that encrypts stored provider API "
+            "keys. Unset, the server generates one and stores it in the server_secrets table, "
+            "unless provider keys are already stored; set, it always wins."
         ),
     )
     openai_request_timeout_seconds: int = Field(
@@ -2119,6 +2102,28 @@ class Settings(BaseSettings):
             raise ValueError("Value must be non-negative")
         return v
 
+    @field_validator("model_encryption_key")
+    @classmethod
+    def _fernet_key_or_unset(cls, value: str) -> str:
+        """Refuse at startup a configured key that Fernet would refuse at first use.
+
+        Checked with the standard library rather than ``cryptography``: the client
+        sidecar bundle ships this module too.
+        """
+        key = value.strip()
+        if not key:
+            return ""
+        try:
+            decoded = base64.urlsafe_b64decode(key.encode("ascii"))
+        except (UnicodeEncodeError, binascii.Error):
+            decoded = b""
+        if len(decoded) != _FERNET_KEY_BYTES:
+            raise ValueError(
+                "MODEL_ENCRYPTION_KEY must be a Fernet key (32 url-safe base64-encoded "
+                "bytes), or unset to use the key stored in the server_secrets table"
+            )
+        return key
+
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
         # A hard rung at or below its soft rung means the framework raises on
@@ -2190,16 +2195,12 @@ class Settings(BaseSettings):
         self.redis_url = _normalize_redis_loopback_host(self.redis_url)
         self.celery_broker_url = _normalize_redis_loopback_host(self.celery_broker_url)
         self.celery_result_backend = _normalize_redis_loopback_host(self.celery_result_backend)
-        if not self.secret_key or self.secret_key == "secret-key":
-            if self.environment == "development":
-                self.secret_key = _load_or_create_dev_secret_key()
-                logging.getLogger(__name__).warning(
-                    "SECRET_KEY is not set; using a persisted development key "
-                    "(.dev_secret_key). Set SECRET_KEY explicitly for shared or "
-                    "production environments so sessions stay valid across machines."
-                )
-            else:
-                raise ValueError("secret_key must be set to a strong value outside development")
+        # Unset is valid everywhere: app.core.server_secrets then uses the key
+        # stored in the database, generating it once.
+        if not self.secret_key.strip() or (
+            self.environment == "development" and self.secret_key == _PLACEHOLDER_SECRET_KEY
+        ):
+            self.secret_key = ""
         if self.environment != "development" and self.api_debug:
             raise ValueError("api_debug must be disabled outside development")
         if self.environment != "development":
@@ -2255,11 +2256,15 @@ class Settings(BaseSettings):
         """Refuse the permissive local-development defaults in a deployment.
 
         HS256 tokens signed with a short key are brute-forceable offline. An
-        empty or ``*`` CORS list makes the API answer any origin (see the CORS
+        unset key is not short: the generated one stored in the database is used.
+        An empty or ``*`` CORS list makes the API answer any origin (see the CORS
         block in ``app.main``), which is the development default only.
         """
-        if len(self.secret_key) < 32:
-            raise ValueError("secret_key must be at least 32 characters outside development")
+        if self.secret_key and len(self.secret_key) < 32:
+            raise ValueError(
+                "secret_key must be at least 32 characters outside development; leave "
+                "SECRET_KEY unset to use the generated key stored in the database"
+            )
         configured = [origin for origin in self.cors_origins if origin]
         if not configured or "*" in configured:
             raise ValueError(

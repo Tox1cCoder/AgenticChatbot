@@ -31,8 +31,8 @@ from app.services.widget_contract import (
 from app.services.widget_runtime import (
     get_widget_connection_manager,
     get_widget_store,
-    get_widget_token_service,
 )
+from app.services.widget_tokens import get_widget_token_service
 
 
 class WidgetActionRequest(BaseModel):

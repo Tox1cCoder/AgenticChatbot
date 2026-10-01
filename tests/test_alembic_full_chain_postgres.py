@@ -24,10 +24,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "371ffaf3a087"
+_HEAD = "9b132832d676"
 #: The revision just below the constraint revision, where its pre-checks are
 #: exercised against seeded violating rows.
 _PRE_CONSTRAINTS_HEAD = "c0033ee1e8cd"
+#: The constraint revision: the last one before ``server_secrets`` existed.
+_PRE_SERVER_SECRETS_HEAD = "371ffaf3a087"
+#: ``server_secrets`` exists; ``idx_model_providers_user_type`` is not rebuilt yet.
+_SERVER_SECRETS_REVISION = "e983df693ada"
 #: Not "head minus one". ``_assert_previous_head_schema`` describes the schema
 #: at *this* revision specifically — it asserts, among other things, that
 #: ``document_index_generations`` does not exist yet — so advancing it with each
@@ -1128,6 +1132,185 @@ def test_constraint_revision_refuses_violating_rows_and_changes_nothing() -> Non
             with engine.connect() as connection:
                 assert connection.scalar(text("SELECT version_num FROM alembic_version")) == _HEAD
                 assert connection.scalar(text(_RESOLVER_OF), {"id": "orphaned"}) is None
+        finally:
+            engine.dispose()
+
+
+_PROVIDER_INSERT = (
+    "INSERT INTO model_providers (id, user_id, provider_type, api_key_encrypted, deleted_at) "
+    "VALUES (:id, :user_id, 'openai', 'gAAAAA-ciphertext', :deleted_at)"
+)
+
+
+def _version(engine) -> str:
+    with engine.connect() as connection:
+        return connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+
+def test_concurrent_first_starts_store_one_server_secret() -> None:
+    """e983df693ada: two resolvers that both read nothing keep the same key.
+
+    The barrier holds each between its read and its insert, the window in which
+    a plain INSERT would fail one start or keep two keys. PostgreSQL makes the
+    second ``ON CONFLICT DO NOTHING`` wait for the first to commit.
+    """
+    import threading
+
+    from app.core import server_secrets
+
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", "head")
+        engine = create_engine(scratch_url)
+        both_read_nothing = threading.Barrier(2, timeout=30)
+        results: dict[str, str] = {}
+        errors: list[BaseException] = []
+
+        def resolve(label: str) -> None:
+            def candidate(_connection) -> str:
+                both_read_nothing.wait()
+                return f"candidate-from-{label}-" + "z" * 32
+
+            try:
+                results[label] = server_secrets._load_or_create(
+                    engine, server_secrets.SIGNING_KEY, candidate
+                )
+            except BaseException as exc:  # noqa: BLE001 - asserted on the test thread
+                errors.append(exc)
+
+        try:
+            threads = [threading.Thread(target=resolve, args=(label,)) for label in "ab"]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=60)
+
+            assert errors == []
+            assert results["a"] == results["b"]
+            with engine.connect() as connection:
+                rows = connection.execute(
+                    text("SELECT name, value, created_at FROM server_secrets")
+                ).all()
+            assert [(name, value) for name, value, _ in rows] == [
+                (server_secrets.SIGNING_KEY, results["a"])
+            ]
+            assert rows[0].created_at is not None
+        finally:
+            engine.dispose()
+
+
+def test_server_secrets_downgrade_refuses_to_strand_provider_keys() -> None:
+    """Dropping the stored encryption key would make every provider key unreadable."""
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", "head")
+        engine = create_engine(scratch_url)
+        user_id = uuid4()
+        try:
+            with engine.begin() as connection:
+                _seed_owner(connection, user_id, name="secrets-owner")
+                connection.execute(
+                    text(_PROVIDER_INSERT), {"id": uuid4(), "user_id": user_id, "deleted_at": None}
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO server_secrets (name, value) "
+                        "VALUES ('model_encryption_key', 'stored-fernet-key')"
+                    )
+                )
+
+            with pytest.raises(pytest.fail.Exception, match="changed nothing.*undecryptable"):
+                _run_alembic(scratch_url, "downgrade", _PRE_SERVER_SECRETS_HEAD)
+            assert inspect(engine).has_table("server_secrets")
+
+            with engine.begin() as connection:
+                connection.execute(text("DELETE FROM server_secrets"))
+            _run_alembic(scratch_url, "downgrade", _PRE_SERVER_SECRETS_HEAD)
+            assert _version(engine) == _PRE_SERVER_SECRETS_HEAD
+            assert not inspect(engine).has_table("server_secrets")
+        finally:
+            engine.dispose()
+
+
+def _replace_user_type_index(engine, definition: str | None) -> None:
+    """Put the index into a state the application database was found in."""
+    with engine.begin() as connection:
+        connection.execute(text("DROP INDEX idx_model_providers_user_type"))
+        if definition:
+            connection.execute(text(definition))
+
+
+def _user_type_index_definition(engine) -> str:
+    with engine.connect() as connection:
+        return connection.scalar(
+            text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE indexname = 'idx_model_providers_user_type'"
+            )
+        )
+
+
+def test_a_plain_user_type_index_is_rebuilt_partial() -> None:
+    """9b132832d676: a soft-deleted provider no longer blocks adding that type again."""
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _SERVER_SECRETS_REVISION)
+        engine = create_engine(scratch_url)
+        user_id = uuid4()
+        try:
+            _replace_user_type_index(
+                engine,
+                "CREATE UNIQUE INDEX idx_model_providers_user_type "
+                "ON model_providers (user_id, provider_type)",
+            )
+            with engine.begin() as connection:
+                _seed_owner(connection, user_id, name="provider-owner")
+                connection.execute(
+                    text(_PROVIDER_INSERT),
+                    {"id": uuid4(), "user_id": user_id, "deleted_at": _DELETED_AT},
+                )
+            # The live database's bug, reproduced: the deleted row blocks re-adding.
+            live = {"user_id": user_id, "deleted_at": None}
+            _assert_rejected(engine, _PROVIDER_INSERT, {**live, "id": uuid4()})
+
+            _run_alembic(scratch_url, "upgrade", "head")
+
+            assert "WHERE (deleted_at IS NULL)" in _user_type_index_definition(engine)
+            with engine.begin() as connection:
+                connection.execute(text(_PROVIDER_INSERT), {**live, "id": uuid4()})
+            _assert_rejected(engine, _PROVIDER_INSERT, {**live, "id": uuid4()})
+        finally:
+            engine.dispose()
+
+
+def test_the_user_type_index_rebuild_refuses_live_duplicates() -> None:
+    """Only a database missing the index can hold these; a bare error would block startup."""
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _SERVER_SECRETS_REVISION)
+        engine = create_engine(scratch_url)
+        user_id, duplicate_id = uuid4(), uuid4()
+        try:
+            _replace_user_type_index(engine, None)
+            with engine.begin() as connection:
+                _seed_owner(connection, user_id, name="duplicate-owner")
+                for provider_id in (uuid4(), duplicate_id):
+                    connection.execute(
+                        text(_PROVIDER_INSERT),
+                        {"id": provider_id, "user_id": user_id, "deleted_at": None},
+                    )
+
+            with pytest.raises(
+                pytest.fail.Exception, match=r"changed nothing.*groups with more than one live"
+            ):
+                _run_alembic(scratch_url, "upgrade", "head")
+            assert _version(engine) == _SERVER_SECRETS_REVISION
+            assert _user_type_index_definition(engine) is None
+
+            with engine.begin() as connection:
+                connection.execute(
+                    text("UPDATE model_providers SET deleted_at = now() WHERE id = :id"),
+                    {"id": duplicate_id},
+                )
+            _run_alembic(scratch_url, "upgrade", "head")
+            assert _version(engine) == _HEAD
+            assert "WHERE (deleted_at IS NULL)" in _user_type_index_definition(engine)
         finally:
             engine.dispose()
 

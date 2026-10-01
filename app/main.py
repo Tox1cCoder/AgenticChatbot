@@ -42,6 +42,7 @@ from app.core.container import (
     get_container,
     setup_auto_injection,
 )
+from app.core.server_secrets import resolve_server_secrets
 from app.database.migrations import upgrade_database
 from app.database.session import SessionLocal, get_engine
 from app.services.client_device_service import periodic_session_cleanup_task
@@ -87,6 +88,15 @@ async def _close_startup_clients() -> None:
 async def init_database_migrations():
     """Apply pending Alembic migrations before serving requests."""
     await asyncio.to_thread(upgrade_database)
+
+
+async def init_server_secrets():
+    """Resolve the signing and encryption keys once, after the migrations.
+
+    Afterwards no request reads the database for a key. A failure is fatal on
+    purpose: serving without a key would mean signing or encrypting with none.
+    """
+    await asyncio.to_thread(resolve_server_secrets)
 
 
 async def init_checkpoint_tables():
@@ -318,6 +328,7 @@ async def lifespan(app: FastAPI):
     _ensure_selector_event_loop()
     await _verify_async_database_ready()
     await init_database_migrations()
+    await init_server_secrets()
     await _reclaim_orphaned_generations()
     await init_checkpoint_tables()
     await init_agents()

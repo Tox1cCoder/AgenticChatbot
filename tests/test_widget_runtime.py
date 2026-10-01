@@ -19,12 +19,11 @@ from app.services.widget_contract import coerce_widget_state_object
 from app.services.widget_runtime import (
     MAX_WIDGET_STATE_BYTES,
     InMemoryWidgetStore,
-    WidgetConnectionManager,
     WidgetRecord,
     WidgetStatus,
-    WidgetTokenService,
     _validate_state_size,
 )
+from app.services.widget_tokens import WidgetTokenService
 
 
 # ---------------------------------------------------------------------------
@@ -191,28 +190,6 @@ class TestStateSizeValidation:
 # WidgetRecord — metadata conversion
 # ---------------------------------------------------------------------------
 class TestWidgetRecordMetadata:
-    def test_to_live_widget_metadata(self):
-        record = WidgetRecord(
-            widget_id="w-123",
-            session_id="s-456",
-            title="My Table",
-            state={"rows": []},
-            status=WidgetStatus.ACTIVE,
-            version=3,
-            created_at=1000.0,
-            updated_at=1001.0,
-            expires_at=2000.0,
-        )
-        meta = record.to_live_widget_metadata()
-        assert meta["widget_id"] == "w-123"
-        assert meta["session_id"] == "s-456"
-        assert "widget_type" not in meta
-        assert meta["title"] == "My Table"
-        assert meta["status"] == "active"
-        assert meta["version"] == 3
-        assert meta["connection_endpoint"] == "/widgets/w-123/connection"
-        assert "state" not in meta
-
     def test_to_dict_includes_state(self):
         record = WidgetRecord(
             widget_id="w-1",
@@ -261,15 +238,6 @@ class TestWidgetTokenService:
         raw = pyjwt.encode(payload, "test-secret-key-long-enough-32bytes!", algorithm="HS256")
         with pytest.raises(pyjwt.InvalidTokenError, match="Not a widget token"):
             token_service.verify(raw)
-
-
-# ---------------------------------------------------------------------------
-# WidgetConnectionManager — unit tests
-# ---------------------------------------------------------------------------
-class TestWidgetConnectionManager:
-    def test_connection_count_starts_at_zero(self):
-        mgr = WidgetConnectionManager()
-        assert mgr.connection_count("w-1") == 0
 
 
 # ---------------------------------------------------------------------------

@@ -1,12 +1,27 @@
-from celery import Celery
+from celery import Celery, signals
 from celery.schedules import crontab
 
 from app.core.config import get_settings
+from app.core.server_secrets import resolve_server_secrets
 
 settings = get_settings()
 
 
 celery_app = Celery("chatbot_tasks")
+
+
+@signals.worker_init.connect
+@signals.worker_process_init.connect
+def _resolve_server_secrets_at_worker_start(**_kwargs) -> None:
+    """Resolve the keys before the first task, so no task reads the database for one.
+
+    ``worker_init`` runs in the worker's main process, where the threads and solo
+    pools run their tasks. ``worker_process_init`` runs in each prefork child,
+    which already holds the parent's result when it was forked. Celery logs a
+    failure here without stopping the worker; the first task that needs a key
+    then raises the same error.
+    """
+    resolve_server_secrets()
 
 
 celery_app.conf.broker_url = settings.celery_broker_url

@@ -26,8 +26,8 @@ from app.services.provider_service import ProviderService
 def service() -> ProviderService:
     """Build a ProviderService with a mocked repository.
 
-    ``settings.model_encryption_key`` is loaded from the workspace ``.env``
-    so the constructor's Fernet check succeeds. No DB access happens here.
+    ``tests/conftest.py`` configures ``MODEL_ENCRYPTION_KEY``, so the
+    constructor's cipher needs no database. No DB access happens here.
     """
     return ProviderService(provider_repository=MagicMock())
 

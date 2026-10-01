@@ -6,11 +6,18 @@ import jwt
 
 from app.core.config import settings
 from app.core.exceptions import AuthenticationException, TokenExpiredException
+from app.core.server_secrets import get_signing_key
 
 
 class JwtService:
+    """Signs and verifies tokens with the server signing key.
+
+    The key is read per call, not captured here: the container builds one of
+    these per request, and ``get_signing_key`` answers from the process cache
+    once startup has resolved it.
+    """
+
     def __init__(self):
-        self.secret_key = settings.secret_key
         self.algorithm = settings.jwt_algorithm
         self.access_token_expire_minutes = settings.access_token_expire_minutes
         self.refresh_token_expire_days = settings.refresh_token_expire_days
@@ -29,7 +36,7 @@ class JwtService:
         now = datetime.now(timezone.utc)
         expire = self._calculate_expiration_time(expires_delta, now)
         to_encode.update({"exp": int(expire.timestamp()), "iat": int(now.timestamp())})
-        return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
+        return jwt.encode(to_encode, get_signing_key(), algorithm=self.algorithm)
 
     def create_refresh_token(self, data: dict) -> str:
         to_encode = data.copy()
@@ -42,11 +49,11 @@ class JwtService:
                 "type": "refresh",
             }
         )
-        return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
+        return jwt.encode(to_encode, get_signing_key(), algorithm=self.algorithm)
 
     def decode_token(self, token: str) -> dict:
         try:
-            payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+            payload = jwt.decode(token, get_signing_key(), algorithms=[self.algorithm])
             return payload
         except jwt.ExpiredSignatureError as e:
             raise TokenExpiredException() from e

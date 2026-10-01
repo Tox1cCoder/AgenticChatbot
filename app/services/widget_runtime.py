@@ -6,7 +6,6 @@ Provides:
 - WidgetStore (Protocol): abstract storage interface
 - RedisWidgetStore: cross-process shared store for real MCP + HTTP flows
 - InMemoryWidgetStore: isolated unit-test store
-- WidgetTokenService: short-lived signed tokens for WebSocket auth
 - WidgetConnectionManager: per-widget WebSocket fan-out
 """
 
@@ -18,11 +17,9 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
-import jwt
 from fastapi import WebSocket
 
 from app.core.config import settings
@@ -34,7 +31,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 MAX_WIDGET_STATE_BYTES = 256 * 1024  # 256 KB
 DEFAULT_WIDGET_TTL_SECONDS = 3600  # 1 hour
-WIDGET_TOKEN_TTL_SECONDS = 300  # 5 minutes
 # A Redis write that keeps losing its WATCH race gives up instead of spinning.
 _WATCH_RETRY_LIMIT = 10
 
@@ -70,17 +66,6 @@ class WidgetRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "expires_at": self.expires_at,
-        }
-
-    def to_live_widget_metadata(self) -> dict[str, Any]:
-        """Return the shape persisted in assistant message metadata."""
-        return {
-            "widget_id": self.widget_id,
-            "session_id": self.session_id,
-            "title": self.title,
-            "status": self.status.value,
-            "version": self.version,
-            "connection_endpoint": f"/widgets/{self.widget_id}/connection",
         }
 
 
@@ -569,45 +554,6 @@ class RedisWidgetStore:
 
 
 # ---------------------------------------------------------------------------
-# Widget token service
-# ---------------------------------------------------------------------------
-class WidgetTokenService:
-    """Mint and verify short-lived signed tokens scoped to a single widget."""
-
-    def __init__(self, secret: str | None = None, algorithm: str = "HS256") -> None:
-        self._secret = secret or settings.secret_key
-        self._algorithm = algorithm
-
-    def mint(
-        self,
-        *,
-        widget_id: str,
-        session_id: str,
-        user_id: str,
-        ttl_seconds: int = WIDGET_TOKEN_TTL_SECONDS,
-    ) -> tuple[str, datetime]:
-        now = datetime.now(timezone.utc)
-        expires_at = now + timedelta(seconds=ttl_seconds)
-        payload = {
-            "sub": user_id,
-            "wid": widget_id,
-            "sid": session_id,
-            "type": "widget",
-            "iat": int(now.timestamp()),
-            "exp": int(expires_at.timestamp()),
-        }
-        token = jwt.encode(payload, self._secret, algorithm=self._algorithm)
-        return token, expires_at
-
-    def verify(self, token: str) -> dict[str, Any]:
-        """Verify token and return claims. Raises jwt.InvalidTokenError on failure."""
-        payload = jwt.decode(token, self._secret, algorithms=[self._algorithm])
-        if payload.get("type") != "widget":
-            raise jwt.InvalidTokenError("Not a widget token")
-        return payload
-
-
-# ---------------------------------------------------------------------------
 # WebSocket connection manager
 # ---------------------------------------------------------------------------
 class WidgetConnectionManager:
@@ -651,15 +597,11 @@ class WidgetConnectionManager:
                     if not conns_set:
                         del self._connections[widget_id]
 
-    def connection_count(self, widget_id: str) -> int:
-        return len(self._connections.get(widget_id, set()))
-
 
 # ---------------------------------------------------------------------------
 # Module-level singletons
 # ---------------------------------------------------------------------------
 _widget_store: WidgetStore | None = None
-_widget_token_service: WidgetTokenService | None = None
 _widget_connection_manager: WidgetConnectionManager | None = None
 
 
@@ -673,13 +615,6 @@ def get_widget_store() -> WidgetStore:
             logger.warning("Widget store: Redis unavailable, falling back to in-memory (test only)")
             _widget_store = InMemoryWidgetStore()
     return _widget_store
-
-
-def get_widget_token_service() -> WidgetTokenService:
-    global _widget_token_service
-    if _widget_token_service is None:
-        _widget_token_service = WidgetTokenService()
-    return _widget_token_service
 
 
 def get_widget_connection_manager() -> WidgetConnectionManager:

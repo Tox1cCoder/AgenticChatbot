@@ -50,8 +50,8 @@ from app.core.auth import get_current_user_id  # noqa: E402
 from app.services.widget_runtime import (  # noqa: E402
     InMemoryWidgetStore,
     WidgetConnectionManager,
-    WidgetTokenService,
 )
+from app.services.widget_tokens import WidgetTokenService  # noqa: E402
 
 TEST_USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 TEST_SESSION_ID = "22222222-2222-2222-2222-222222222222"
@@ -61,13 +61,14 @@ TEST_SESSION_ID_2 = "33333333-3333-3333-3333-333333333333"
 @pytest.fixture()
 def widget_test_client(monkeypatch):
     import app.services.widget_runtime as widget_runtime
+    import app.services.widget_tokens as widget_tokens
 
     store = InMemoryWidgetStore()
     token_service = WidgetTokenService(secret="test-secret-key-long-enough-32bytes!")
     manager = WidgetConnectionManager()
 
     monkeypatch.setattr(widget_runtime, "_widget_store", store)
-    monkeypatch.setattr(widget_runtime, "_widget_token_service", token_service)
+    monkeypatch.setattr(widget_tokens, "_widget_token_service", token_service)
     monkeypatch.setattr(widget_runtime, "_widget_connection_manager", manager)
     monkeypatch.setattr(widgets_api, "_user_can_access_widget_session", lambda *_args: True)
 
