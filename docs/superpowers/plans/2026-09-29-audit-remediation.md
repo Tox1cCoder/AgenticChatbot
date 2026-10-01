@@ -17,6 +17,31 @@ LangGraph, Streamlit (`demo.py`), local sidecar `client_backend/` on :8100.
 **Spec:** the audit reports, summarised in the Appendix. The session note is at
 `~/claude-assistant/state/sessions/2026-09-25-codebase-audit.md`.
 
+## Status (2026-10-01, end of round 4)
+
+Round 4 shipped: `3adb3eee` (epoch carried through pauses, epoch cap enforced, research
+accounting kept), `99ee77e3` + `3b1d7bc7` (Phase 5 splits, all ≤ 8), `b71f8609` (dead
+state keys), `1c743e7f`, `496429b6`, `41b93954` (generation row settled on every turn
+ending — reproduced on PostgreSQL), `aa8157b4`, `4697d43d` (fallback keeps tool
+exclusions), `26ade534` (Python 3.11 + ruff py311; UP042 ignored on purpose). Full suite
+6128 passed, 0 failed. Every task in this plan is done except 6 (deferred by Thai) and
+10/24 (Thai's hands).
+
+### Still open after round 4 (found while fixing; each needs a decision or its own plan)
+| Item | Note |
+|---|---|
+| Resume holds no turn lock | approval pauses no longer block the conversation, so a new message can start while an approval is pending; approving during it runs the resume untracked. Hold the lock, or refuse the resume? |
+| Approval inside a continued epoch | nothing persisted, no HITL record, so it can never be resumed; the row now ends `failed` |
+| Stop during a resume | not acted on until the resume finishes (no registry entry / stop watch) |
+| Stop on an approval pause | row → `completed_partial` but the HITL interrupt stays pending |
+| Continue doesn't restamp `producer_token` | if another worker serves the Continue and dies, the reaper won't clear the row |
+| Continued-epoch partial text | lost on disconnect/Stop |
+| `planning_budget_reached` / `planning_call_count` | documented in AI_SDK_FE_CONTRACT but never produced (always false / 0) — wire or drop from the contract |
+| `WorkerTask.parent_context` | built, never reaches the worker prompt |
+| `tool_execution_consecutive_errors_limit` | setting no longer read |
+| Upload staging | still writes to disk on the event loop |
+| Flaky | `test_tool_execution_recovery::test_safe_session_reconnect_counts_as_next_attempt` fails alone (timing bound) |
+
 ## Status (2026-10-01)
 
 Full suite after round 3 (with another session's uncommitted preview-stream work in the
