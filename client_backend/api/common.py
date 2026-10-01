@@ -64,7 +64,8 @@ def add_device_context(
     normalized = dict(payload)
     incoming = [normalized.pop(key) for key in (snake_key, camel_key) if key in normalized]
 
-    device_id = get_runtime_bridge().get_registered_device_id()
+    bridge = get_runtime_bridge()
+    device_id = bridge.get_registered_device_id() if bridge.is_connected() else None
     foreign = [value for value in incoming if value and value != device_id]
     if foreign:
         logger.warning(

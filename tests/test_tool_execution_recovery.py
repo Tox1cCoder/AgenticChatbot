@@ -1186,6 +1186,21 @@ async def test_safe_session_reconnect_counts_as_next_attempt(monkeypatch):
 
     monkeypatch.setattr("app.ai.mcp_registry.get_global_mcp_manager", _manager)
 
+    # Tool output handling lazily imports the application container. Warm the
+    # real dispatch path before measuring the reconnect/deadline contract so
+    # this test has the same behavior in isolation and in a warmed suite.
+    class _WarmupTool:
+        name = "warmup"
+        metadata = {}
+
+        async def ainvoke(self, args):
+            return "ready"
+
+    await execute_tool_calls(
+        tool_calls=[{"id": "warmup", "name": "warmup", "args": {}}],
+        tool_map={"warmup": _WarmupTool()},
+    )
+
     started_at = time.monotonic()
     outputs, artifacts, _ = await execute_tool_calls(
         tool_calls=[{"id": "call-1", "name": "read_remote", "args": {}}],

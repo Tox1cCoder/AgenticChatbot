@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -8,13 +7,7 @@ from pathlib import Path
 import pytest
 import requests
 
-module_spec = importlib.util.spec_from_file_location(
-    "take100_api_under_test",
-    Path(__file__).resolve().parents[1] / "skills" / "take100" / "take100_api.py",
-)
-assert module_spec is not None and module_spec.loader is not None
-take100_api = importlib.util.module_from_spec(module_spec)
-module_spec.loader.exec_module(take100_api)
+from shared.integrations import take100_api
 
 BASE_URL = take100_api.BASE_URL
 Take100Client = take100_api.Take100Client
@@ -116,6 +109,13 @@ def test_login_persists_session_cache(tmp_path: Path) -> None:
     ]
 
 
+def test_client_verifies_tls_certificates(tmp_path):
+    client = Take100Client(
+        "user@example.com", "secret", session_cache_path=tmp_path / "session.json"
+    )
+    assert client.session.verify is True
+
+
 def test_ensure_authenticated_reuses_valid_cached_session_without_login(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -204,3 +204,21 @@ def test_main_list_action_does_not_force_eager_login(
     result = json.loads(capsys.readouterr().out)
     assert result["success"] is True
     assert result["applications"][0]["no"] == "100-100"
+
+
+def test_main_uses_injected_credentials_without_reading_skill_prose(monkeypatch, capsys):
+    class StubClient:
+        def __init__(self, email, password):
+            assert (email, password) == ("user@example.com", "bound-secret")
+
+        def list_applications(self):
+            return [{"id": "from-environment"}]
+
+    monkeypatch.setenv("TAKE100_EMAIL", "user@example.com")
+    monkeypatch.setenv("TAKE100_PASSWORD", "bound-secret")
+    monkeypatch.setattr(take100_api, "Take100Client", StubClient)
+    monkeypatch.setattr(sys, "argv", ["take100_api.py", "--action", "list"])
+
+    take100_api.main()
+
+    assert json.loads(capsys.readouterr().out)["applications"] == [{"id": "from-environment"}]

@@ -22,11 +22,12 @@ FOREIGN_DEVICE_ID = "device-foreign-456"
 
 
 class _BridgeStub:
-    def __init__(self, device_id: str | None):
+    def __init__(self, device_id: str | None, *, connected: bool | None = None):
         self.device_id = device_id
+        self.connected = device_id is not None if connected is None else connected
 
     def is_connected(self) -> bool:
-        return self.device_id is not None
+        return self.connected
 
     def get_registered_device_id(self) -> str | None:
         return self.device_id
@@ -93,6 +94,15 @@ def test_disconnected_bridge_strips_device_keys(disconnected_bridge):
 
 def test_disconnected_bridge_without_keys_is_a_noop(disconnected_bridge):
     result = add_device_context({"messages": []})
+
+    assert result == {"messages": []}
+
+
+def test_disconnected_bridge_does_not_forward_its_stale_registered_id(monkeypatch):
+    bridge = _BridgeStub(OWN_DEVICE_ID, connected=False)
+    monkeypatch.setattr(common_api, "get_runtime_bridge", lambda: bridge)
+
+    result = add_device_context({"messages": [], "deviceId": OWN_DEVICE_ID})
 
     assert result == {"messages": []}
 
