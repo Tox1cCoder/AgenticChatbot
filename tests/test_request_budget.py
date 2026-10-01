@@ -784,6 +784,41 @@ async def test_base_agent_surfaces_second_overflow_after_exactly_one_retry(
     assert "private provider data" not in response.model_dump_json()
 
 
+class _OverflowOnceModel:
+    def __init__(self) -> None:
+        self.calls: list[list] = []
+
+    async def ainvoke(self, messages, _config=None):
+        self.calls.append(list(messages))
+        if len(self.calls) == 1:
+            raise RuntimeError("maximum context length exceeded")
+        return AIMessage(content="answered after the retry")
+
+
+@pytest.mark.asyncio
+async def test_base_agent_marks_an_answer_that_needed_the_overflow_retry(monkeypatch) -> None:
+    agent, _model = _configure_boundary_agent(monkeypatch, max_input_tokens=10_000)
+    monkeypatch.setattr(settings, "context_overflow_retry_enabled", True)
+    overflow_once = _OverflowOnceModel()
+    monkeypatch.setattr(
+        agent,
+        "_create_langchain_model_from_runtime",
+        lambda *_args, **_kwargs: (overflow_once, False),
+    )
+
+    response = await agent.invoke_model_with_history(
+        messages=[HumanMessage(content="current question")],
+        conversation_history=[],
+        persona=None,
+        disable_tools=True,
+    )
+
+    assert len(overflow_once.calls) == 2
+    assert response.error is None
+    assert response.message.content == "answered after the retry"
+    assert response.metadata["context_overflow_retry"] is True
+
+
 @pytest.mark.asyncio
 async def test_base_agent_provider_failure_stores_the_type_not_the_text(monkeypatch) -> None:
     """``AgentResponse.error`` and its metadata are persisted; provider text is not."""

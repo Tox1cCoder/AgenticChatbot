@@ -1297,6 +1297,158 @@ def test_invoke_agentic_rag_model_records_generation_stage_failure_on_raise():
     assert ("generation", "provider_exception") in fake_metrics.stage_failure_calls
 
 
+def _agentic_runtime(provider: str, model: str):
+    from app.core.runtime_modeling import ResolvedRuntimeModelConfig
+
+    return ResolvedRuntimeModelConfig(
+        agent_key="rag",
+        provider=provider,
+        model=model,
+        temperature=0.7,
+        api_key=None,
+        key_source="settings",
+        source="agent_default",
+        capabilities={"supports_vision": False},
+        fallback_config=None,
+        warnings=[],
+        provider_fallback=None,
+        is_custom_model=False,
+    )
+
+
+def _run_agentic_invocation(agent, fake_metrics, runtime_config):
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    with patch.object(rag_agent_module, "rag_metrics", fake_metrics):
+        return asyncio.run(
+            agent._invoke_agentic_rag_model(
+                conversation_id="conv-1",
+                messages=[SystemMessage(content="sys"), HumanMessage(content="hi")],
+                tools=[],
+                disable_tools=True,
+                user_id="user-1",
+                runtime_config=runtime_config,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("fallback_provider", "expected_calls"),
+    [("openai", ["gemini", "openai"]), ("gemini", ["gemini"])],
+)
+def test_invoke_agentic_rag_model_falls_back_only_to_another_provider(
+    fallback_provider, expected_calls
+):
+    agent = _build_agentic_invocation_agent()
+    invoked: list[str] = []
+
+    async def fake_invoke(llm, msgs):
+        invoked.append(llm.provider)
+        if llm.provider == "gemini":
+            raise RuntimeError("provider unavailable")
+        return SimpleNamespace(content="answer from the fallback", tool_calls=None)
+
+    agent._ainvoke_with_retries = fake_invoke
+    agent._create_langchain_model_from_runtime = lambda rc, **_kwargs: (
+        SimpleNamespace(provider=rc.provider),
+        False,
+    )
+    agent._create_fallback_runtime_config = lambda *_args, **_kwargs: _agentic_runtime(
+        fallback_provider, "fallback-model"
+    )
+    fake_metrics = _FakeGenerationMetrics()
+
+    if fallback_provider == "gemini":
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            _run_agentic_invocation(agent, fake_metrics, _agentic_runtime("gemini", "primary"))
+    else:
+        response = _run_agentic_invocation(
+            agent, fake_metrics, _agentic_runtime("gemini", "primary")
+        )
+        assert response.message.content == "answer from the fallback"
+        assert response.metadata["provider"] == "openai"
+        assert response.metadata["model"] == "fallback-model"
+
+    assert invoked == expected_calls
+    assert [call[2]["provider"] for call in fake_metrics.stage_calls] == expected_calls
+    assert fake_metrics.stage_failure_calls == [("generation", "provider_exception")]
+
+
+@pytest.mark.parametrize("second_call_overflows", [False, True])
+def test_invoke_agentic_rag_model_retries_a_context_overflow_once(
+    monkeypatch, second_call_overflows
+):
+    from app.ai.request_budget import ContextBudgetExceededError
+
+    monkeypatch.setattr(rag_agent_module.settings, "context_overflow_retry_enabled", True)
+    agent = _build_agentic_invocation_agent()
+    calls: list[int] = []
+
+    async def fake_invoke(llm, msgs):
+        calls.append(len(msgs))
+        if len(calls) == 1 or second_call_overflows:
+            raise RuntimeError("maximum context length exceeded")
+        return SimpleNamespace(content="answered after the retry", tool_calls=None)
+
+    agent._ainvoke_with_retries = fake_invoke
+    agent._create_langchain_model_from_runtime = lambda *_args, **_kwargs: (
+        SimpleNamespace(__name__="fakellm"),
+        False,
+    )
+    fake_metrics = _FakeGenerationMetrics()
+
+    if second_call_overflows:
+        with pytest.raises(ContextBudgetExceededError) as raised:
+            _run_agentic_invocation(agent, fake_metrics, _agentic_runtime("gemini", "primary"))
+        assert raised.value.code == "provider_context_overflow"
+        assert fake_metrics.stage_failure_calls == [("generation", "provider_exception")]
+    else:
+        response = _run_agentic_invocation(
+            agent, fake_metrics, _agentic_runtime("gemini", "primary")
+        )
+        assert response.message.content == "answered after the retry"
+        assert response.metadata["context_overflow_retry"] is True
+        assert fake_metrics.stage_failure_calls == []
+
+    assert len(calls) == 2
+    assert len(fake_metrics.stage_calls) == 1
+
+
+def test_invoke_agentic_rag_model_budget_reserves_the_tool_result_envelopes():
+    """The reported budget already counts the assistant/tool wrapper messages the
+    tool results will travel in, so evidence packing cannot overrun it."""
+    from langchain_core.messages import AIMessage
+
+    def budget_for(response):
+        agent = _build_agentic_invocation_agent()
+
+        async def fake_invoke(_llm, _messages):
+            return response
+
+        agent._ainvoke_with_retries = fake_invoke
+        agent._create_langchain_model_from_runtime = lambda *_args, **_kwargs: (
+            SimpleNamespace(__name__="fakellm"),
+            False,
+        )
+        runtime_config = replace(
+            _agentic_runtime("openai", "gpt-4o-mini"),
+            context_window={"max_input_tokens": 100_000},
+        )
+        result = _run_agentic_invocation(agent, _FakeGenerationMetrics(), runtime_config)
+        return result.metadata["request_budget"]
+
+    answered = budget_for(AIMessage(content="answer"))
+    searching = budget_for(
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "search_documents", "args": {"query": "q"}, "id": "t1"}],
+        )
+    )
+
+    assert searching["input_tokens"] > answered["input_tokens"]
+    assert searching["evidence_token_allowance"] < answered["evidence_token_allowance"]
+
+
 def test_reachable_rag_invocation_uses_native_request_and_bounded_evidence_counts():
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 

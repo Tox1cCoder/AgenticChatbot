@@ -3,6 +3,8 @@ import contextlib
 import logging
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -196,6 +198,17 @@ def _bind_widget_session_tools(
     return bound_tools
 
 
+def _unique_tools_by_name(tools: list[BaseTool]) -> list[BaseTool]:
+    """The tools in order, dropping any whose name an earlier tool already has."""
+    unique: list[BaseTool] = []
+    seen: set[str] = set()
+    for tool in tools:
+        if tool.name not in seen:
+            unique.append(tool)
+            seen.add(tool.name)
+    return unique
+
+
 def _breakdown_int(value: Any) -> int | None:
     """Non-boolean, non-negative int from a token-breakdown field, else None."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -316,6 +329,38 @@ def _failed_generation_reason(response: Any) -> str | None:
     if coerce_response_text(getattr(response, "content", None)).strip():
         return None
     return str(reason).upper()
+
+
+@dataclass(frozen=True)
+class _ToolBindingRequest:
+    """The caller's tool-binding inputs for one ``invoke_model_with_history`` call."""
+
+    conversation_id: str | None
+    internal_tools: list[BaseTool] | None
+    user_id: str | None
+    device_id: str | None
+    include_hand_off: bool | None
+    excluded_tool_names: set[str] | frozenset[str] | None
+    disable_tools: bool
+
+
+@dataclass
+class _ModelTurn:
+    """One model request; a provider fallback replaces its runtime and budget in place."""
+
+    runtime_config: ResolvedRuntimeModelConfig
+    binding: _ToolBindingRequest
+    bound_tools: list[BaseTool]
+    langchain_messages: list[BaseMessage]
+    history_messages: list[BaseMessage]
+    current_messages: list[BaseMessage]
+    durable_request: Any
+    emergency_compact: Any
+    budget_result: BudgetResult | None = None
+    context_overflow_retried: bool = False
+
+
+_CallModel = Callable[[Any, list[BaseMessage]], Awaitable[Any]]
 
 
 class BaseAgent(ABC):
@@ -555,85 +600,21 @@ class BaseAgent(ABC):
             excluded_tool_names, allow_raw_web_tools=allow_raw_web_tools
         )
 
-        # Keep always-on internal tools available even in deferred mode.
-        skills_tools = self._get_skills_internal_tools(user_id=user_id, device_id=device_id)
-        merged_internal: list[BaseTool] = []
-        seen_internal: set[str] = set()
-
-        def _add_internal(tool: BaseTool) -> None:
-            if tool.name not in seen_internal:
-                merged_internal.append(tool)
-                seen_internal.add(tool.name)
-
-        for tool in skills_tools:
-            _add_internal(tool)
-
-        # A preview-only tool result is unusable without a reader, and the model's
-        # only other recovery is to repeat the search that produced it.
-        if getattr(settings, "tool_result_offload_enabled", False):
-            _add_internal(create_read_tool_result_tool())
-
-        # Web work is server-owned and split three ways: discovery, focused
-        # page extraction, and image discovery. Each spends its own budget, and
-        # selected images reach the answer only through the rich-item inventory.
-        if self.agent_config_key in {"chat", "search"} and not client_only_scope:
-            for factory in (
-                create_web_search_tool,
-                create_web_open_tool,
-            ):
-                _add_internal(factory(tool_scope=effective_scope.value))
-
-        # Caller-provided internal tools include the graph-scoped ``hand_off``
-        # tool. The graph owns its roster, so BaseAgent never supplies a static
-        # fallback that could become stale or permit self-delegation.
-        for tool in internal_tools or []:
-            _add_internal(tool)
-
-        if getattr(settings, "enable_user_memory_tools", False) and user_id:
-            try:
-                from ...core.container import Container
-
-                memory_repository = Container().user_memory_repository()
-            except Exception as exc:
-                logger.debug("User memory repository unavailable: %s", exc)
-                memory_repository = None
-            if memory_repository is not None:
-                for tool in create_user_memory_tools(
-                    repository=memory_repository,
-                    user_id=str(user_id),
-                    conversation_id=str(conversation_id) if conversation_id else None,
-                ):
-                    _add_internal(tool)
-
-        if getattr(settings, "enable_conversation_search_tools", False) and user_id:
-            try:
-                from ...core.container import Container
-
-                search_repository = Container().conversation_search_repository()
-            except Exception as exc:
-                logger.debug("Conversation search repository unavailable: %s", exc)
-                search_repository = None
-            if search_repository is not None:
-                for tool in create_conversation_search_tools(
-                    repository=search_repository,
-                    user_id=str(user_id),
-                    conversation_id=str(conversation_id) if conversation_id else None,
-                ):
-                    _add_internal(tool)
-
-        internal_tools = merged_internal or None
+        internal_tools = (
+            self._internal_tools_for_binding(
+                internal_tools,
+                effective_scope=effective_scope,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+            )
+            or None
+        )
 
         use_deferred = should_use_deferred_loading(self.agent_config_key)
-        # When bridge is enabled and device_id is absent, bind zero client tools.
-        # This prevents a missing device_id (by accident rather than by design)
-        # from falling through to include all loaded client tools.
-        if settings.enable_client_runtime_bridge and not device_id:
-            remote_tools = []
-        else:
-            remote_tools = self._get_client_runtime_tools(user_id=user_id, device_id=device_id)
+        remote_tools = self._client_tools_for_binding(user_id=user_id, device_id=device_id)
 
         if use_deferred:
-            # Build deferred tool list
             tools = build_deferred_tool_list(
                 conversation_id=conversation_id,
                 agent_key=getattr(self, "tool_state_key", None) or self.agent_config_key,
@@ -644,43 +625,171 @@ class BaseAgent(ABC):
                 excluded_tool_names=excluded_tool_names,
                 allow_raw_web_tools=allow_raw_web_tools,
             )
-            if conversation_id and remote_tools:
-                from ..deferred_tool_state import get_deferred_tool_state
-
-                active_session = get_active_client_runtime_session(
-                    user_id=user_id,
-                    device_id=device_id,
-                )
-                loaded_client_names = {
-                    loaded.tool_name
-                    for loaded in get_deferred_tool_state().get_loaded_client_tools(
-                        conversation_id,
-                        getattr(self, "tool_state_key", None) or self.agent_config_key,
-                        device_id=str(device_id) if device_id else None,
-                        session_id=(
-                            active_session.session_id if active_session is not None else None
-                        ),
-                        user_id=str(user_id) if user_id else None,
-                    )
-                }
-                remote_tools = [tool for tool in remote_tools if tool.name in loaded_client_names]
-            else:
-                remote_tools = []
+            remote_tools = self._loaded_client_tools(
+                remote_tools,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+            )
         else:
-            # Traditional mode: return all tools (with internal tools prepended)
-            if client_only_scope:
-                tools = list(internal_tools or [])
-            elif internal_tools:
-                # Combine internal tools with MCP tools, avoiding duplicates
-                seen = {t.name for t in internal_tools}
-                tools = list(internal_tools)
-                for tool in self.tools:
-                    if tool.name not in seen:
-                        tools.append(tool)
-                        seen.add(tool.name)
-            else:
-                tools = list(self.tools)
+            tools = self._all_tools_for_binding(internal_tools, client_only_scope=client_only_scope)
 
+        return self._finish_tool_binding(
+            tools,
+            remote_tools,
+            conversation_id=conversation_id,
+            include_hand_off=include_hand_off,
+            excluded_tool_names=excluded_tool_names,
+        )
+
+    # ------------------------------------------------ _get_tools_for_binding parts
+
+    def _internal_tools_for_binding(
+        self,
+        internal_tools: list[BaseTool] | None,
+        *,
+        effective_scope: ToolScope,
+        conversation_id: str | None,
+        user_id: str | None,
+        device_id: str | None,
+    ) -> list[BaseTool]:
+        """Always-on internal tools, kept even in deferred mode; the first name wins."""
+        candidates: list[BaseTool] = list(
+            self._get_skills_internal_tools(user_id=user_id, device_id=device_id)
+        )
+
+        # A preview-only tool result is unusable without a reader, and the model's
+        # only other recovery is to repeat the search that produced it.
+        if getattr(settings, "tool_result_offload_enabled", False):
+            candidates.append(create_read_tool_result_tool())
+
+        # Web work is server-owned and split three ways: discovery, focused
+        # page extraction, and image discovery. Each spends its own budget, and
+        # selected images reach the answer only through the rich-item inventory.
+        if (
+            self.agent_config_key in {"chat", "search"}
+            and effective_scope is not ToolScope.CLIENT_ONLY
+        ):
+            for factory in (
+                create_web_search_tool,
+                create_web_open_tool,
+            ):
+                candidates.append(factory(tool_scope=effective_scope.value))
+
+        # Caller-provided internal tools include the graph-scoped ``hand_off``
+        # tool. The graph owns its roster, so BaseAgent never supplies a static
+        # fallback that could become stale or permit self-delegation.
+        candidates.extend(internal_tools or [])
+        candidates.extend(self._user_memory_tools(user_id, conversation_id))
+        candidates.extend(self._conversation_search_tools(user_id, conversation_id))
+        return _unique_tools_by_name(candidates)
+
+    @staticmethod
+    def _user_memory_tools(user_id: str | None, conversation_id: str | None) -> list[BaseTool]:
+        if not (getattr(settings, "enable_user_memory_tools", False) and user_id):
+            return []
+        try:
+            from ...core.container import Container
+
+            memory_repository = Container().user_memory_repository()
+        except Exception as exc:
+            logger.debug("User memory repository unavailable: %s", exc)
+            return []
+        if memory_repository is None:
+            return []
+        return list(
+            create_user_memory_tools(
+                repository=memory_repository,
+                user_id=str(user_id),
+                conversation_id=str(conversation_id) if conversation_id else None,
+            )
+        )
+
+    @staticmethod
+    def _conversation_search_tools(
+        user_id: str | None, conversation_id: str | None
+    ) -> list[BaseTool]:
+        if not (getattr(settings, "enable_conversation_search_tools", False) and user_id):
+            return []
+        try:
+            from ...core.container import Container
+
+            search_repository = Container().conversation_search_repository()
+        except Exception as exc:
+            logger.debug("Conversation search repository unavailable: %s", exc)
+            return []
+        if search_repository is None:
+            return []
+        return list(
+            create_conversation_search_tools(
+                repository=search_repository,
+                user_id=str(user_id),
+                conversation_id=str(conversation_id) if conversation_id else None,
+            )
+        )
+
+    def _client_tools_for_binding(
+        self, *, user_id: str | None, device_id: str | None
+    ) -> list[BaseTool]:
+        # When bridge is enabled and device_id is absent, bind zero client tools.
+        # This prevents a missing device_id (by accident rather than by design)
+        # from falling through to include all loaded client tools.
+        if settings.enable_client_runtime_bridge and not device_id:
+            return []
+        return self._get_client_runtime_tools(user_id=user_id, device_id=device_id)
+
+    def _loaded_client_tools(
+        self,
+        remote_tools: list[BaseTool],
+        *,
+        conversation_id: str | None,
+        user_id: str | None,
+        device_id: str | None,
+    ) -> list[BaseTool]:
+        """In deferred mode, only the client tools ``tool_search`` loaded for this session."""
+        if not (conversation_id and remote_tools):
+            return []
+        from ..deferred_tool_state import get_deferred_tool_state
+
+        active_session = get_active_client_runtime_session(
+            user_id=user_id,
+            device_id=device_id,
+        )
+        loaded_client_names = {
+            loaded.tool_name
+            for loaded in get_deferred_tool_state().get_loaded_client_tools(
+                conversation_id,
+                getattr(self, "tool_state_key", None) or self.agent_config_key,
+                device_id=str(device_id) if device_id else None,
+                session_id=(active_session.session_id if active_session is not None else None),
+                user_id=str(user_id) if user_id else None,
+            )
+        }
+        return [tool for tool in remote_tools if tool.name in loaded_client_names]
+
+    def _all_tools_for_binding(
+        self,
+        internal_tools: list[BaseTool] | None,
+        *,
+        client_only_scope: bool,
+    ) -> list[BaseTool]:
+        """Traditional mode: every tool, with the internal tools first."""
+        if client_only_scope:
+            return list(internal_tools or [])
+        if internal_tools:
+            # Internal tools are already unique by name; MCP duplicates drop out.
+            return _unique_tools_by_name([*internal_tools, *self.tools])
+        return list(self.tools)
+
+    @staticmethod
+    def _finish_tool_binding(
+        tools: list[BaseTool],
+        remote_tools: list[BaseTool],
+        *,
+        conversation_id: str | None,
+        include_hand_off: bool | None,
+        excluded_tool_names: set[str] | frozenset[str] | None,
+    ) -> list[BaseTool]:
         if include_hand_off is False:
             tools = [tool for tool in tools if getattr(tool, "name", None) != "hand_off"]
 
@@ -1462,32 +1571,21 @@ class BaseAgent(ABC):
             )
             emergency_compact = system_prompt_kwargs.pop("emergency_compact", None)
             await self._init_tools()
+            binding = _ToolBindingRequest(
+                conversation_id=conversation_id,
+                internal_tools=internal_tools,
+                user_id=user_id,
+                device_id=device_id,
+                include_hand_off=include_hand_off,
+                excluded_tool_names=excluded_tool_names,
+                disable_tools=disable_tools,
+            )
             runtime_config = self._resolve_runtime_model_config(user_id, model_request)
             llm, openai_reasoning_summary_requested = self._create_langchain_model_from_runtime(
                 runtime_config,
                 user_id=user_id,
             )
-            if disable_tools:
-                llm_with_tools = llm
-                bound_tools = []
-            else:
-                llm_with_tools = self._get_llm_with_tools(
-                    llm,
-                    conversation_id=conversation_id,
-                    internal_tools=internal_tools,
-                    user_id=user_id,
-                    device_id=device_id,
-                    include_hand_off=include_hand_off,
-                    excluded_tool_names=excluded_tool_names,
-                )
-                bound_tools = self._get_tools_for_binding(
-                    conversation_id=conversation_id,
-                    internal_tools=internal_tools,
-                    user_id=user_id,
-                    device_id=device_id,
-                    include_hand_off=include_hand_off,
-                    excluded_tool_names=excluded_tool_names,
-                )
+            llm_with_tools, bound_tools = self._bind_turn_tools(llm, binding)
             has_tool_context = any(
                 isinstance(msg, ToolMessage)
                 or (hasattr(msg, "tool_calls") and msg.tool_calls)
@@ -1512,409 +1610,39 @@ class BaseAgent(ABC):
                 **system_prompt_kwargs,
             )
 
-            # Build message list: System + History + Current Turn
-            langchain_messages = [SystemMessage(content=system_prompt)]
-
-            # Convert and prepend conversation history (from database)
-            history_messages_lc = []
-            if conversation_history:
-                history_messages_lc = self._convert_history_to_langchain_messages(
-                    conversation_history
-                )
-                langchain_messages.extend(history_messages_lc)
-
-            # Add current turn messages
-            langchain_messages.extend(messages)
-
-            budget_result = await self._preflight_model_request(
-                runtime_config,
-                system_messages=[langchain_messages[0]],
+            langchain_messages, history_messages_lc = self._assemble_turn_messages(
+                system_prompt, conversation_history, messages
+            )
+            turn = _ModelTurn(
+                runtime_config=runtime_config,
+                binding=binding,
+                bound_tools=bound_tools,
+                langchain_messages=langchain_messages,
                 history_messages=history_messages_lc,
                 current_messages=messages,
-                tools=bound_tools,
                 durable_request=durable_compaction_request,
                 emergency_compact=emergency_compact,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                token_counter=self._token_counter_for_model(runtime_config.provider, llm),
             )
-            if budget_result is not None:
-                history_messages_lc = list(budget_result.envelope.history_messages)
-                langchain_messages = list(budget_result.envelope.messages)
+            await self._preflight_turn(turn, llm)
 
             # === Token Instrumentation ===
             # Compute and log token breakdown for observability
             # Use bound_tools (not self.tools) to reflect actual schema tokens sent
             token_breakdown = compute_token_breakdown(
                 system_prompt=system_prompt,
-                history_messages=history_messages_lc,
+                history_messages=turn.history_messages,
                 current_turn_messages=messages,
                 tools=bound_tools if bound_tools else None,
             )
 
-            context_overflow_retried = False
-
-            # One usage operation spans the generic retries, the context-overflow
-            # retry, and the provider fallback below — a later tool-loop
-            # invocation (a new call to this method) starts a fresh operation.
-            # Attribution flows through the bound UsageContext; here we only add
-            # the acting agent id so per-agent rollups are correct.
-            usage_operation: UsageOperation | None = None
-            usage_context_cm = None
-            usage_operation_cm = None
-            if self.recorder is not None:
-                usage_context_cm = bind_usage_context(
-                    current_usage_context().child(agent_id=self.agent_id)
-                )
-                usage_context_cm.__enter__()
-                usage_operation_cm = begin_usage_operation()
-                usage_operation = usage_operation_cm.__enter__()
-
-            usage_run_config = self._augment_run_config_with_usage(
-                run_config, usage_operation, user_id
+            response = await self._invoke_turn_under_usage_operation(
+                turn,
+                llm_with_tools,
+                run_config=run_config,
+                reasoning_summary_requested=openai_reasoning_summary_requested,
             )
-
-            async def _invoke_with_optional_config(
-                model: Any,
-                model_messages: list[BaseMessage],
-            ) -> Any:
-                # ``runtime_config`` is read at call time so each fallback branch
-                # records under its own provider/model.
-                if usage_run_config is not None:
-                    return await self._ainvoke_with_retries(
-                        model,
-                        model_messages,
-                        run_config=usage_run_config,
-                        operation=usage_operation,
-                        provider=runtime_config.provider,
-                        model=runtime_config.model,
-                    )
-                return await self._ainvoke_with_retries(
-                    model,
-                    model_messages,
-                    operation=usage_operation,
-                    provider=runtime_config.provider,
-                    model=runtime_config.model,
-                )
-
-            try:
-                try:
-                    response = await _invoke_with_optional_config(
-                        llm_with_tools,
-                        langchain_messages,
-                    )
-                except Exception as exc:
-                    if not settings.context_overflow_retry_enabled or not is_context_overflow_error(
-                        exc
-                    ):
-                        raise
-                    compacted_messages = prepare_aggressive_context_retry(
-                        langchain_messages,
-                        tool_preview_chars=(settings.context_overflow_retry_tool_preview_chars),
-                    )
-                    try:
-                        response = await _invoke_with_optional_config(
-                            llm_with_tools,
-                            compacted_messages,
-                        )
-                    except Exception as retry_exc:
-                        if is_context_overflow_error(retry_exc):
-                            conversation_compaction_metrics.record_provider_overflow_retry(
-                                "failure"
-                            )
-                            raise ContextBudgetExceededError(
-                                "provider_context_overflow"
-                            ) from retry_exc
-                        raise
-                    conversation_compaction_metrics.record_provider_overflow_retry("success")
-                    context_overflow_retried = True
-            except ContextBudgetExceededError:
-                raise
-            except Exception:
-                if (
-                    runtime_config.provider == "openai"
-                    and openai_reasoning_summary_requested
-                    and runtime_config.api_key
-                ):
-                    user_key = str(user_id).strip() if user_id else ""
-                    if user_key:
-                        _OPENAI_REASONING_SUMMARY_DISABLED_USERS.add(user_key)
-
-                    try:
-                        llm, _ = self._create_langchain_model_from_runtime(
-                            runtime_config,
-                            user_id=user_id,
-                            enable_reasoning_summary=False,
-                        )
-                        llm_with_tools = (
-                            llm
-                            if disable_tools
-                            else self._get_llm_with_tools(
-                                llm,
-                                conversation_id=conversation_id,
-                                internal_tools=internal_tools,
-                                user_id=user_id,
-                                device_id=device_id,
-                                include_hand_off=include_hand_off,
-                            )
-                        )
-                        response = await _invoke_with_optional_config(
-                            llm_with_tools,
-                            langchain_messages,
-                        )
-                    except Exception:
-                        fallback_runtime = self._create_fallback_runtime_config(
-                            runtime_config.fallback_config,
-                            reason="provider_error",
-                            from_provider=runtime_config.provider,
-                            inherited_warnings=runtime_config.warnings,
-                        )
-                        if not fallback_runtime or not fallback_runtime.api_key:
-                            raise
-
-                        runtime_config = fallback_runtime
-                        # Build the fallback model before the preflight so the budget is
-                        # counted with the provider about to be called, not with the
-                        # local upper bound the failed provider left behind.
-                        llm, _ = self._create_langchain_model_from_runtime(
-                            runtime_config,
-                            user_id=user_id,
-                            enable_reasoning_summary=False,
-                        )
-                        budget_result = await self._preflight_model_request(
-                            runtime_config,
-                            system_messages=[langchain_messages[0]],
-                            history_messages=history_messages_lc,
-                            current_messages=messages,
-                            tools=bound_tools,
-                            durable_request=durable_compaction_request,
-                            emergency_compact=emergency_compact,
-                            conversation_id=conversation_id,
-                            user_id=user_id,
-                            token_counter=self._token_counter_for_model(
-                                runtime_config.provider, llm
-                            ),
-                        )
-                        if budget_result is not None:
-                            history_messages_lc = list(budget_result.envelope.history_messages)
-                            langchain_messages = list(budget_result.envelope.messages)
-                        llm_with_tools = (
-                            llm
-                            if disable_tools
-                            else self._get_llm_with_tools(
-                                llm,
-                                conversation_id=conversation_id,
-                                internal_tools=internal_tools,
-                                user_id=user_id,
-                                device_id=device_id,
-                                include_hand_off=include_hand_off,
-                            )
-                        )
-                        response = await _invoke_with_optional_config(
-                            llm_with_tools,
-                            langchain_messages,
-                        )
-                else:
-                    fallback_runtime = self._create_fallback_runtime_config(
-                        runtime_config.fallback_config,
-                        reason="provider_error",
-                        from_provider=runtime_config.provider,
-                        inherited_warnings=runtime_config.warnings,
-                    )
-                    if not fallback_runtime or not fallback_runtime.api_key:
-                        raise
-
-                    runtime_config = fallback_runtime
-                    # Build the fallback model before the preflight so the budget is
-                    # counted with the provider about to be called, not with the
-                    # local upper bound the failed provider left behind.
-                    llm, _ = self._create_langchain_model_from_runtime(
-                        runtime_config,
-                        user_id=user_id,
-                        enable_reasoning_summary=False,
-                    )
-                    budget_result = await self._preflight_model_request(
-                        runtime_config,
-                        system_messages=[langchain_messages[0]],
-                        history_messages=history_messages_lc,
-                        current_messages=messages,
-                        tools=bound_tools,
-                        durable_request=durable_compaction_request,
-                        emergency_compact=emergency_compact,
-                        conversation_id=conversation_id,
-                        user_id=user_id,
-                        token_counter=self._token_counter_for_model(runtime_config.provider, llm),
-                    )
-                    if budget_result is not None:
-                        history_messages_lc = list(budget_result.envelope.history_messages)
-                        langchain_messages = list(budget_result.envelope.messages)
-                    llm_with_tools = (
-                        llm
-                        if disable_tools
-                        else self._get_llm_with_tools(
-                            llm,
-                            conversation_id=conversation_id,
-                            internal_tools=internal_tools,
-                            user_id=user_id,
-                            device_id=device_id,
-                        )
-                    )
-                    response = await _invoke_with_optional_config(
-                        llm_with_tools,
-                        langchain_messages,
-                    )
-            finally:
-                if usage_operation_cm is not None:
-                    usage_operation_cm.__exit__(None, None, None)
-                if usage_context_cm is not None:
-                    usage_context_cm.__exit__(None, None, None)
-
-            actual_usage = extract_actual_usage(response)
-            if any(value is not None for value in actual_usage.values()):
-                token_breakdown.actual_input_tokens = actual_usage["input_tokens"]
-                token_breakdown.actual_output_tokens = actual_usage.get("output_tokens")
-                token_breakdown.actual_total_tokens = actual_usage.get("total_tokens")
-                token_breakdown.actual_reasoning_tokens = actual_usage.get("reasoning_tokens")
-                logger.debug(
-                    (
-                        "%s: Actual token usage - input=%s, output=%s, "
-                        "total=%s, reasoning=%s (estimated=%d)"
-                    ),
-                    self.agent_id,
-                    actual_usage["input_tokens"],
-                    actual_usage.get("output_tokens"),
-                    actual_usage.get("total_tokens"),
-                    actual_usage.get("reasoning_tokens"),
-                    token_breakdown.total_tokens,
-                )
-                if budget_result is not None and actual_usage["input_tokens"] is not None:
-                    conversation_compaction_metrics.record_token_calibration(
-                        provider=runtime_config.provider,
-                        model=runtime_config.model,
-                        content_class=(
-                            "mixed"
-                            if bound_tools and has_tool_context
-                            else "tools"
-                            if bound_tools
-                            else "text"
-                        ),
-                        estimated_tokens=budget_result.input_tokens,
-                        actual_tokens=actual_usage["input_tokens"],
-                    )
-
-            tool_calls = None
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                tool_calls = response.tool_calls
-
-            thinking = None
-            if hasattr(response, "thinking") and response.thinking:
-                thinking = response.thinking
-            if not thinking:
-                # Gemini thought blocks are normalized to standard ``reasoning``
-                # blocks so they survive the streaming pipeline, so accept both
-                # shapes here. OpenAI ``reasoning`` blocks are excluded: they are
-                # harvested into ``reasoning_summary`` below and must not also
-                # land in ``thinking_summary``.
-                thinking_block_types = {"thinking"}
-                if runtime_config.provider != "openai":
-                    thinking_block_types.add("reasoning")
-                thinking = extract_public_thinking_summary(
-                    response.content, block_types=thinking_block_types
-                )
-
-            response_text = coerce_response_text(response.content)
-
-            reasoning_summary = None
-            reasoning_tokens = actual_usage.get("reasoning_tokens")
-            if runtime_config.provider == "openai":
-                reasoning_summary = extract_openai_reasoning_summary(response.content)
-                extracted_reasoning_tokens = extract_openai_reasoning_tokens(response)
-                if extracted_reasoning_tokens is not None:
-                    reasoning_tokens = extracted_reasoning_tokens
-
-            # When the provider reported usage but omitted the output count,
-            # estimate it from the response text so the gauge can show an
-            # output figure. Never overwrite a reported output; the context
-            # source is relabelled ``mixed_reported_estimated`` downstream.
-            output_estimate: int | None = None
-            usage_source_override: str | None = None
-            if (
-                any(value is not None for value in actual_usage.values())
-                and actual_usage.get("output_tokens") is None
-            ):
-                output_estimate = estimate_output_tokens(
-                    response_text,
-                    provider=runtime_config.provider,
-                    model=runtime_config.model,
-                )
-                if output_estimate is not None:
-                    usage_source_override = "mixed_reported_estimated"
-
-            token_breakdown_dict = token_breakdown.to_dict()
-            metadata = {
-                "conversation_id": conversation_id,
-                "token_breakdown": token_breakdown_dict,
-            }
-            if context_overflow_retried:
-                metadata["context_overflow_retry"] = True
-            request_budget_metadata = self._request_budget_metadata(budget_result)
-            if request_budget_metadata is not None:
-                metadata["request_budget"] = request_budget_metadata
-            self._apply_runtime_metadata(metadata, runtime_config)
-            self._merge_context_window_usage(
-                metadata,
-                token_breakdown_dict,
-                output_estimate=output_estimate,
-                usage_source=usage_source_override,
-            )
-
-            if thinking:
-                metadata["thinking_summary"] = str(thinking).strip()
-
-            # Image-capable models return generated images as content blocks that
-            # ``coerce_response_text`` drops. Subclasses that can act on inline
-            # images (the image generator) opt in to harvest them here so they are
-            # not silently lost. Transient — consumers move them to ``images``.
-            if self._should_harvest_inline_images():
-                inline_images = extract_inline_images_from_content(response.content)
-                if inline_images:
-                    metadata["response_inline_images"] = inline_images
-
-            if isinstance(reasoning_summary, str) and reasoning_summary.strip():
-                metadata["reasoning_summary"] = reasoning_summary.strip()
-            if isinstance(reasoning_tokens, int) and reasoning_tokens >= 0:
-                metadata["reasoning_tokens"] = reasoning_tokens
-
-            # The provider's own account of why it stopped. Nothing in this
-            # codebase read it, so an empty candidate -- MAX_TOKENS spent on
-            # thinking, SAFETY, RECITATION, MALFORMED_FUNCTION_CALL -- arrived
-            # downstream as an ordinary response with no text and no reason,
-            # and every consumer had to guess. A turn that produced neither
-            # text nor a tool call is worth a line on its own: it is the shape
-            # that fails `empty_public_content` two nodes later.
-            finish_reason = _finish_reason(response)
-            if finish_reason:
-                metadata["finish_reason"] = finish_reason
-            if not response_text.strip() and not tool_calls:
-                logger.warning(
-                    "%s produced no text and no tool calls (finish_reason=%s, "
-                    "content=%.200r); the turn has nothing to publish",
-                    self.agent_id,
-                    finish_reason or "unreported",
-                    getattr(response, "content", None),
-                )
-
-            agent_message = AgentMessage(
-                role=MessageRole.ASSISTANT, content=response_text, tool_calls=tool_calls
-            )
-
-            self._augment_response_metadata(metadata)
-
-            return AgentResponse(
-                agent_type=self.agent_type,
-                agent_id=self.agent_id,
-                message=agent_message,
-                metadata=metadata,
+            return self._build_turn_response(
+                turn, response, token_breakdown, has_tool_context=has_tool_context
             )
 
         except ContextBudgetExceededError as e:
@@ -1933,6 +1661,512 @@ class BaseAgent(ABC):
                 message="I encountered an error processing your request.",
                 conversation_id=conversation_id,
                 error=e,
+            )
+
+    # ------------------------------------------- invoke_model_with_history parts
+
+    def _bind_turn_tools(
+        self, llm: Any, binding: _ToolBindingRequest
+    ) -> tuple[Any, list[BaseTool]]:
+        """The model with its tools bound, and the tool list that binding used."""
+        if binding.disable_tools:
+            return llm, []
+        llm_with_tools = self._get_llm_with_tools(
+            llm,
+            conversation_id=binding.conversation_id,
+            internal_tools=binding.internal_tools,
+            user_id=binding.user_id,
+            device_id=binding.device_id,
+            include_hand_off=binding.include_hand_off,
+            excluded_tool_names=binding.excluded_tool_names,
+        )
+        bound_tools = self._get_tools_for_binding(
+            conversation_id=binding.conversation_id,
+            internal_tools=binding.internal_tools,
+            user_id=binding.user_id,
+            device_id=binding.device_id,
+            include_hand_off=binding.include_hand_off,
+            excluded_tool_names=binding.excluded_tool_names,
+        )
+        return llm_with_tools, bound_tools
+
+    def _rebind_turn_tools(
+        self,
+        llm: Any,
+        binding: _ToolBindingRequest,
+        *,
+        include_hand_off: bool | None,
+    ) -> Any:
+        """Bind tools to a replacement model after a provider error."""
+        if binding.disable_tools:
+            return llm
+        return self._get_llm_with_tools(
+            llm,
+            conversation_id=binding.conversation_id,
+            internal_tools=binding.internal_tools,
+            user_id=binding.user_id,
+            device_id=binding.device_id,
+            include_hand_off=include_hand_off,
+        )
+
+    def _assemble_turn_messages(
+        self,
+        system_prompt: str,
+        conversation_history: list[Any],
+        messages: list[BaseMessage],
+    ) -> tuple[list[BaseMessage], list[BaseMessage]]:
+        """System + history + current turn, and the converted history on its own."""
+        langchain_messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
+
+        # Convert and prepend conversation history (from database)
+        history_messages_lc: list[BaseMessage] = []
+        if conversation_history:
+            history_messages_lc = self._convert_history_to_langchain_messages(
+                conversation_history
+            )
+            langchain_messages.extend(history_messages_lc)
+
+        langchain_messages.extend(messages)
+        return langchain_messages, history_messages_lc
+
+    async def _preflight_turn(self, turn: _ModelTurn, llm: Any) -> None:
+        """Budget the turn for ``turn.runtime_config`` and adopt any reduced envelope."""
+        turn.budget_result = await self._preflight_model_request(
+            turn.runtime_config,
+            system_messages=[turn.langchain_messages[0]],
+            history_messages=turn.history_messages,
+            current_messages=turn.current_messages,
+            tools=turn.bound_tools,
+            durable_request=turn.durable_request,
+            emergency_compact=turn.emergency_compact,
+            conversation_id=turn.binding.conversation_id,
+            user_id=turn.binding.user_id,
+            token_counter=self._token_counter_for_model(turn.runtime_config.provider, llm),
+        )
+        if turn.budget_result is not None:
+            turn.history_messages = list(turn.budget_result.envelope.history_messages)
+            turn.langchain_messages = list(turn.budget_result.envelope.messages)
+
+    async def _invoke_turn_under_usage_operation(
+        self,
+        turn: _ModelTurn,
+        llm_with_tools: Any,
+        *,
+        run_config: RunnableConfig | None,
+        reasoning_summary_requested: bool,
+    ) -> Any:
+        """Call the provider for the turn, every retry and fallback inside one usage operation.
+
+        A later tool-loop invocation (a new call to ``invoke_model_with_history``)
+        starts a fresh operation. Attribution flows through the bound
+        UsageContext; here we only add the acting agent id so per-agent rollups
+        are correct.
+        """
+        usage_operation: UsageOperation | None = None
+        usage_context_cm = None
+        usage_operation_cm = None
+        if self.recorder is not None:
+            usage_context_cm = bind_usage_context(
+                current_usage_context().child(agent_id=self.agent_id)
+            )
+            usage_context_cm.__enter__()
+            usage_operation_cm = begin_usage_operation()
+            usage_operation = usage_operation_cm.__enter__()
+
+        usage_run_config = self._augment_run_config_with_usage(
+            run_config, usage_operation, turn.binding.user_id
+        )
+
+        async def call_model(model: Any, model_messages: list[BaseMessage]) -> Any:
+            # ``turn.runtime_config`` is read at call time so each fallback
+            # branch records under its own provider/model.
+            if usage_run_config is not None:
+                return await self._ainvoke_with_retries(
+                    model,
+                    model_messages,
+                    run_config=usage_run_config,
+                    operation=usage_operation,
+                    provider=turn.runtime_config.provider,
+                    model=turn.runtime_config.model,
+                )
+            return await self._ainvoke_with_retries(
+                model,
+                model_messages,
+                operation=usage_operation,
+                provider=turn.runtime_config.provider,
+                model=turn.runtime_config.model,
+            )
+
+        try:
+            return await self._invoke_turn_with_fallbacks(
+                turn,
+                llm_with_tools,
+                call_model,
+                reasoning_summary_requested=reasoning_summary_requested,
+            )
+        finally:
+            if usage_operation_cm is not None:
+                usage_operation_cm.__exit__(None, None, None)
+            if usage_context_cm is not None:
+                usage_context_cm.__exit__(None, None, None)
+
+    async def _invoke_turn_with_fallbacks(
+        self,
+        turn: _ModelTurn,
+        llm_with_tools: Any,
+        call_model: _CallModel,
+        *,
+        reasoning_summary_requested: bool,
+    ) -> Any:
+        """The first attempt, then the OpenAI no-summary retry and the provider fallback."""
+        try:
+            return await self._invoke_turn_with_overflow_retry(turn, llm_with_tools, call_model)
+        except ContextBudgetExceededError:
+            raise
+        except Exception:
+            runtime_config = turn.runtime_config
+            if (
+                runtime_config.provider == "openai"
+                and reasoning_summary_requested
+                and runtime_config.api_key
+            ):
+                self._disable_openai_reasoning_summary(turn.binding.user_id)
+                try:
+                    return await self._invoke_turn_without_reasoning_summary(turn, call_model)
+                except Exception:
+                    fallback_runtime = self._provider_error_fallback(turn.runtime_config)
+                    if fallback_runtime is None:
+                        raise
+                    return await self._invoke_turn_on_fallback_provider(
+                        turn,
+                        fallback_runtime,
+                        call_model,
+                        include_hand_off=turn.binding.include_hand_off,
+                    )
+            fallback_runtime = self._provider_error_fallback(turn.runtime_config)
+            if fallback_runtime is None:
+                raise
+            return await self._invoke_turn_on_fallback_provider(
+                turn, fallback_runtime, call_model, include_hand_off=None
+            )
+
+    async def _invoke_turn_with_overflow_retry(
+        self,
+        turn: _ModelTurn,
+        llm_with_tools: Any,
+        call_model: _CallModel,
+    ) -> Any:
+        """One attempt, plus the single structure-aware retry on a context overflow."""
+        try:
+            return await call_model(llm_with_tools, turn.langchain_messages)
+        except Exception as exc:
+            if not settings.context_overflow_retry_enabled or not is_context_overflow_error(exc):
+                raise
+            compacted_messages = prepare_aggressive_context_retry(
+                turn.langchain_messages,
+                tool_preview_chars=(settings.context_overflow_retry_tool_preview_chars),
+            )
+            try:
+                response = await call_model(llm_with_tools, compacted_messages)
+            except Exception as retry_exc:
+                if is_context_overflow_error(retry_exc):
+                    conversation_compaction_metrics.record_provider_overflow_retry("failure")
+                    raise ContextBudgetExceededError("provider_context_overflow") from retry_exc
+                raise
+            conversation_compaction_metrics.record_provider_overflow_retry("success")
+            turn.context_overflow_retried = True
+            return response
+
+    @staticmethod
+    def _disable_openai_reasoning_summary(user_id: str | None) -> None:
+        user_key = str(user_id).strip() if user_id else ""
+        if user_key:
+            _OPENAI_REASONING_SUMMARY_DISABLED_USERS.add(user_key)
+
+    async def _invoke_turn_without_reasoning_summary(
+        self, turn: _ModelTurn, call_model: _CallModel
+    ) -> Any:
+        llm, _ = self._create_langchain_model_from_runtime(
+            turn.runtime_config,
+            user_id=turn.binding.user_id,
+            enable_reasoning_summary=False,
+        )
+        llm_with_tools = self._rebind_turn_tools(
+            llm, turn.binding, include_hand_off=turn.binding.include_hand_off
+        )
+        return await call_model(llm_with_tools, turn.langchain_messages)
+
+    def _provider_error_fallback(
+        self, runtime_config: ResolvedRuntimeModelConfig
+    ) -> ResolvedRuntimeModelConfig | None:
+        """The configured fallback for a provider error, if it can be called."""
+        fallback_runtime = self._create_fallback_runtime_config(
+            runtime_config.fallback_config,
+            reason="provider_error",
+            from_provider=runtime_config.provider,
+            inherited_warnings=runtime_config.warnings,
+        )
+        if not fallback_runtime or not fallback_runtime.api_key:
+            return None
+        return fallback_runtime
+
+    async def _invoke_turn_on_fallback_provider(
+        self,
+        turn: _ModelTurn,
+        fallback_runtime: ResolvedRuntimeModelConfig,
+        call_model: _CallModel,
+        *,
+        include_hand_off: bool | None,
+    ) -> Any:
+        turn.runtime_config = fallback_runtime
+        # Build the fallback model before the preflight so the budget is
+        # counted with the provider about to be called, not with the
+        # local upper bound the failed provider left behind.
+        llm, _ = self._create_langchain_model_from_runtime(
+            turn.runtime_config,
+            user_id=turn.binding.user_id,
+            enable_reasoning_summary=False,
+        )
+        await self._preflight_turn(turn, llm)
+        llm_with_tools = self._rebind_turn_tools(
+            llm, turn.binding, include_hand_off=include_hand_off
+        )
+        return await call_model(llm_with_tools, turn.langchain_messages)
+
+    def _build_turn_response(
+        self,
+        turn: _ModelTurn,
+        response: Any,
+        token_breakdown: Any,
+        *,
+        has_tool_context: bool,
+    ) -> AgentResponse:
+        """The AgentResponse for the provider's reply, with its response metadata."""
+        runtime_config = turn.runtime_config
+        actual_usage = extract_actual_usage(response)
+        if any(value is not None for value in actual_usage.values()):
+            self._record_actual_usage(
+                turn, actual_usage, token_breakdown, has_tool_context=has_tool_context
+            )
+
+        tool_calls = None
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            tool_calls = response.tool_calls
+
+        thinking = self._response_thinking(response, runtime_config.provider)
+        response_text = coerce_response_text(response.content)
+        reasoning_summary, reasoning_tokens = self._response_reasoning(
+            response, runtime_config.provider, actual_usage
+        )
+        output_estimate, usage_source_override = self._estimate_missing_output_tokens(
+            actual_usage, response_text, runtime_config
+        )
+
+        metadata = self._turn_usage_metadata(
+            turn,
+            token_breakdown,
+            output_estimate=output_estimate,
+            usage_source=usage_source_override,
+        )
+        self._add_response_content_metadata(
+            metadata,
+            response,
+            thinking=thinking,
+            reasoning_summary=reasoning_summary,
+            reasoning_tokens=reasoning_tokens,
+        )
+        self._add_finish_reason(metadata, response, response_text, tool_calls)
+
+        agent_message = AgentMessage(
+            role=MessageRole.ASSISTANT, content=response_text, tool_calls=tool_calls
+        )
+
+        self._augment_response_metadata(metadata)
+
+        return AgentResponse(
+            agent_type=self.agent_type,
+            agent_id=self.agent_id,
+            message=agent_message,
+            metadata=metadata,
+        )
+
+    def _record_actual_usage(
+        self,
+        turn: _ModelTurn,
+        actual_usage: dict[str, Any],
+        token_breakdown: Any,
+        *,
+        has_tool_context: bool,
+    ) -> None:
+        """Copy the provider-reported usage onto the breakdown and calibrate the budget."""
+        token_breakdown.actual_input_tokens = actual_usage["input_tokens"]
+        token_breakdown.actual_output_tokens = actual_usage.get("output_tokens")
+        token_breakdown.actual_total_tokens = actual_usage.get("total_tokens")
+        token_breakdown.actual_reasoning_tokens = actual_usage.get("reasoning_tokens")
+        logger.debug(
+            (
+                "%s: Actual token usage - input=%s, output=%s, "
+                "total=%s, reasoning=%s (estimated=%d)"
+            ),
+            self.agent_id,
+            actual_usage["input_tokens"],
+            actual_usage.get("output_tokens"),
+            actual_usage.get("total_tokens"),
+            actual_usage.get("reasoning_tokens"),
+            token_breakdown.total_tokens,
+        )
+        budget_result = turn.budget_result
+        if budget_result is not None and actual_usage["input_tokens"] is not None:
+            conversation_compaction_metrics.record_token_calibration(
+                provider=turn.runtime_config.provider,
+                model=turn.runtime_config.model,
+                content_class=(
+                    "mixed"
+                    if turn.bound_tools and has_tool_context
+                    else "tools"
+                    if turn.bound_tools
+                    else "text"
+                ),
+                estimated_tokens=budget_result.input_tokens,
+                actual_tokens=actual_usage["input_tokens"],
+            )
+
+    @staticmethod
+    def _response_thinking(response: Any, provider: str) -> Any:
+        thinking = None
+        if hasattr(response, "thinking") and response.thinking:
+            thinking = response.thinking
+        if not thinking:
+            # Gemini thought blocks are normalized to standard ``reasoning``
+            # blocks so they survive the streaming pipeline, so accept both
+            # shapes here. OpenAI ``reasoning`` blocks are excluded: they are
+            # harvested into ``reasoning_summary`` and must not also
+            # land in ``thinking_summary``.
+            thinking_block_types = {"thinking"}
+            if provider != "openai":
+                thinking_block_types.add("reasoning")
+            thinking = extract_public_thinking_summary(
+                response.content, block_types=thinking_block_types
+            )
+        return thinking
+
+    @staticmethod
+    def _response_reasoning(
+        response: Any, provider: str, actual_usage: dict[str, Any]
+    ) -> tuple[Any, Any]:
+        """The OpenAI reasoning summary and the reasoning-token count to report."""
+        reasoning_summary = None
+        reasoning_tokens = actual_usage.get("reasoning_tokens")
+        if provider == "openai":
+            reasoning_summary = extract_openai_reasoning_summary(response.content)
+            extracted_reasoning_tokens = extract_openai_reasoning_tokens(response)
+            if extracted_reasoning_tokens is not None:
+                reasoning_tokens = extracted_reasoning_tokens
+        return reasoning_summary, reasoning_tokens
+
+    @staticmethod
+    def _estimate_missing_output_tokens(
+        actual_usage: dict[str, Any],
+        response_text: str,
+        runtime_config: ResolvedRuntimeModelConfig,
+    ) -> tuple[int | None, str | None]:
+        """An output estimate when the provider reported usage but no output count.
+
+        Lets the gauge show an output figure. Never overwrites a reported
+        output; the context source is relabelled ``mixed_reported_estimated``
+        downstream.
+        """
+        if not (
+            any(value is not None for value in actual_usage.values())
+            and actual_usage.get("output_tokens") is None
+        ):
+            return None, None
+        output_estimate = estimate_output_tokens(
+            response_text,
+            provider=runtime_config.provider,
+            model=runtime_config.model,
+        )
+        if output_estimate is None:
+            return None, None
+        return output_estimate, "mixed_reported_estimated"
+
+    def _turn_usage_metadata(
+        self,
+        turn: _ModelTurn,
+        token_breakdown: Any,
+        *,
+        output_estimate: int | None,
+        usage_source: str | None,
+    ) -> dict[str, Any]:
+        token_breakdown_dict = token_breakdown.to_dict()
+        metadata: dict[str, Any] = {
+            "conversation_id": turn.binding.conversation_id,
+            "token_breakdown": token_breakdown_dict,
+        }
+        if turn.context_overflow_retried:
+            metadata["context_overflow_retry"] = True
+        request_budget_metadata = self._request_budget_metadata(turn.budget_result)
+        if request_budget_metadata is not None:
+            metadata["request_budget"] = request_budget_metadata
+        self._apply_runtime_metadata(metadata, turn.runtime_config)
+        self._merge_context_window_usage(
+            metadata,
+            token_breakdown_dict,
+            output_estimate=output_estimate,
+            usage_source=usage_source,
+        )
+        return metadata
+
+    def _add_response_content_metadata(
+        self,
+        metadata: dict[str, Any],
+        response: Any,
+        *,
+        thinking: Any,
+        reasoning_summary: Any,
+        reasoning_tokens: Any,
+    ) -> None:
+        if thinking:
+            metadata["thinking_summary"] = str(thinking).strip()
+
+        # Image-capable models return generated images as content blocks that
+        # ``coerce_response_text`` drops. Subclasses that can act on inline
+        # images (the image generator) opt in to harvest them here so they are
+        # not silently lost. Transient — consumers move them to ``images``.
+        if self._should_harvest_inline_images():
+            inline_images = extract_inline_images_from_content(response.content)
+            if inline_images:
+                metadata["response_inline_images"] = inline_images
+
+        if isinstance(reasoning_summary, str) and reasoning_summary.strip():
+            metadata["reasoning_summary"] = reasoning_summary.strip()
+        if isinstance(reasoning_tokens, int) and reasoning_tokens >= 0:
+            metadata["reasoning_tokens"] = reasoning_tokens
+
+    def _add_finish_reason(
+        self,
+        metadata: dict[str, Any],
+        response: Any,
+        response_text: str,
+        tool_calls: Any,
+    ) -> None:
+        # The provider's own account of why it stopped. Nothing in this
+        # codebase read it, so an empty candidate -- MAX_TOKENS spent on
+        # thinking, SAFETY, RECITATION, MALFORMED_FUNCTION_CALL -- arrived
+        # downstream as an ordinary response with no text and no reason,
+        # and every consumer had to guess. A turn that produced neither
+        # text nor a tool call is worth a line on its own: it is the shape
+        # that fails `empty_public_content` two nodes later.
+        finish_reason = _finish_reason(response)
+        if finish_reason:
+            metadata["finish_reason"] = finish_reason
+        if not response_text.strip() and not tool_calls:
+            logger.warning(
+                "%s produced no text and no tool calls (finish_reason=%s, "
+                "content=%.200r); the turn has nothing to publish",
+                self.agent_id,
+                finish_reason or "unreported",
+                getattr(response, "content", None),
             )
 
     def _augment_response_metadata(self, metadata: dict[str, Any]) -> None:

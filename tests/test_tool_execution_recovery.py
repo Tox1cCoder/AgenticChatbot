@@ -1356,6 +1356,157 @@ async def test_execute_tool_calls_client_device_mismatch_returns_compact_error(m
     assert artifacts[0]["error_type"] == "permission"
 
 
+class _MustNotRunTool:
+    metadata: dict = {}
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    async def ainvoke(self, args):
+        self.calls += 1
+        return "ran"
+
+
+def _refused_by_widget_gate(monkeypatch, tool):
+    async def _deny(tool_name, tool_args, conversation_id):
+        return "Widget w-1 belongs to another conversation."
+
+    monkeypatch.setattr("app.ai.tool_execution._widget_access_denied", _deny)
+    return {tool.name: tool}, {}
+
+
+def _stub_recovery(monkeypatch, *, recovered_tool=None, needs_approval=False):
+    async def _recover(tool_call, **_kwargs):
+        return recovered_tool, needs_approval
+
+    monkeypatch.setattr("app.ai.tool_execution._recover_with_approval_check", _recover)
+
+
+def _refused_unbound(monkeypatch, tool):
+    _stub_recovery(monkeypatch)
+    return {}, {}
+
+
+def _refused_recovered_tool_needing_approval(monkeypatch, tool):
+    _stub_recovery(monkeypatch, recovered_tool=tool, needs_approval=True)
+    return {}, {}
+
+
+def _refused_server_web_tool_in_client_scope(monkeypatch, tool):
+    return {tool.name: tool}, {"tool_scope": "client_only", "device_id": "device-a"}
+
+
+def _refused_wrong_device(monkeypatch, tool):
+    monkeypatch.setattr("app.ai.tool_execution.is_client_tool", lambda _tool: True)
+    monkeypatch.setattr("app.ai.tool_execution.get_client_tool_device_id", lambda _tool: "dev-a")
+    return {tool.name: tool}, {"device_id": "dev-b"}
+
+
+@pytest.mark.parametrize(
+    ("arrange", "tool_name", "error_type", "message", "exception_type"),
+    [
+        (
+            _refused_by_widget_gate,
+            "widget_get_state",
+            "permission",
+            "Widget w-1 belongs to another conversation.",
+            "PermissionError",
+        ),
+        (
+            _refused_unbound,
+            "missing_tool",
+            "not_found",
+            "Tool missing_tool is not currently bound.",
+            "LookupError",
+        ),
+        (
+            _refused_unbound,
+            "client__desk__read",
+            "not_found",
+            "Client tool client__desk__read is not available for the current device session.",
+            "LookupError",
+        ),
+        (
+            _refused_recovered_tool_needing_approval,
+            "risky",
+            "permission",
+            "Tool risky requires the user's approval, and approval was not requested "
+            "for this call. It was not run.",
+            "PermissionError",
+        ),
+        (
+            _refused_server_web_tool_in_client_scope,
+            "web_search",
+            "permission",
+            "Server web access is unavailable in client-only tool scope.",
+            "PermissionError",
+        ),
+        (
+            _refused_wrong_device,
+            "client__desk__write",
+            "permission",
+            "Client tool client__desk__write cannot execute from the current device session.",
+            "PermissionError",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_refused_call_reports_its_reason_and_never_runs(
+    monkeypatch, arrange, tool_name, error_type, message, exception_type
+):
+    monkeypatch.setattr(settings, "mcp_tool_search_enabled", False)
+    bound = _MustNotRunTool(tool_name)
+    tool_map, call_kwargs = arrange(monkeypatch, bound)
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": tool_name, "args": {}}],
+        tool_map=tool_map,
+        **call_kwargs,
+    )
+
+    payload = json.loads(outputs[0]["content"])
+    assert [output["tool_call_id"] for output in outputs] == ["call-1"]
+    assert outputs[0]["name"] == tool_name
+    assert outputs[0]["render"]["type"] == "error"
+    assert payload["error_type"] == error_type
+    assert payload["message"] == message
+    assert payload["retryable"] is False
+    assert artifacts[0]["status"] == "error"
+    assert artifacts[0]["error_type"] == error_type
+    assert artifacts[0]["exception_type"] == exception_type
+    assert bound.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_execution_failure_becomes_that_calls_error(monkeypatch):
+    """A failure outside the tool's own policy-wrapped run still answers the call,
+    and the rest of the batch still runs."""
+    real_invoke = invoke_tool_with_policy
+
+    async def _explode_first(tool, tool_args, *, tool_name, tool_map):
+        if tool_name == "first":
+            raise RuntimeError("policy layer exploded")
+        return await real_invoke(tool, tool_args, tool_name=tool_name, tool_map=tool_map)
+
+    monkeypatch.setattr("app.ai.tool_execution.invoke_tool_with_policy", _explode_first)
+    first, second = _MustNotRunTool("first"), _MustNotRunTool("second")
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[
+            {"id": "call-1", "name": "first", "args": {}},
+            {"id": "call-2", "name": "second", "args": {}},
+        ],
+        tool_map={"first": first, "second": second},
+    )
+
+    assert [output["tool_call_id"] for output in outputs] == ["call-1", "call-2"]
+    assert "Error: policy layer exploded" in outputs[0]["content"]
+    assert artifacts[0]["error"] == "policy layer exploded"
+    assert outputs[1]["content"] == "ran"
+    assert (first.calls, second.calls) == (0, 1)
+
+
 @pytest.mark.asyncio
 async def test_skill_terminal_error_output_is_flagged_to_reach_model_uncut():
     terminal = "skill command exited with code 1: " + "x" * 6000

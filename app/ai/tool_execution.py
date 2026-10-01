@@ -1690,6 +1690,369 @@ async def _reconnect_server_tool(
         return None, exc
 
 
+# ---------------------------------------------------------- execute_tool_calls parts
+
+
+@dataclass(frozen=True)
+class _ToolCallRefusal:
+    """Why a call was refused before it ran, as the model and the artifact report it."""
+
+    summary: ToolErrorSummary
+    exception: BaseException
+
+
+@dataclass(frozen=True)
+class _ToolCallContext:
+    """The turn-wide inputs the per-call checks read."""
+
+    tool_map: dict[str, Any]
+    approval_policy: dict[str, Any]
+    agent: Any | None
+    conversation_id: str | None
+    user_id: str | None
+    device_id: str | None
+    tool_scope: str | None
+    client_only_scope: bool
+
+
+def _approval_policy(hitl_policy: dict[str, Any] | None) -> dict[str, Any]:
+    if isinstance(hitl_policy, dict):
+        return hitl_policy
+    from .hitl_config import build_global_policy
+
+    return build_global_policy()
+
+
+def _refusal(
+    kind: ToolErrorKind,
+    *,
+    message: str,
+    hint: str,
+    exception: BaseException,
+) -> _ToolCallRefusal:
+    return _ToolCallRefusal(
+        summary=ToolErrorSummary(
+            error_type=kind.value,
+            failure_retryable=False,
+            message=message,
+            hint=hint,
+            attempts=1,
+        ),
+        exception=exception,
+    )
+
+
+async def _widget_refusal(
+    tool_name: str | None,
+    tool_args: Any,
+    conversation_id: str | None,
+) -> _ToolCallRefusal | None:
+    widget_refusal = await _widget_access_denied(tool_name or "", tool_args, conversation_id)
+    if widget_refusal is None:
+        return None
+    return _refusal(
+        ToolErrorKind.PERMISSION,
+        message=widget_refusal,
+        hint="Create a widget in this conversation with widget_create.",
+        exception=PermissionError(widget_refusal),
+    )
+
+
+def _missing_name_refusal(tool_name: str | None) -> _ToolCallRefusal | None:
+    # ``normalize_tool_call`` substitutes the sentinel "unknown" when no name
+    # was provided, so an absent/blank name surfaces as that sentinel rather
+    # than a falsy value.
+    if tool_name and tool_name != "unknown":
+        return None
+    return _refusal(
+        ToolErrorKind.ARGUMENT,
+        message="Tool name is missing.",
+        hint="Provide the tool name to call, or inspect available tools if unsure.",
+        exception=ValueError("Tool name is missing."),
+    )
+
+
+def _unbound_tool_refusal(tool_name: str) -> _ToolCallRefusal:
+    if tool_name.startswith(CLIENT_TOOL_PREFIX):
+        message = f"Client tool {tool_name} is not available for the current device session."
+        hint = (
+            "The device may be disconnected. Ask the user to reconnect, "
+            "or use another available tool."
+        )
+    else:
+        message = f"Tool {tool_name} is not currently bound."
+        hint = (
+            "Use a currently bound suitable tool if one exists. If the needed "
+            "capability is missing or ambiguous, use tool_search to discover it."
+        )
+    return _refusal(
+        ToolErrorKind.NOT_FOUND,
+        message=message,
+        hint=hint,
+        exception=LookupError(message),
+    )
+
+
+async def _resolve_call_tool(
+    tool_call: dict[str, Any],
+    tool_name: str,
+    context: _ToolCallContext,
+) -> tuple[Any | None, _ToolCallRefusal | None]:
+    """The bound tool, else one recovery can bind, else why there is none."""
+    tool = context.tool_map.get(tool_name)
+    if not tool:
+        tool, needs_unasked_approval = await _recover_with_approval_check(
+            tool_call,
+            tool_map=context.tool_map,
+            policy=context.approval_policy,
+            agent=context.agent,
+            conversation_id=context.conversation_id,
+            user_id=context.user_id,
+            device_id=context.device_id,
+            tool_scope=context.tool_scope,
+        )
+        if tool and needs_unasked_approval:
+            message = RECOVERED_TOOL_APPROVAL_REFUSAL.format(name=tool_name)
+            return None, _refusal(
+                ToolErrorKind.PERMISSION,
+                message=message,
+                hint="Tell the user this action needs their approval.",
+                exception=PermissionError(message),
+            )
+    if not tool:
+        return None, _unbound_tool_refusal(tool_name)
+    return tool, None
+
+
+def _client_scope_refusal(
+    _tool: Any,
+    tool_name: str,
+    context: _ToolCallContext,
+) -> _ToolCallRefusal | None:
+    if not (context.client_only_scope and tool_name in SERVER_ONLY_WEB_TOOL_NAMES):
+        return None
+    message = "Server web access is unavailable in client-only tool scope."
+    return _refusal(
+        ToolErrorKind.PERMISSION,
+        message=message,
+        hint="Use a suitable tool from the active client device instead.",
+        exception=PermissionError(message),
+    )
+
+
+def _device_binding_refusal(
+    tool: Any,
+    tool_name: str,
+    context: _ToolCallContext,
+) -> _ToolCallRefusal | None:
+    device_error = _validate_client_tool_device_binding(tool, context.device_id, tool_name)
+    if not device_error:
+        return None
+    return _refusal(
+        ToolErrorKind.PERMISSION,
+        message=f"Client tool {tool_name} cannot execute from the current device session.",
+        hint="Ask the user to use the bound device, or choose another available tool.",
+        exception=PermissionError(device_error),
+    )
+
+
+#: Checks on a resolved tool, in order, before it runs.
+_BOUND_TOOL_CHECKS = (_client_scope_refusal, _device_binding_refusal)
+
+
+async def _pre_check_tool_call(
+    tool_call: dict[str, Any],
+    tool_name: str | None,
+    tool_args: Any,
+    context: _ToolCallContext,
+) -> tuple[Any | None, _ToolCallRefusal | None]:
+    """The tool to run, or the first check that refuses the call.
+
+    In order: widget ownership, a missing name, a missing tool (after
+    recovery), the client-only scope, the client device binding.
+    """
+    refusal = await _widget_refusal(tool_name, tool_args, context.conversation_id)
+    if refusal is None:
+        refusal = _missing_name_refusal(tool_name)
+    if refusal is not None:
+        return None, refusal
+
+    tool, refusal = await _resolve_call_tool(tool_call, tool_name, context)
+    if refusal is not None:
+        return None, refusal
+
+    for check in _BOUND_TOOL_CHECKS:
+        refusal = check(tool, tool_name, context)
+        if refusal is not None:
+            return None, refusal
+    return tool, None
+
+
+class _ToolCallResults:
+    """The outputs, artifacts and images ``execute_tool_calls`` accumulates, in call order."""
+
+    def __init__(self, *, artifact_max_output_chars: int) -> None:
+        self.artifact_max_output_chars = artifact_max_output_chars
+        self.outputs: list[dict[str, Any]] = []
+        self.artifacts: list[dict[str, Any]] = []
+        self.images: list[dict[str, str]] = []
+
+    def append_refusal(
+        self,
+        refusal: _ToolCallRefusal,
+        *,
+        tool_call_id: str | None,
+        tool_name: str,
+        tool_args: Any,
+    ) -> None:
+        model_content, artifact_detail = build_tool_error_payloads(
+            refusal.summary,
+            tool_name=tool_name,
+            exception=refusal.exception,
+            policy_retry_allowed=False,
+        )
+        self.append_error(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            model_content=model_content,
+            artifact_detail=artifact_detail,
+        )
+
+    def append_error(
+        self,
+        *,
+        tool_call_id: str | None,
+        tool_name: str,
+        tool_args: Any,
+        model_content: str,
+        artifact_detail: dict[str, Any],
+    ) -> None:
+        """Append a compact-error output/artifact pair with an error render.
+
+        Shared by missing-name, missing-tool, device-binding, policy-timeout,
+        and exception failures so every error path renders identically.
+        """
+        normalized = normalize_tool_result_for_rendering(model_content, tool_name=tool_name)
+        render = dict(normalized.render)
+        render["type"] = "error"
+        render["error"] = str(
+            artifact_detail.get("diagnostic")
+            or artifact_detail.get("error_type")
+            or "Tool execution failed"
+        )
+        output: dict[str, Any] = {
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "content": model_content,
+            "render": render,
+        }
+        if artifact_detail.get("skill_terminal_error"):
+            # The complete skill terminal error must reach the model verbatim,
+            # bypassing ordinary truncation and blob offload.
+            output["preserve_full_content"] = True
+        self.outputs.append(output)
+        artifact = build_tool_artifact(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            output_text=model_content,
+            error=str(artifact_detail.get("diagnostic") or artifact_detail.get("error_type")),
+            max_output_chars=self.artifact_max_output_chars,
+            render=render,
+        )
+        artifact.update(artifact_detail)
+        self.artifacts.append(artifact)
+
+    def append_result(
+        self,
+        result: Any,
+        *,
+        canonical_tool_name: str,
+        tool_call_id: str | None,
+        tool_name: str,
+        tool_args: Any,
+        execution_detail: dict[str, Any],
+        capture_images: bool,
+    ) -> None:
+        public_result = (
+            sanitize_public_image_fields(make_json_safe(result))
+            if canonical_tool_name == "brave_image_search"
+            else result
+        )
+        structured_error = _structured_tool_error(public_result)
+        normalized_result = normalize_tool_result_for_rendering(
+            public_result,
+            tool_name=tool_name,
+            error=structured_error,
+        )
+        result_text = normalized_result.model_content
+
+        self.outputs.append(
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": result_text,
+                "render": normalized_result.render,
+            }
+        )
+        artifact = build_tool_artifact(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            output_text=result_text,
+            error=structured_error,
+            max_output_chars=self.artifact_max_output_chars,
+            render=normalized_result.render,
+        )
+        artifact.update(execution_detail)
+        _attach_rich_candidates_to_artifact(
+            artifact,
+            raw_result=result,
+            result_text=result_text,
+            render=normalized_result.render,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+        )
+        self.artifacts.append(artifact)
+        if capture_images:
+            self.images.extend(extract_images_from_tool_content(result))
+
+    def append_exception(
+        self,
+        exc: Exception,
+        *,
+        tool_call_id: str | None,
+        tool_name: str,
+        tool_args: Any,
+    ) -> None:
+        error_msg = f"Error: {exc}"
+        normalized_result = normalize_tool_result_for_rendering(
+            error_msg,
+            tool_name=tool_name,
+            error=str(exc),
+        )
+        self.outputs.append(
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": normalized_result.model_content,
+                "render": normalized_result.render,
+            }
+        )
+        self.artifacts.append(
+            build_tool_artifact(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                output_text=normalized_result.model_content,
+                error=str(exc),
+                max_output_chars=self.artifact_max_output_chars,
+                render=normalized_result.render,
+            )
+        )
+
+
 async def execute_tool_calls(
     *,
     tool_calls: list[Any],
@@ -1739,63 +2102,20 @@ async def execute_tool_calls(
     a separate return-shape change. The key is intentionally prefixed with an
     underscore so existing consumers (renderers, persistence) ignore it.
     """
-    outputs: list[dict[str, Any]] = []
-    artifacts: list[dict[str, Any]] = []
-    images: list[dict[str, str]] = []
-    client_only_scope = is_client_only_scope(
+    results = _ToolCallResults(artifact_max_output_chars=artifact_max_output_chars)
+    context = _ToolCallContext(
+        tool_map=tool_map,
+        approval_policy=_approval_policy(hitl_policy),
+        agent=agent,
+        conversation_id=conversation_id,
+        user_id=user_id,
         device_id=device_id,
         tool_scope=tool_scope,
+        client_only_scope=is_client_only_scope(
+            device_id=device_id,
+            tool_scope=tool_scope,
+        ),
     )
-    if isinstance(hitl_policy, dict):
-        approval_policy = hitl_policy
-    else:
-        from .hitl_config import build_global_policy
-
-        approval_policy = build_global_policy()
-
-    def _append_tool_error_output(
-        *,
-        tool_call_id: str | None,
-        tool_name: str,
-        tool_args: Any,
-        model_content: str,
-        artifact_detail: dict[str, Any],
-    ) -> None:
-        """Append a compact-error output/artifact pair with an error render.
-
-        Shared by missing-name, missing-tool, device-binding, policy-timeout,
-        and exception failures so every error path renders identically.
-        """
-        normalized = normalize_tool_result_for_rendering(model_content, tool_name=tool_name)
-        render = dict(normalized.render)
-        render["type"] = "error"
-        render["error"] = str(
-            artifact_detail.get("diagnostic")
-            or artifact_detail.get("error_type")
-            or "Tool execution failed"
-        )
-        output: dict[str, Any] = {
-            "tool_call_id": tool_call_id,
-            "name": tool_name,
-            "content": model_content,
-            "render": render,
-        }
-        if artifact_detail.get("skill_terminal_error"):
-            # The complete skill terminal error must reach the model verbatim,
-            # bypassing ordinary truncation and blob offload.
-            output["preserve_full_content"] = True
-        outputs.append(output)
-        artifact = build_tool_artifact(
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            tool_args=tool_args,
-            output_text=model_content,
-            error=str(artifact_detail.get("diagnostic") or artifact_detail.get("error_type")),
-            max_output_chars=artifact_max_output_chars,
-            render=render,
-        )
-        artifact.update(artifact_detail)
-        artifacts.append(artifact)
 
     for raw_tool_call in tool_calls:
         tool_call = normalize_tool_call(raw_tool_call)
@@ -1804,180 +2124,13 @@ async def execute_tool_calls(
         tool_args = tool_call.get("args", {})
         tool_args = _bind_widget_session_args(tool_name or "", tool_args, conversation_id)
 
-        widget_refusal = await _widget_access_denied(
-            tool_name or "", tool_args, conversation_id
-        )
-        if widget_refusal is not None:
-            summary = ToolErrorSummary(
-                error_type=ToolErrorKind.PERMISSION.value,
-                failure_retryable=False,
-                message=widget_refusal,
-                hint="Create a widget in this conversation with widget_create.",
-                attempts=1,
-            )
-            model_content, artifact_detail = build_tool_error_payloads(
-                summary,
-                tool_name=tool_name or "unknown",
-                exception=PermissionError(widget_refusal),
-                policy_retry_allowed=False,
-            )
-            _append_tool_error_output(
+        tool, refusal = await _pre_check_tool_call(tool_call, tool_name, tool_args, context)
+        if refusal is not None:
+            results.append_refusal(
+                refusal,
                 tool_call_id=tool_id,
                 tool_name=tool_name or "unknown",
                 tool_args=tool_args,
-                model_content=model_content,
-                artifact_detail=artifact_detail,
-            )
-            continue
-
-        # ``normalize_tool_call`` substitutes the sentinel "unknown" when no name
-        # was provided, so an absent/blank name surfaces as that sentinel rather
-        # than a falsy value.
-        if not tool_name or tool_name == "unknown":
-            summary = ToolErrorSummary(
-                error_type=ToolErrorKind.ARGUMENT.value,
-                failure_retryable=False,
-                message="Tool name is missing.",
-                hint="Provide the tool name to call, or inspect available tools if unsure.",
-                attempts=1,
-            )
-            model_content, artifact_detail = build_tool_error_payloads(
-                summary,
-                tool_name=tool_name or "unknown",
-                exception=ValueError("Tool name is missing."),
-                policy_retry_allowed=False,
-            )
-            _append_tool_error_output(
-                tool_call_id=tool_id,
-                tool_name=tool_name or "unknown",
-                tool_args=tool_args,
-                model_content=model_content,
-                artifact_detail=artifact_detail,
-            )
-            continue
-
-        tool = tool_map.get(tool_name)
-        if not tool:
-            tool, needs_unasked_approval = await _recover_with_approval_check(
-                tool_call,
-                tool_map=tool_map,
-                policy=approval_policy,
-                agent=agent,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                device_id=device_id,
-                tool_scope=tool_scope,
-            )
-            if tool and needs_unasked_approval:
-                message = RECOVERED_TOOL_APPROVAL_REFUSAL.format(name=tool_name)
-                summary = ToolErrorSummary(
-                    error_type=ToolErrorKind.PERMISSION.value,
-                    failure_retryable=False,
-                    message=message,
-                    hint="Tell the user this action needs their approval.",
-                    attempts=1,
-                )
-                model_content, artifact_detail = build_tool_error_payloads(
-                    summary,
-                    tool_name=tool_name,
-                    exception=PermissionError(message),
-                    policy_retry_allowed=False,
-                )
-                _append_tool_error_output(
-                    tool_call_id=tool_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    model_content=model_content,
-                    artifact_detail=artifact_detail,
-                )
-                continue
-        if not tool:
-            if tool_name.startswith(CLIENT_TOOL_PREFIX):
-                summary = ToolErrorSummary(
-                    error_type=ToolErrorKind.NOT_FOUND.value,
-                    failure_retryable=False,
-                    message=(
-                        f"Client tool {tool_name} is not available for the current device session."
-                    ),
-                    hint=(
-                        "The device may be disconnected. Ask the user to reconnect, "
-                        "or use another available tool."
-                    ),
-                    attempts=1,
-                )
-            else:
-                summary = ToolErrorSummary(
-                    error_type=ToolErrorKind.NOT_FOUND.value,
-                    failure_retryable=False,
-                    message=f"Tool {tool_name} is not currently bound.",
-                    hint=(
-                        "Use a currently bound suitable tool if one exists. If the needed "
-                        "capability is missing or ambiguous, use tool_search to discover it."
-                    ),
-                    attempts=1,
-                )
-            model_content, artifact_detail = build_tool_error_payloads(
-                summary,
-                tool_name=tool_name,
-                exception=LookupError(summary.message),
-                policy_retry_allowed=False,
-            )
-            _append_tool_error_output(
-                tool_call_id=tool_id,
-                tool_name=tool_name,
-                tool_args=tool_args,
-                model_content=model_content,
-                artifact_detail=artifact_detail,
-            )
-            continue
-
-        if client_only_scope and tool_name in SERVER_ONLY_WEB_TOOL_NAMES:
-            summary = ToolErrorSummary(
-                error_type=ToolErrorKind.PERMISSION.value,
-                failure_retryable=False,
-                message="Server web access is unavailable in client-only tool scope.",
-                hint="Use a suitable tool from the active client device instead.",
-                attempts=1,
-            )
-            model_content, artifact_detail = build_tool_error_payloads(
-                summary,
-                tool_name=tool_name,
-                exception=PermissionError(summary.message),
-                policy_retry_allowed=False,
-            )
-            _append_tool_error_output(
-                tool_call_id=tool_id,
-                tool_name=tool_name,
-                tool_args=tool_args,
-                model_content=model_content,
-                artifact_detail=artifact_detail,
-            )
-            continue
-
-        # Validate client tool device binding before execution
-        device_error = _validate_client_tool_device_binding(tool, device_id, tool_name)
-        if device_error:
-            summary = ToolErrorSummary(
-                error_type=ToolErrorKind.PERMISSION.value,
-                failure_retryable=False,
-                message=(
-                    f"Client tool {tool_name} cannot execute from the current device session."
-                ),
-                hint="Ask the user to use the bound device, or choose another available tool.",
-                attempts=1,
-            )
-            model_content, artifact_detail = build_tool_error_payloads(
-                summary,
-                tool_name=tool_name,
-                exception=PermissionError(device_error),
-                policy_retry_allowed=False,
-            )
-            _append_tool_error_output(
-                tool_call_id=tool_id,
-                tool_name=tool_name,
-                tool_args=tool_args,
-                model_content=model_content,
-                artifact_detail=artifact_detail,
             )
             continue
 
@@ -1995,7 +2148,7 @@ async def execute_tool_calls(
                 tool_map=tool_map,
             )
             if error_detail is not None:
-                _append_tool_error_output(
+                results.append_error(
                     tool_call_id=tool_id,
                     tool_name=tool_name,
                     tool_args=tool_args,
@@ -2004,48 +2157,15 @@ async def execute_tool_calls(
                 )
                 continue
 
-            public_result = (
-                sanitize_public_image_fields(make_json_safe(result))
-                if canonical_tool_name == "brave_image_search"
-                else result
-            )
-            structured_error = _structured_tool_error(public_result)
-            normalized_result = normalize_tool_result_for_rendering(
-                public_result,
-                tool_name=tool_name,
-                error=structured_error,
-            )
-            result_text = normalized_result.model_content
-
-            outputs.append(
-                {
-                    "tool_call_id": tool_id,
-                    "name": tool_name,
-                    "content": result_text,
-                    "render": normalized_result.render,
-                }
-            )
-            artifact = build_tool_artifact(
+            results.append_result(
+                result,
+                canonical_tool_name=canonical_tool_name,
                 tool_call_id=tool_id,
                 tool_name=tool_name,
                 tool_args=tool_args,
-                output_text=result_text,
-                error=structured_error,
-                max_output_chars=artifact_max_output_chars,
-                render=normalized_result.render,
+                execution_detail=execution_detail,
+                capture_images=capture_images,
             )
-            artifact.update(execution_detail)
-            _attach_rich_candidates_to_artifact(
-                artifact,
-                raw_result=result,
-                result_text=result_text,
-                render=normalized_result.render,
-                tool_call_id=tool_id,
-                tool_name=tool_name,
-            )
-            artifacts.append(artifact)
-            if capture_images:
-                images.extend(extract_images_from_tool_content(result))
 
             # Update LRU timestamp for deferred tools on successful execution
             _mark_tool_used_if_deferred(tool_name)
@@ -2068,30 +2188,11 @@ async def execute_tool_calls(
             # would drop the pause and let the agent carry on regardless.
             raise
         except Exception as exc:
-            error_msg = f"Error: {exc}"
-            normalized_result = normalize_tool_result_for_rendering(
-                error_msg,
+            results.append_exception(
+                exc,
+                tool_call_id=tool_id,
                 tool_name=tool_name,
-                error=str(exc),
-            )
-            outputs.append(
-                {
-                    "tool_call_id": tool_id,
-                    "name": tool_name,
-                    "content": normalized_result.model_content,
-                    "render": normalized_result.render,
-                }
-            )
-            artifacts.append(
-                build_tool_artifact(
-                    tool_call_id=tool_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    output_text=normalized_result.model_content,
-                    error=str(exc),
-                    max_output_chars=artifact_max_output_chars,
-                    render=normalized_result.render,
-                )
+                tool_args=tool_args,
             )
 
     # Offloading commits the full payload to Postgres synchronously (see
@@ -2102,10 +2203,10 @@ async def execute_tool_calls(
     # return values below correctly ordered after the in-place mutations.
     await asyncio.to_thread(
         _apply_offload_to_outputs_and_artifacts,
-        outputs=outputs,
-        artifacts=artifacts,
+        outputs=results.outputs,
+        artifacts=results.artifacts,
         conversation_id=conversation_id,
         user_id=user_id,
     )
 
-    return outputs, artifacts, images
+    return results.outputs, results.artifacts, results.images

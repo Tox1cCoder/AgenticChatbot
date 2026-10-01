@@ -342,6 +342,221 @@ def _remote_mcp_trusted_fields(raw_metadata: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
+# Rule fields that a more specific matching rule simply overwrites.
+# `max_timeout_seconds` accumulates as a minimum and `disable_outer_timeout`
+# only ever turns on, so neither is listed here.
+_OVERWRITTEN_RULE_FIELDS = (
+    "timeout_seconds",
+    "hard_timeout_seconds",
+    "total_timeout_seconds",
+    "max_attempts",
+    "retry_safe",
+    "idempotent",
+    "timeout_hint",
+)
+
+# The allowlisted remote MCP fields an exact `trust_mcp_metadata` rule lets
+# through, each only when that rule left the field unset.
+_REMOTE_TRUSTED_FIELDS = ("timeout_seconds", "retry_safe", "idempotent", "timeout_hint")
+
+
+def _trusted_metadata_layer(
+    identity: ToolIdentity,
+    raw_metadata: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Layer 1: the defaults, overlaid with an internal tool's trusted metadata.
+
+    Returns the effective field values and whether trusted metadata set any.
+    """
+
+    effective: dict[str, Any] = {
+        "timeout_seconds": None,
+        "hard_timeout_seconds": None,
+        "total_timeout_seconds": None,
+        "max_timeout_seconds": None,
+        "max_attempts": 1,
+        "retry_safe": False,
+        "idempotent": False,
+        "disable_outer_timeout": False,
+        "timeout_hint": "",
+    }
+
+    internal_trusted = False
+    if identity.tool_origin == "internal":
+        internal_fields = _trusted_internal_policy_fields(raw_metadata)
+        if internal_fields:
+            internal_trusted = True
+            effective.update(internal_fields)
+    return effective, internal_trusted
+
+
+def _apply_deployment_rule(
+    effective: dict[str, Any],
+    override: ToolExecutionPolicyOverride,
+) -> None:
+    for field in _OVERWRITTEN_RULE_FIELDS:
+        value = getattr(override, field)
+        if value is not None:
+            effective[field] = value
+    if override.max_timeout_seconds is not None:
+        current_cap = effective["max_timeout_seconds"]
+        effective["max_timeout_seconds"] = (
+            override.max_timeout_seconds
+            if current_cap is None
+            else min(current_cap, override.max_timeout_seconds)
+        )
+    if override.disable_outer_timeout:
+        effective["disable_outer_timeout"] = True
+
+
+def _apply_deployment_rules(
+    effective: dict[str, Any],
+    rules: list[tuple[str, ToolExecutionPolicyOverride]],
+) -> ToolExecutionPolicyOverride | None:
+    """Layer 2: apply the matching rules least to most specific.
+
+    Returns the exact (qualified-id) rule, if one matched.
+    """
+
+    exact_rule: ToolExecutionPolicyOverride | None = None
+    for _config_key, override in rules:
+        _apply_deployment_rule(effective, override)
+        if policy_match_specificity(override.match) == _SPECIFICITY_QUALIFIED_ID:
+            exact_rule = override
+    return exact_rule
+
+
+def _apply_trusted_remote_fields(
+    effective: dict[str, Any],
+    exact_rule: ToolExecutionPolicyOverride | None,
+    raw_metadata: dict[str, Any],
+) -> bool:
+    """Layer 3: remote MCP fields, only under an exact rule that trusts them.
+
+    Fills only the fields that exact rule left unset. Returns whether any
+    allowlisted remote field was present.
+    """
+
+    if exact_rule is None or not exact_rule.trust_mcp_metadata:
+        return False
+    remote_fields = _remote_mcp_trusted_fields(raw_metadata)
+    if not remote_fields:
+        return False
+    for field in _REMOTE_TRUSTED_FIELDS:
+        if field in remote_fields and getattr(exact_rule, field) is None:
+            effective[field] = remote_fields[field]
+    return True
+
+
+def _check_safety_caps(
+    effective: dict[str, Any],
+    identity_key: tuple[str, str],
+    *,
+    internal_trusted: bool,
+) -> None:
+    """The two fail-closed checks: the outer-timeout allowlist and the retry budget."""
+
+    if effective["disable_outer_timeout"]:
+        if not internal_trusted:
+            raise ToolExecutionPolicyValidationError(
+                "disable_outer_timeout requires trusted application metadata"
+            )
+        if identity_key not in _DISABLE_OUTER_TIMEOUT_ALLOWLIST:
+            permitted = sorted(_DISABLE_OUTER_TIMEOUT_ALLOWLIST)
+            raise ToolExecutionPolicyValidationError(
+                f"disable_outer_timeout is permitted for {permitted or 'no identity'}; "
+                f"got {identity_key!r}"
+            )
+
+    if effective["max_attempts"] > 1 and not (effective["retry_safe"] or effective["idempotent"]):
+        raise ToolExecutionPolicyValidationError(
+            f"max_attempts={effective['max_attempts']} for identity {identity_key!r} "
+            "requires retry_safe or idempotent to be true after trust and override "
+            "resolution"
+        )
+
+
+def _resolve_timeouts(
+    effective: dict[str, Any],
+    identity_key: tuple[str, str],
+) -> tuple[float, float, float]:
+    """Soft, hard and total timeouts under the cap, with the cancellation grace kept."""
+
+    default_timeout = float(getattr(settings, "tool_execution_timeout", 30) or 30)
+    grace = float(settings.tool_execution_cancellation_grace_seconds)
+    global_cap = float(settings.tool_execution_max_interactive_timeout_seconds)
+
+    configured_soft = effective["timeout_seconds"]
+    soft = float(configured_soft if configured_soft is not None else default_timeout)
+
+    configured_hard = effective["hard_timeout_seconds"]
+    hard = float(configured_hard if configured_hard is not None else soft + grace)
+
+    configured_total = effective["total_timeout_seconds"]
+    total = float(configured_total if configured_total is not None else hard)
+
+    cap = global_cap
+    if effective["max_timeout_seconds"] is not None:
+        cap = min(cap, float(effective["max_timeout_seconds"]))
+
+    if cap <= grace:
+        raise ToolExecutionPolicyValidationError(
+            f"accumulated max timeout cap {cap} for identity {identity_key!r} does not "
+            f"leave room for the configured cancellation grace {grace}"
+        )
+
+    total = min(total, cap)
+    hard = min(hard, total)
+    if hard <= grace:
+        raise ToolExecutionPolicyValidationError(
+            f"resolved hard timeout {hard} for identity {identity_key!r} does not leave "
+            f"room for the configured cancellation grace {grace}"
+        )
+
+    # Invariant enforced from here on: `hard - soft >= grace` (equivalently
+    # `soft <= hard`). When `grace > 0` this forces strict `soft < hard`. When
+    # `grace == 0` (legal — the field is `ge=0`) the floor collapses to
+    # `soft == hard`: the soft-cancel and hard-abandon phases coincide by
+    # construction because there is no grace window left to reserve. Deployment
+    # config may legitimately land in that degenerate configuration; it must
+    # not raise here.
+    if soft >= hard or (hard - soft) < grace:
+        soft = hard - grace
+    return soft, hard, total
+
+
+def _client_deadlines(
+    identity: ToolIdentity,
+    soft: float,
+    identity_key: tuple[str, str],
+) -> tuple[float | None, float | None]:
+    """Client-execution and bridge-response deadlines, for client-bridged tools only."""
+
+    if identity.tool_origin not in _CLIENT_TOOL_ORIGINS:
+        return None, None
+    execution_grace = float(settings.tool_execution_client_execution_grace_seconds)
+    response_grace = float(settings.tool_execution_client_response_grace_seconds)
+    client_execution_timeout_seconds = soft - execution_grace
+    client_response_timeout_seconds = soft - response_grace
+    if not (0 < client_execution_timeout_seconds < client_response_timeout_seconds < soft):
+        raise ToolExecutionPolicyValidationError(
+            f"resolved soft timeout {soft} for identity {identity_key!r} is too short "
+            "to preserve strict client deadline ordering (client execution < bridge "
+            "response < server soft)"
+        )
+    return client_execution_timeout_seconds, client_response_timeout_seconds
+
+
+def _policy_source(config_keys: tuple[str, ...], *, metadata_trusted: bool) -> str:
+    if config_keys and metadata_trusted:
+        return "config+metadata"
+    if config_keys:
+        return "config"
+    if metadata_trusted:
+        return "metadata"
+    return "default"
+
+
 def resolve_tool_execution_policy(
     tool: Any,
     *,
@@ -391,155 +606,24 @@ def resolve_tool_execution_policy(
     raw_metadata_attr = getattr(tool, "metadata", None)
     raw_metadata: dict[str, Any] = raw_metadata_attr if isinstance(raw_metadata_attr, dict) else {}
 
-    effective: dict[str, Any] = {
-        "timeout_seconds": None,
-        "hard_timeout_seconds": None,
-        "total_timeout_seconds": None,
-        "max_timeout_seconds": None,
-        "max_attempts": 1,
-        "retry_safe": False,
-        "idempotent": False,
-        "disable_outer_timeout": False,
-        "timeout_hint": "",
-    }
-
-    internal_trusted = False
-    if identity.tool_origin == "internal":
-        internal_fields = _trusted_internal_policy_fields(raw_metadata)
-        if internal_fields:
-            internal_trusted = True
-            effective.update(internal_fields)
+    effective, internal_trusted = _trusted_metadata_layer(identity, raw_metadata)
 
     rules = matching_policy_rules(identity, settings.tool_execution_policies)
-
-    exact_rule: ToolExecutionPolicyOverride | None = None
-    for _config_key, override in rules:
-        if override.timeout_seconds is not None:
-            effective["timeout_seconds"] = override.timeout_seconds
-        if override.hard_timeout_seconds is not None:
-            effective["hard_timeout_seconds"] = override.hard_timeout_seconds
-        if override.total_timeout_seconds is not None:
-            effective["total_timeout_seconds"] = override.total_timeout_seconds
-        if override.max_timeout_seconds is not None:
-            current_cap = effective["max_timeout_seconds"]
-            effective["max_timeout_seconds"] = (
-                override.max_timeout_seconds
-                if current_cap is None
-                else min(current_cap, override.max_timeout_seconds)
-            )
-        if override.max_attempts is not None:
-            effective["max_attempts"] = override.max_attempts
-        if override.retry_safe is not None:
-            effective["retry_safe"] = override.retry_safe
-        if override.idempotent is not None:
-            effective["idempotent"] = override.idempotent
-        if override.disable_outer_timeout:
-            effective["disable_outer_timeout"] = True
-        if override.timeout_hint is not None:
-            effective["timeout_hint"] = override.timeout_hint
-        if policy_match_specificity(override.match) == _SPECIFICITY_QUALIFIED_ID:
-            exact_rule = override
-
-    remote_trusted = False
-    if exact_rule is not None and exact_rule.trust_mcp_metadata:
-        remote_fields = _remote_mcp_trusted_fields(raw_metadata)
-        if remote_fields:
-            remote_trusted = True
-            if "timeout_seconds" in remote_fields and exact_rule.timeout_seconds is None:
-                effective["timeout_seconds"] = remote_fields["timeout_seconds"]
-            if "retry_safe" in remote_fields and exact_rule.retry_safe is None:
-                effective["retry_safe"] = remote_fields["retry_safe"]
-            if "idempotent" in remote_fields and exact_rule.idempotent is None:
-                effective["idempotent"] = remote_fields["idempotent"]
-            if "timeout_hint" in remote_fields and exact_rule.timeout_hint is None:
-                effective["timeout_hint"] = remote_fields["timeout_hint"]
+    exact_rule = _apply_deployment_rules(effective, rules)
+    remote_trusted = _apply_trusted_remote_fields(effective, exact_rule, raw_metadata)
 
     metadata_trusted = internal_trusted or remote_trusted
     config_keys = tuple(config_key for config_key, _ in rules)
 
     identity_key = (identity.tool_origin, identity.qualified_tool_id)
-    if effective["disable_outer_timeout"]:
-        if not internal_trusted:
-            raise ToolExecutionPolicyValidationError(
-                "disable_outer_timeout requires trusted application metadata"
-            )
-        if identity_key not in _DISABLE_OUTER_TIMEOUT_ALLOWLIST:
-            permitted = sorted(_DISABLE_OUTER_TIMEOUT_ALLOWLIST)
-            raise ToolExecutionPolicyValidationError(
-                f"disable_outer_timeout is permitted for {permitted or 'no identity'}; "
-                f"got {identity_key!r}"
-            )
+    _check_safety_caps(effective, identity_key, internal_trusted=internal_trusted)
 
-    if effective["max_attempts"] > 1 and not (effective["retry_safe"] or effective["idempotent"]):
-        raise ToolExecutionPolicyValidationError(
-            f"max_attempts={effective['max_attempts']} for identity {identity_key!r} "
-            "requires retry_safe or idempotent to be true after trust and override "
-            "resolution"
-        )
+    soft, hard, total = _resolve_timeouts(effective, identity_key)
+    client_execution_timeout_seconds, client_response_timeout_seconds = _client_deadlines(
+        identity, soft, identity_key
+    )
 
-    default_timeout = float(getattr(settings, "tool_execution_timeout", 30) or 30)
-    grace = float(settings.tool_execution_cancellation_grace_seconds)
-    global_cap = float(settings.tool_execution_max_interactive_timeout_seconds)
-
-    configured_soft = effective["timeout_seconds"]
-    soft = float(configured_soft if configured_soft is not None else default_timeout)
-
-    configured_hard = effective["hard_timeout_seconds"]
-    hard = float(configured_hard if configured_hard is not None else soft + grace)
-
-    configured_total = effective["total_timeout_seconds"]
-    total = float(configured_total if configured_total is not None else hard)
-
-    cap = global_cap
-    if effective["max_timeout_seconds"] is not None:
-        cap = min(cap, float(effective["max_timeout_seconds"]))
-
-    if cap <= grace:
-        raise ToolExecutionPolicyValidationError(
-            f"accumulated max timeout cap {cap} for identity {identity_key!r} does not "
-            f"leave room for the configured cancellation grace {grace}"
-        )
-
-    total = min(total, cap)
-    hard = min(hard, total)
-    if hard <= grace:
-        raise ToolExecutionPolicyValidationError(
-            f"resolved hard timeout {hard} for identity {identity_key!r} does not leave "
-            f"room for the configured cancellation grace {grace}"
-        )
-
-    # Invariant enforced from here on: `hard - soft >= grace` (equivalently
-    # `soft <= hard`). When `grace > 0` this forces strict `soft < hard`. When
-    # `grace == 0` (legal — the field is `ge=0`) the floor collapses to
-    # `soft == hard`: the soft-cancel and hard-abandon phases coincide by
-    # construction because there is no grace window left to reserve. Deployment
-    # config may legitimately land in that degenerate configuration; it must
-    # not raise here.
-    if soft >= hard or (hard - soft) < grace:
-        soft = hard - grace
-
-    client_execution_timeout_seconds: float | None = None
-    client_response_timeout_seconds: float | None = None
-    if identity.tool_origin in _CLIENT_TOOL_ORIGINS:
-        execution_grace = float(settings.tool_execution_client_execution_grace_seconds)
-        response_grace = float(settings.tool_execution_client_response_grace_seconds)
-        client_execution_timeout_seconds = soft - execution_grace
-        client_response_timeout_seconds = soft - response_grace
-        if not (0 < client_execution_timeout_seconds < client_response_timeout_seconds < soft):
-            raise ToolExecutionPolicyValidationError(
-                f"resolved soft timeout {soft} for identity {identity_key!r} is too short "
-                "to preserve strict client deadline ordering (client execution < bridge "
-                "response < server soft)"
-            )
-
-    if config_keys and metadata_trusted:
-        policy_source = "config+metadata"
-    elif config_keys:
-        policy_source = "config"
-    elif metadata_trusted:
-        policy_source = "metadata"
-    else:
-        policy_source = "default"
+    policy_source = _policy_source(config_keys, metadata_trusted=metadata_trusted)
 
     return ToolExecutionPolicy(
         identity=identity,

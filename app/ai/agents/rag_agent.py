@@ -3,6 +3,7 @@ import base64
 import logging
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -66,6 +67,55 @@ def _within_dispatch_scope(tools: list[BaseTool], allowed_tool_ids: Any) -> list
     from ..workflow.middleware import tool_identities
 
     return [tool for tool in tools if tool_identities(tool) & allowed]
+
+
+@dataclass(frozen=True)
+class _AgenticRagRequest:
+    """One agentic RAG model call's inputs, split the way the budget preflight counts them."""
+
+    messages: list[Any]
+    system_messages: list[Any]
+    history_messages: list[Any]
+    current_messages: list[Any]
+    tools: list[BaseTool]
+    disable_tools: bool
+    conversation_id: str | None
+    user_id: str | None
+    run_config: dict[str, Any] | None
+    has_images: bool
+    agentic_images_count: int
+
+
+@dataclass(frozen=True)
+class _AgenticRagAttempt:
+    """The provider call that answered, and what its budget preflight produced."""
+
+    response: Any
+    runtime_config: ResolvedRuntimeModelConfig
+    budget_result: Any
+    evidence_token_counter: TokenCounter
+    context_overflow_retried: bool
+
+
+def _split_at_current_turn(non_system_messages: list[Any]) -> tuple[list[Any], list[Any]]:
+    """History and current turn; the current turn starts at the last human message."""
+    current_start = next(
+        (
+            index
+            for index in range(len(non_system_messages) - 1, -1, -1)
+            if isinstance(non_system_messages[index], HumanMessage)
+        ),
+        max(0, len(non_system_messages) - 1),
+    )
+    return non_system_messages[:current_start], non_system_messages[current_start:]
+
+
+def _copy_actual_usage(token_breakdown: Any, actual_usage: dict[str, Any]) -> None:
+    if any(value is not None for value in actual_usage.values()):
+        token_breakdown.actual_input_tokens = actual_usage.get("input_tokens")
+        token_breakdown.actual_output_tokens = actual_usage.get("output_tokens")
+        token_breakdown.actual_total_tokens = actual_usage.get("total_tokens")
+        token_breakdown.actual_reasoning_tokens = actual_usage.get("reasoning_tokens")
 
 
 class RAGAgent(BaseAgent):
@@ -944,32 +994,27 @@ class RAGAgent(BaseAgent):
         ``AgentResponse`` with the standard runtime metadata applied through
         ``_apply_runtime_metadata``.
         """
-        current_runtime = runtime_config
-        context_overflow_retried = False
-        budget_result = None
-        evidence_token_counter: TokenCounter | None = None
         system_messages = [message for message in messages if isinstance(message, SystemMessage)]
         non_system_messages = [
             message for message in messages if not isinstance(message, SystemMessage)
         ]
-        current_start = next(
-            (
-                index
-                for index in range(len(non_system_messages) - 1, -1, -1)
-                if isinstance(non_system_messages[index], HumanMessage)
-            ),
-            max(0, len(non_system_messages) - 1),
+        history_messages, current_messages = _split_at_current_turn(non_system_messages)
+        request = _AgenticRagRequest(
+            messages=messages,
+            system_messages=system_messages,
+            history_messages=history_messages,
+            current_messages=current_messages,
+            tools=tools,
+            disable_tools=disable_tools,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            run_config=run_config,
+            has_images=has_images,
+            agentic_images_count=agentic_images_count,
         )
-        current_messages = non_system_messages[current_start:]
-        history_messages = non_system_messages[:current_start]
         system_prompt = "\n\n".join(
-            coerce_response_text(getattr(message, "content", ""))
-            for message in messages
-            if isinstance(message, SystemMessage)
+            coerce_response_text(getattr(message, "content", "")) for message in system_messages
         )
-        non_system_messages = [
-            message for message in messages if not isinstance(message, SystemMessage)
-        ]
         token_breakdown = compute_token_breakdown(
             system_prompt=system_prompt,
             history_messages=[],
@@ -977,94 +1022,50 @@ class RAGAgent(BaseAgent):
             tools=tools if tools and not disable_tools else None,
         )
 
-        async def _invoke_with_optional_config(
-            model: Any,
-            model_messages: list[Any],
-        ) -> Any:
-            if run_config is not None:
-                return await self._ainvoke_with_retries(
-                    model, model_messages, run_config=run_config
-                )
-            return await self._ainvoke_with_retries(model, model_messages)
+        attempt = await self._invoke_agentic_rag_with_fallback(request, runtime_config)
+        response = attempt.response
 
+        response_text = coerce_response_text(response.content or "")
+        actual_usage = extract_actual_usage(response)
+        _copy_actual_usage(token_breakdown, actual_usage)
+        tool_calls, budget_result = await self._agentic_rag_tool_calls(response, attempt)
+
+        response_message = AgentMessage(
+            role=MessageRole.ASSISTANT,
+            content=response_text,
+            tool_calls=tool_calls,
+        )
+        metadata = self._agentic_rag_metadata(
+            request,
+            attempt,
+            token_breakdown=token_breakdown,
+            actual_usage=actual_usage,
+            budget_result=budget_result,
+            tool_calls=tool_calls,
+        )
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=response_message,
+            metadata=metadata,
+        )
+
+    # -------------------------------------------- _invoke_agentic_rag_model parts
+
+    async def _invoke_agentic_rag_with_fallback(
+        self,
+        request: _AgenticRagRequest,
+        runtime_config: ResolvedRuntimeModelConfig,
+    ) -> _AgenticRagAttempt:
+        """Call the model, falling back to the configured provider on an error.
+
+        A context-budget rejection is final; a fallback to the same provider is
+        not attempted.
+        """
+        current_runtime = runtime_config
         while True:
             try:
-                llm, _ = self._create_langchain_model_from_runtime(
-                    current_runtime,
-                    user_id=user_id,
-                    enable_reasoning_summary=False,
-                )
-                if disable_tools or not tools:
-                    llm_with_tools = llm
-                else:
-                    llm_with_tools = ModelFactory.bind_tools_to_model(
-                        llm,
-                        tools,
-                        tool_choice=getattr(settings, "tool_choice_mode", "auto"),
-                    )
-                evidence_token_counter = self._token_counter_for_model(
-                    current_runtime.provider,
-                    llm,
-                )
-                budget_result = await self._preflight_model_request(
-                    current_runtime,
-                    system_messages=system_messages,
-                    history_messages=history_messages,
-                    current_messages=current_messages,
-                    tools=[] if disable_tools else tools,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    authoritative_allowance=True,
-                    token_counter=evidence_token_counter,
-                )
-                request_messages = (
-                    list(budget_result.envelope.messages) if budget_result is not None else messages
-                )
-                generation_started_at = time.monotonic()
-                try:
-                    response = await _invoke_with_optional_config(llm_with_tools, request_messages)
-                except Exception as exc:
-                    if not settings.context_overflow_retry_enabled or not is_context_overflow_error(
-                        exc
-                    ):
-                        self._record_generation_stage(
-                            time.monotonic() - generation_started_at,
-                            runtime_config=current_runtime,
-                            failed=True,
-                        )
-                        raise
-                    compacted_messages = prepare_aggressive_context_retry(
-                        request_messages,
-                        tool_preview_chars=(settings.context_overflow_retry_tool_preview_chars),
-                    )
-                    try:
-                        response = await _invoke_with_optional_config(
-                            llm_with_tools,
-                            compacted_messages,
-                        )
-                    except Exception as retry_exc:
-                        self._record_generation_stage(
-                            time.monotonic() - generation_started_at,
-                            runtime_config=current_runtime,
-                            failed=True,
-                        )
-                        if is_context_overflow_error(retry_exc):
-                            conversation_compaction_metrics.record_provider_overflow_retry(
-                                "failure"
-                            )
-                            raise ContextBudgetExceededError(
-                                "provider_context_overflow"
-                            ) from retry_exc
-                        raise
-                    conversation_compaction_metrics.record_provider_overflow_retry("success")
-                    context_overflow_retried = True
-                self._record_generation_stage(
-                    time.monotonic() - generation_started_at,
-                    runtime_config=current_runtime,
-                    failed=False,
-                )
-                runtime_config = current_runtime
-                break
+                return await self._attempt_agentic_rag_call(request, current_runtime)
             except Exception as exc:
                 if isinstance(exc, ContextBudgetExceededError):
                     raise
@@ -1083,78 +1084,188 @@ class RAGAgent(BaseAgent):
                     raise
                 current_runtime = fallback_runtime
 
-        response_text = coerce_response_text(response.content or "")
-        tool_calls = None
-        actual_usage = extract_actual_usage(response)
-        if any(value is not None for value in actual_usage.values()):
-            token_breakdown.actual_input_tokens = actual_usage.get("input_tokens")
-            token_breakdown.actual_output_tokens = actual_usage.get("output_tokens")
-            token_breakdown.actual_total_tokens = actual_usage.get("total_tokens")
-            token_breakdown.actual_reasoning_tokens = actual_usage.get("reasoning_tokens")
-
-        if hasattr(response, "tool_calls") and response.tool_calls:
-            tool_calls = response.tool_calls
-            logger.debug(
-                "Agentic RAG returned %d tool calls: %s",
-                len(tool_calls),
-                [tc.get("name", tc["name"]) for tc in tool_calls],
+    async def _attempt_agentic_rag_call(
+        self,
+        request: _AgenticRagRequest,
+        runtime: ResolvedRuntimeModelConfig,
+    ) -> _AgenticRagAttempt:
+        """One provider: build and bind the model, budget the request, generate."""
+        llm, _ = self._create_langchain_model_from_runtime(
+            runtime,
+            user_id=request.user_id,
+            enable_reasoning_summary=False,
+        )
+        if request.disable_tools or not request.tools:
+            llm_with_tools = llm
+        else:
+            llm_with_tools = ModelFactory.bind_tools_to_model(
+                llm,
+                request.tools,
+                tool_choice=getattr(settings, "tool_choice_mode", "auto"),
             )
-            if budget_result is not None:
-                wrappers = tuple(
-                    ToolMessage(
-                        content="",
-                        tool_call_id=str(tool_call.get("id") or ""),
-                        name=str(tool_call.get("name") or "search_documents"),
-                    )
-                    for tool_call in tool_calls
-                )
-                budget_result = await RequestBudgetService(
-                    evidence_token_counter or TokenCounter()
-                ).reserve_tool_result_envelopes(
-                    budget_result,
-                    assistant_message=response,
-                    tool_messages=wrappers,
-                )
-
-        response_message = AgentMessage(
-            role=MessageRole.ASSISTANT,
-            content=response_text,
-            tool_calls=tool_calls,
+        evidence_token_counter = self._token_counter_for_model(
+            runtime.provider,
+            llm,
+        )
+        budget_result = await self._preflight_model_request(
+            runtime,
+            system_messages=request.system_messages,
+            history_messages=request.history_messages,
+            current_messages=request.current_messages,
+            tools=[] if request.disable_tools else request.tools,
+            conversation_id=request.conversation_id,
+            user_id=request.user_id,
+            authoritative_allowance=True,
+            token_counter=evidence_token_counter,
+        )
+        request_messages = (
+            list(budget_result.envelope.messages)
+            if budget_result is not None
+            else request.messages
+        )
+        response, context_overflow_retried = await self._timed_agentic_rag_generation(
+            request, runtime, llm_with_tools, request_messages
+        )
+        return _AgenticRagAttempt(
+            response=response,
+            runtime_config=runtime,
+            budget_result=budget_result,
+            evidence_token_counter=evidence_token_counter,
+            context_overflow_retried=context_overflow_retried,
         )
 
+    async def _timed_agentic_rag_generation(
+        self,
+        request: _AgenticRagRequest,
+        runtime: ResolvedRuntimeModelConfig,
+        llm_with_tools: Any,
+        request_messages: list[Any],
+    ) -> tuple[Any, bool]:
+        """Generate once, plus the single context-overflow retry, timed as one stage.
+
+        Returns the response and whether the overflow retry produced it.
+        """
+        context_overflow_retried = False
+        generation_started_at = time.monotonic()
+        try:
+            response = await self._call_agentic_rag_model(
+                llm_with_tools, request_messages, request.run_config
+            )
+        except Exception as exc:
+            if not settings.context_overflow_retry_enabled or not is_context_overflow_error(exc):
+                self._record_generation_stage(
+                    time.monotonic() - generation_started_at,
+                    runtime_config=runtime,
+                    failed=True,
+                )
+                raise
+            compacted_messages = prepare_aggressive_context_retry(
+                request_messages,
+                tool_preview_chars=(settings.context_overflow_retry_tool_preview_chars),
+            )
+            try:
+                response = await self._call_agentic_rag_model(
+                    llm_with_tools, compacted_messages, request.run_config
+                )
+            except Exception as retry_exc:
+                self._record_generation_stage(
+                    time.monotonic() - generation_started_at,
+                    runtime_config=runtime,
+                    failed=True,
+                )
+                if is_context_overflow_error(retry_exc):
+                    conversation_compaction_metrics.record_provider_overflow_retry("failure")
+                    raise ContextBudgetExceededError("provider_context_overflow") from retry_exc
+                raise
+            conversation_compaction_metrics.record_provider_overflow_retry("success")
+            context_overflow_retried = True
+        self._record_generation_stage(
+            time.monotonic() - generation_started_at,
+            runtime_config=runtime,
+            failed=False,
+        )
+        return response, context_overflow_retried
+
+    async def _call_agentic_rag_model(
+        self,
+        model: Any,
+        model_messages: list[Any],
+        run_config: dict[str, Any] | None,
+    ) -> Any:
+        if run_config is not None:
+            return await self._ainvoke_with_retries(model, model_messages, run_config=run_config)
+        return await self._ainvoke_with_retries(model, model_messages)
+
+    async def _agentic_rag_tool_calls(
+        self,
+        response: Any,
+        attempt: _AgenticRagAttempt,
+    ) -> tuple[Any, Any]:
+        """The response's tool calls, and the budget with their result envelopes reserved."""
+        budget_result = attempt.budget_result
+        if not (hasattr(response, "tool_calls") and response.tool_calls):
+            return None, budget_result
+        tool_calls = response.tool_calls
+        logger.debug(
+            "Agentic RAG returned %d tool calls: %s",
+            len(tool_calls),
+            [tc.get("name", tc["name"]) for tc in tool_calls],
+        )
+        if budget_result is not None:
+            wrappers = tuple(
+                ToolMessage(
+                    content="",
+                    tool_call_id=str(tool_call.get("id") or ""),
+                    name=str(tool_call.get("name") or "search_documents"),
+                )
+                for tool_call in tool_calls
+            )
+            budget_result = await RequestBudgetService(
+                attempt.evidence_token_counter or TokenCounter()
+            ).reserve_tool_result_envelopes(
+                budget_result,
+                assistant_message=response,
+                tool_messages=wrappers,
+            )
+        return tool_calls, budget_result
+
+    def _agentic_rag_metadata(
+        self,
+        request: _AgenticRagRequest,
+        attempt: _AgenticRagAttempt,
+        *,
+        token_breakdown: Any,
+        actual_usage: dict[str, Any],
+        budget_result: Any,
+        tool_calls: Any,
+    ) -> dict[str, Any]:
         metadata: dict[str, Any] = {
-            "conversation_id": conversation_id,
+            "conversation_id": request.conversation_id,
             "agentic_mode": True,
             "token_breakdown": token_breakdown.to_dict(),
         }
         if isinstance(actual_usage.get("reasoning_tokens"), int):
             metadata["reasoning_tokens"] = actual_usage["reasoning_tokens"]
-        if agentic_images_count:
-            metadata["agentic_images_count"] = agentic_images_count
-        if has_images:
+        if request.agentic_images_count:
+            metadata["agentic_images_count"] = request.agentic_images_count
+        if request.has_images:
             metadata["has_images"] = True
-        if disable_tools:
+        if request.disable_tools:
             metadata["disable_tools"] = True
-        if context_overflow_retried:
+        if attempt.context_overflow_retried:
             metadata["context_overflow_retry"] = True
         request_budget_metadata = self._request_budget_metadata(budget_result)
         if request_budget_metadata is not None:
             metadata["request_budget"] = request_budget_metadata
-        if tool_calls and evidence_token_counter is not None:
+        if tool_calls and attempt.evidence_token_counter is not None:
             metadata["evidence_tokenization"] = self._register_evidence_token_counter(
-                evidence_token_counter,
-                provider=runtime_config.provider,
-                model=runtime_config.model,
+                attempt.evidence_token_counter,
+                provider=attempt.runtime_config.provider,
+                model=attempt.runtime_config.model,
             )
-        self._apply_runtime_metadata(metadata, runtime_config)
+        self._apply_runtime_metadata(metadata, attempt.runtime_config)
         self._merge_context_window_usage(metadata, metadata["token_breakdown"])
-
-        return AgentResponse(
-            agent_type=AgentType.RAG,
-            agent_id="rag_agent",
-            message=response_message,
-            metadata=metadata,
-        )
+        return metadata
 
     async def _process_message_agentic(
         self,

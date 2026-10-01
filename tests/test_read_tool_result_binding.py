@@ -47,6 +47,107 @@ def _bound_names(monkeypatch, *, offload_enabled: bool) -> list[str]:
     return [tool.name for tool in agent._get_tools_for_binding(conversation_id="c1")]
 
 
+class _StubContainer:
+    """Stands in for ``app.core.container.Container``; the repositories are opaque."""
+
+    fail = False
+
+    def user_memory_repository(self):
+        if self.fail:
+            raise RuntimeError("memory repository down")
+        return "memory-repository"
+
+    def conversation_search_repository(self):
+        if self.fail:
+            raise RuntimeError("search repository down")
+        return "search-repository"
+
+
+def _bind_with_repository_tools(monkeypatch, *, user_id, fail=False, internal_tools=None):
+    agent = _BindingTestAgent(agent_config_key="chat")
+    agent.tools = []
+    agent.mcp_manager = None
+    calls: list[tuple[str, dict]] = []
+    stub_container = type("_Container", (_StubContainer,), {"fail": fail})
+    monkeypatch.setattr("app.core.container.Container", stub_container)
+    for flag in (
+        "enable_user_memory_tools",
+        "enable_conversation_search_tools",
+        "tool_result_offload_enabled",
+    ):
+        monkeypatch.setattr(f"app.ai.agents.base_agent.settings.{flag}", True, raising=False)
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.create_user_memory_tools",
+        lambda **kwargs: calls.append(("memory", kwargs)) or [SimpleNamespace(name="memory")],
+    )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.create_conversation_search_tools",
+        lambda **kwargs: calls.append(("search", kwargs)) or [SimpleNamespace(name="history")],
+    )
+    for factory in ("create_web_search_tool", "create_web_open_tool"):
+        monkeypatch.setattr(
+            f"app.ai.agents.base_agent.{factory}",
+            lambda tool_scope, _name=factory: SimpleNamespace(name=_name, scope=tool_scope),
+        )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.should_use_deferred_loading",
+        lambda _agent_key: True,
+    )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.build_deferred_tool_list",
+        lambda **kwargs: list(kwargs.get("internal_tools") or []),
+    )
+    monkeypatch.setattr(agent, "_get_client_runtime_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        agent, "_get_skills_internal_tools", lambda **kwargs: [SimpleNamespace(name="skill")]
+    )
+    tools = agent._get_tools_for_binding(
+        conversation_id="c1",
+        user_id=user_id,
+        internal_tools=internal_tools,
+    )
+    return [tool.name for tool in tools], calls
+
+
+def test_internal_tools_merge_in_source_order_and_the_first_name_wins(monkeypatch):
+    names, calls = _bind_with_repository_tools(
+        monkeypatch,
+        user_id="u1",
+        internal_tools=[SimpleNamespace(name="hand_off"), SimpleNamespace(name="skill")],
+    )
+
+    assert names == [
+        "skill",
+        "read_tool_result",
+        "create_web_search_tool",
+        "create_web_open_tool",
+        "hand_off",
+        "memory",
+        "history",
+    ]
+    assert calls == [
+        ("memory", {"repository": "memory-repository", "user_id": "u1", "conversation_id": "c1"}),
+        ("search", {"repository": "search-repository", "user_id": "u1", "conversation_id": "c1"}),
+    ]
+
+
+def test_repository_tools_need_a_user(monkeypatch):
+    names, calls = _bind_with_repository_tools(monkeypatch, user_id=None)
+
+    assert "memory" not in names
+    assert "history" not in names
+    assert calls == []
+
+
+def test_an_unavailable_repository_binds_nothing_from_it(monkeypatch):
+    names, calls = _bind_with_repository_tools(monkeypatch, user_id="u1", fail=True)
+
+    assert "memory" not in names
+    assert "history" not in names
+    assert "skill" in names
+    assert calls == []
+
+
 def test_read_tool_result_is_bound_when_offload_is_enabled(monkeypatch):
     assert "read_tool_result" in _bound_names(monkeypatch, offload_enabled=True)
 

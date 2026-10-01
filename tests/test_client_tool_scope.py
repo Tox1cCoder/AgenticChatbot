@@ -135,6 +135,42 @@ def test_client_scope_without_a_device_fails_closed_at_binding(monkeypatch):
     assert not SERVER_ONLY_WEB_TOOL_NAMES & {tool.name for tool in tools}
 
 
+@pytest.mark.parametrize(
+    ("tool_scope", "expected"),
+    [
+        ("client_only", ["skill", "client__echo"]),
+        ("default", ["skill", "time__get_current_time", "client__echo"]),
+    ],
+)
+def test_traditional_binding_offers_server_tools_only_outside_client_scope(
+    monkeypatch, tool_scope, expected
+):
+    agent = _BindingTestAgent(agent_config_key="rag")
+    agent.tools = [SimpleNamespace(name="time__get_current_time"), SimpleNamespace(name="skill")]
+    agent.mcp_manager = None
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.should_use_deferred_loading",
+        lambda _agent_key: False,
+    )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.settings.tool_result_offload_enabled", False, raising=False
+    )
+    monkeypatch.setattr(
+        agent, "_get_client_runtime_tools", lambda **kwargs: [SimpleNamespace(name="client__echo")]
+    )
+    monkeypatch.setattr(
+        agent, "_get_skills_internal_tools", lambda **kwargs: [SimpleNamespace(name="skill")]
+    )
+
+    tools = agent._get_tools_for_binding(
+        conversation_id="conversation-1",
+        device_id="device-a",
+        tool_scope=tool_scope,
+    )
+
+    assert [tool.name for tool in tools] == expected
+
+
 class _StaleServerTool:
     """A server web tool left in the execution map after the scope narrowed."""
 
