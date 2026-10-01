@@ -1786,7 +1786,6 @@ class MultiAgentWorkflow(
         # them before tool artifacts can reach persisted response metadata.
         self._lift_rich_candidates(context, artifacts)
         state["context"] = context
-        self._update_tool_error_streak(state, artifacts)
 
     def _build_chat_image_loader(self, user_id):
         """Build a per-run resolver that maps a stored ``image_id`` to a base64

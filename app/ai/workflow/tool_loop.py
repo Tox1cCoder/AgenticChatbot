@@ -3,15 +3,12 @@
 Methods are relocated verbatim; behavior is identical.
 """
 
-import json
 from typing import Any
 
 from langchain_core.messages import ToolMessage
 
 from app.ai.rich_image_selection import apply_rich_image_selection
-from app.ai.schemas import GraphState, GraphStateView
 from app.ai.utils import make_json_safe
-from app.core.config import settings
 
 
 class ToolLoopMixin:
@@ -86,51 +83,3 @@ class ToolLoopMixin:
             if render_payload:
                 event_payload["render"] = render_payload
             yield event_payload
-
-    @staticmethod
-    def _tool_error_signature(artifact: dict[str, Any]) -> dict[str, str]:
-        try:
-            args_key = json.dumps(
-                make_json_safe(artifact.get("args") or {}),
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        except Exception:
-            args_key = "{}"
-        return {
-            "tool": str(artifact.get("tool") or "unknown"),
-            "error_type": str(artifact.get("error_type") or "unknown"),
-            "args": args_key[:500],
-        }
-
-    def _update_tool_error_streak(
-        self,
-        state: GraphState,
-        tool_artifacts: list[dict[str, Any]] | None,
-    ) -> None:
-        context = GraphStateView(state).context_copy()
-        errors = [
-            artifact
-            for artifact in tool_artifacts or []
-            if isinstance(artifact, dict) and artifact.get("status") == "error"
-        ]
-        if not errors:
-            context.pop("tool_error_streak", None)
-            state["context"] = context
-            return
-
-        signature = self._tool_error_signature(errors[0])
-        prior = context.get("tool_error_streak")
-        prior_signature = prior.get("signature") if isinstance(prior, dict) else None
-        try:
-            prior_count = int(prior.get("count", 0)) if isinstance(prior, dict) else 0
-        except Exception:
-            prior_count = 0
-        count = prior_count + 1 if prior_signature == signature else 1
-        limit = max(1, int(getattr(settings, "tool_execution_consecutive_errors_limit", 3) or 3))
-        context["tool_error_streak"] = {
-            "count": count,
-            "limit": limit,
-            "signature": signature,
-        }
-        state["context"] = context

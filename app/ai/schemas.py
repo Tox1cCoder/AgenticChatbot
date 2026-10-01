@@ -154,8 +154,6 @@ class GraphContext(TypedDict, total=False):
     has_existing_plan: bool
     tool_artifacts: list[dict[str, Any]]
     tool_images: list[dict[str, Any]]
-    pending_action_requests: list[dict[str, Any]]
-    interrupt_metadata: dict[str, Any]
     generate_plan_response: bool
     generate_final_summary: bool
     final_summary_generated: bool

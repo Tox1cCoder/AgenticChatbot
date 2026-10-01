@@ -324,32 +324,6 @@ def _specialist_provenance(*artifacts: dict) -> SimpleNamespace:
     return SimpleNamespace(artifacts=list(artifacts), images=[])
 
 
-def test_specialist_tool_results_track_same_error_streak(monkeypatch):
-    monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 2, raising=False)
-    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-    state = {"messages": [], "context": {}}
-
-    artifact = {
-        "tool_call_id": "call-1",
-        "tool": "read_file",
-        "args": {"path": "missing.txt"},
-        "status": "error",
-        "error_type": "not_found",
-        "output": "missing",
-    }
-
-    graph._record_specialist_tool_results(state, _specialist_provenance(artifact))
-    graph._record_specialist_tool_results(
-        state, _specialist_provenance({**artifact, "tool_call_id": "call-2"})
-    )
-
-    streak = state["context"]["tool_error_streak"]
-    assert streak["count"] == 2
-    assert streak["limit"] == 2
-    assert streak["signature"]["tool"] == "read_file"
-    assert streak["signature"]["args"] == '{"path":"missing.txt"}'
-
-
 def test_specialist_tool_results_lift_but_do_not_persist_internal_rich_candidates():
     graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     state = {"messages": [], "context": {}}
