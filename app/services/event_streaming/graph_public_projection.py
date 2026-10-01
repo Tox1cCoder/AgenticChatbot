@@ -60,6 +60,8 @@ class StreamProjectionContext:
     internal_content_only: bool = True
     accumulated_content: str = ""
     accumulated_thinking: str = ""
+    last_reasoning_run_id: str | None = None
+    reasoning_break_pending: bool = False
     subagent_content: dict[tuple[str, str], str] = field(default_factory=dict)
     last_state_values: dict[str, Any] | None = None
     current_tool_calls: dict[Any, dict[str, Any]] = field(default_factory=dict)
@@ -248,6 +250,21 @@ class GraphPublicStreamProjector:
             ctx.internal_content_only = False
             text = data.get("text", "")
             if text:
+                if (
+                    ctx.accumulated_thinking
+                    and (
+                        ctx.reasoning_break_pending
+                        or (
+                            ctx.last_reasoning_run_id is not None
+                            and event.run_id is not None
+                            and event.run_id != ctx.last_reasoning_run_id
+                        )
+                    )
+                ):
+                    text = "\n\n" + text.lstrip("\n")
+                ctx.reasoning_break_pending = False
+                if event.run_id is not None:
+                    ctx.last_reasoning_run_id = event.run_id
                 ctx.accumulated_thinking += text
                 yield make_event("reasoning_delta", sequence=0, data={"text": text})
             return
@@ -272,6 +289,8 @@ class GraphPublicStreamProjector:
                 return
             if dedupe_key:
                 ctx.emitted_tool_result_ids.add(dedupe_key)
+            if ctx.accumulated_thinking:
+                ctx.reasoning_break_pending = True
             yield self._tool_execution_end_event(
                 tool_call_id=tool_call_id,
                 tool_name=event.tool_name,

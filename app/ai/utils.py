@@ -116,9 +116,15 @@ def _parse_inline_image_block(item: Any) -> dict[str, str] | None:
             return {"data": data, "mime": mime or "image/png"}
 
     if item_type in ("image", "media"):
-        data = _coerce_image_b64(item.get("data"))
+        data = _coerce_image_b64(item.get("data") or item.get("base64"))
         if data:
-            return {"data": data, "mime": item.get("mime_type") or "image/png"}
+            mime = item.get("mime_type") or (
+                "image/jpeg" if data.startswith("/9j/") else "image/png"
+            )
+            return {
+                "data": data,
+                "mime": mime,
+            }
         data, mime = _parse_image_data_uri(item.get("url") or item.get("image"))
         if data:
             return {"data": data, "mime": mime or item.get("mime_type") or "image/png"}

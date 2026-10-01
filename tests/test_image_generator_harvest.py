@@ -12,6 +12,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from app.ai.agents.image_generator_agent import ImageGenerationOutcome, ImageGeneratorAgent
+from app.ai.utils import extract_inline_images_from_content
 from app.usage.types import NormalizedUsage
 
 
@@ -21,6 +22,13 @@ def _bare_agent() -> ImageGeneratorAgent:
     agent.default_aspect_ratio = "1:1"
     agent.max_images = 4
     return agent
+
+
+def test_inline_jpeg_without_mime_keeps_its_file_type():
+    """Image-model blocks can omit MIME even when the base64 is JPEG."""
+    images = extract_inline_images_from_content([{"type": "image", "base64": "/9j/AA=="}])
+
+    assert images == [{"data": "/9j/AA==", "mime": "image/jpeg"}]
 
 
 def test_harvest_inline_images_wraps_records_and_caps():

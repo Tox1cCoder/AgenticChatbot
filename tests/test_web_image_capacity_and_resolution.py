@@ -439,11 +439,56 @@ async def test_losing_every_candidate_is_reported() -> None:
 
 
 @pytest.mark.asyncio
-async def test_visual_intent_without_an_image_query_is_reported() -> None:
+async def test_visual_intent_without_an_image_query_searches_for_the_subject() -> None:
     _session, bundle = await _run(text_count=5, image_query=None)
 
-    assert [failure.code for failure in bundle.failures] == ["image_query_missing"]
-    assert bundle.images == ()
+    assert len(bundle.images) == 4
+    assert bundle.failures == ()
+
+
+async def test_image_query_without_visual_intent_searches_for_images() -> None:
+    _session, bundle = await _run(
+        text_count=5,
+        visual_intent="none",
+        image_query="Yamaha Mio M3 motorcycle photo",
+    )
+
+    assert len(bundle.images) == 4
+    assert bundle.visual_intent == "figure"
+
+
+async def test_visual_followup_can_reuse_the_text_query_once() -> None:
+    service = WebResearchService(
+        resolver=ProviderResolver(
+            text=(SaturatingText(5),), images=(UnrelatedImages(2),)
+        ),
+        image_service=RecordingImageService(),
+        now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc),
+    )
+    session = service.new_session(_scope(), ResearchBudget(), mode="quick")
+    first = await session.search(
+        ResearchRequest(query="Yamaha Mio M3", objective="identify the model")
+    )
+    second = await session.search(
+        ResearchRequest(
+            query="Yamaha Mio M3",
+            objective="show the motorcycle",
+            visual_intent="figure",
+            image_query="Yamaha Mio M3 motorcycle photo",
+        )
+    )
+    repeated = await session.search(
+        ResearchRequest(
+            query="Yamaha Mio M3",
+            objective="show the motorcycle",
+            visual_intent="figure",
+            image_query="Yamaha Mio M3 motorcycle photo",
+        )
+    )
+
+    assert first.images == ()
+    assert len(second.images) == 2
+    assert [failure.code for failure in repeated.failures] == ["duplicate_query"]
 
 
 @pytest.mark.asyncio

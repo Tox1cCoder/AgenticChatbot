@@ -20,8 +20,11 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from app.ai.image_generation import MediaDeliveryService, use_media_delivery_service
+from app.ai.image_generation.emitter import ImagePreviewPublisher
 from app.ai.schemas import AgentType
-from app.ai.workflow.finalization import OutputValidationError, PublicContentPolicy
+from app.ai.workflow.contracts import WorkerTask
+from app.ai.workflow.finalization import OutputValidationError, OutputValidator, PublicContentPolicy
 from app.ai.workflow.specialists import (
     SpecialistDefinition,
     SpecialistFactory,
@@ -140,6 +143,105 @@ async def test_an_ordinary_answer_is_untouched():
 
     assert outcome.response.message.content == "It is 4."
     assert model.call_count == 1
+
+
+async def test_image_specialist_publishes_inline_base64_image_without_text():
+    """An image-only model reply is a publishable generated image."""
+    image_agent = SimpleNamespace(
+        model_name="gemini-3-pro-image-preview",
+        max_images=2,
+        default_aspect_ratio="1:1",
+    )
+    model = scripted_model(
+        [AIMessage(content=[{"type": "image", "base64": "YWJj", "mime_type": "image/jpeg"}])]
+    )
+    factory = _factory(model)
+    factory._definitions["image_generator_agent"] = SpecialistDefinition(
+        agent_id="image_generator_agent",
+        agent_type=AgentType.IMAGE_GENERATOR,
+        model_config_key="image_generator",
+        system_prompt_factory=lambda request: "Generate an image.",
+        tool_factory=lambda request: [],
+        agent=image_agent,
+        output_policy_ids=("public_content", "image_delivery"),
+    )
+
+    class Storage:
+        calls = 0
+
+        def store(self, *, conversation_id, user_id, mime, data_b64, name):
+            self.calls += 1
+            assert (mime, data_b64) == ("image/jpeg", "YWJj")
+            return {"image_id": "image-1", "url": "/chat-images/image-1", "mime": mime}
+
+    storage = Storage()
+    media = MediaDeliveryService(
+        storage=storage,
+        conversation_id="conversation-1",
+        user_id="user-1",
+        preview_publisher=ImagePreviewPublisher(enabled=False, max_b64_chars=100),
+    )
+
+    with use_media_delivery_service(media):
+        outcome = await factory.invoke(
+            _request(
+                agent_id="image_generator_agent",
+                messages=[HumanMessage(content="draw a fox")],
+            )
+        )
+    validated = await OutputValidator().validate(outcome, {})
+
+    assert validated.response.message.content
+    assert validated.response.metadata["images"] == [
+        {
+            "data": "YWJj",
+            "mime": "image/jpeg",
+            "prompt": "draw a fox",
+            "model": "gemini-3-pro-image-preview",
+            "aspect_ratio": "1:1",
+            "stored_ref": {
+                "image_id": "image-1",
+                "url": "/chat-images/image-1",
+                "mime": "image/jpeg",
+                "name": "generated-image",
+            },
+        }
+    ]
+    assert validated.provenance.images == tuple(validated.response.metadata["images"])
+    assert storage.calls == 1
+    assert model.call_count == 1
+
+
+async def test_image_worker_returns_inline_image_to_planning_agent():
+    image_agent = SimpleNamespace(
+        model_name="gemini-3-pro-image-preview",
+        max_images=1,
+        default_aspect_ratio="1:1",
+    )
+    model = scripted_model([AIMessage(content=[{"type": "image", "base64": "YWJj"}])])
+    factory = _factory(model)
+    factory._definitions["image_generator_agent"] = SpecialistDefinition(
+        agent_id="image_generator_agent",
+        agent_type=AgentType.IMAGE_GENERATOR,
+        model_config_key="image_generator",
+        system_prompt_factory=lambda request: "Generate an image.",
+        tool_factory=lambda request: [],
+        agent=image_agent,
+    )
+    result = await factory.invoke_worker(
+        _request(agent_id="image_generator_agent", messages=[HumanMessage(content="draw a fox")]),
+        task=WorkerTask(
+            dispatch_id="d1",
+            task_id="t1",
+            position=0,
+            objective="draw a fox",
+            agent_id="image_generator_agent",
+        ),
+    )
+
+    assert result.status == "completed"
+    assert result.content
+    assert result.images[0]["data"] == "YWJj"
 
 
 @pytest.mark.asyncio

@@ -270,6 +270,13 @@ class WebResearchSession:
         return bundle
 
     async def _search(self, request: ResearchRequest) -> WebEvidenceBundle:
+        # Both image fields are optional in the model-facing tool schema. A
+        # partially specified visual request should still reach image search.
+        image_query = str(request.image_query or "").strip()
+        if image_query and request.visual_intent == "none":
+            request = request.model_copy(update={"visual_intent": "figure"})
+        elif request.visual_intent != "none" and not image_query:
+            request = request.model_copy(update={"image_query": request.query})
         if self._visual_intent == "none" or request.visual_intent == "gallery":
             self._visual_intent = request.visual_intent
         self._operation_index += 1
@@ -320,6 +327,8 @@ class WebResearchSession:
             normalized.start_date,
             normalized.end_date,
             normalized.include_domains,
+            request.visual_intent,
+            request.image_query or "",
         )
         refusal = self.budget.reserve_search(normalized.query, scope=search_scope)
         if refusal is not None:
@@ -344,19 +353,6 @@ class WebResearchSession:
             )
         )
         wants_images = request.visual_intent != "none"
-        gate_failures: tuple[ResearchFailure, ...] = ()
-        if wants_images and not request.image_query:
-            # Silence here read as "the provider found nothing". Name it, so the
-            # model can retry with the subject it forgot to state.
-            wants_images = False
-            gate_failures = (
-                ResearchFailure(
-                    operation="image_search",
-                    provider="server",
-                    code="image_query_missing",
-                    retryable=False,
-                ),
-            )
         image_task = (
             asyncio.create_task(
                 self._call_chain(
@@ -427,7 +423,6 @@ class WebResearchSession:
             failures=(
                 *text_failures,
                 *image_failures,
-                *gate_failures,
                 *quota_failures,
                 *capacity_failures,
                 *image_fetch_failures,

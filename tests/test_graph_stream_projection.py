@@ -64,6 +64,73 @@ def test_message_delta_emits_cumulative_delta_only():
     assert ctx.accumulated_content == "Hello, world"
 
 
+def test_reasoning_from_separate_model_runs_has_paragraph_boundary():
+    projector = _make_projector()
+    ctx = StreamProjectionContext()
+
+    first = list(
+        projector.map_event(
+            make_event(
+                "reasoning_delta",
+                sequence=1,
+                run_id="research-1",
+                data={"text": "**Checking models**\nThe first result is old."},
+            ),
+            ctx,
+        )
+    )
+    second = list(
+        projector.map_event(
+            make_event(
+                "reasoning_delta",
+                sequence=2,
+                run_id="research-2",
+                data={"text": "**Searching for visuals**\nThe image is missing."},
+            ),
+            ctx,
+        )
+    )
+
+    assert first[0].data["text"] == "**Checking models**\nThe first result is old."
+    assert second[0].data["text"].startswith("\n\n**Searching for visuals**")
+    assert "old.\n\n**Searching" in ctx.accumulated_thinking
+
+
+def test_reasoning_after_a_web_tool_has_paragraph_boundary_without_run_id():
+    projector = _make_projector()
+    ctx = StreamProjectionContext()
+    list(
+        projector.map_event(
+            make_event("reasoning_delta", sequence=1, data={"text": "The sources are old."}),
+            ctx,
+        )
+    )
+    list(
+        projector.map_event(
+            make_event(
+                "tool_execution_end",
+                sequence=2,
+                tool_name="web_search",
+                tool_call_id="search-1",
+                data={"output": "{}"},
+            ),
+            ctx,
+        )
+    )
+    resumed = list(
+        projector.map_event(
+            make_event(
+                "reasoning_delta",
+                sequence=3,
+                data={"text": "**Searching for visuals**\nTry an image query."},
+            ),
+            ctx,
+        )
+    )
+
+    assert resumed[0].data["text"].startswith("\n\n**Searching for visuals**")
+
+
 def test_tool_call_available_dedupes_by_tool_call_id():
     projector = _make_projector()
     ctx = StreamProjectionContext()

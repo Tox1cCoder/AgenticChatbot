@@ -199,6 +199,7 @@ async def test_web_search_uses_the_exact_session_from_tool_context() -> None:
     assert session.requests[0].image_query == "Aurora interface"
     public = json.loads(raw)
     assert public["sources"][0]["source_id"] == "S1"
+    assert public["image_candidate_count"] == 1
     assert "images" not in public
     assert "I1" not in raw
     assert "/web-images/" not in raw

@@ -614,6 +614,17 @@ def test_synthesis_aggregates_artifacts_and_images():
     assert "artifact_provenance" in outcome.provenance.output_policy_ids
 
 
+def test_synthesis_preserves_generated_image_from_worker():
+    image = {"data": "YWJj", "mime": "image/png", "prompt": "draw a fox"}
+    outcome = build_planning_outcome(
+        content="Here is the image.",
+        results=[_result("d1", "t1", 0, agent_id="image_generator_agent", images=(image,))],
+    )
+
+    assert outcome.response.metadata["images"] == [image]
+    assert outcome.provenance.images == (image,)
+
+
 def test_worker_output_is_rendered_as_untrusted_data():
     payload = render_worker_results(
         "summarize",

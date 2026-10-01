@@ -26,7 +26,10 @@ WEB_SEARCH_DESCRIPTION = (
     "identity art, photo, diagram, map, or chart to inspect. Resolve pronouns "
     "from the conversation and add a version or year when appearance changes. "
     "Validated candidates are shown privately on the next model call; no image "
-    "is published unless selected with [[image:I#]].\n\n"
+    "is published unless selected with [[image:I#]]. This tool also performs "
+    "image search; do not look for a separate image-search tool. The result "
+    "reports image_candidate_count; inspect the labeled pixels on the next "
+    "model call before selecting a candidate.\n\n"
     "Each result lists only the sources that search newly admitted, with "
     "new_source_count and total_source_count. An empty list with a non-zero "
     "total means this search added nothing to evidence you already hold, not "
@@ -180,6 +183,7 @@ def _project(bundle: Any, *, searches_used: int) -> str:
         # session already knows.
         "new_source_count": len(public_sources),
         "total_source_count": len(bundle.sources),
+        "image_candidate_count": len(bundle.images),
         "failures": [
             {
                 "operation": failure.operation,

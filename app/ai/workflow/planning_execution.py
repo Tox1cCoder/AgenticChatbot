@@ -620,7 +620,11 @@ def build_planning_outcome(*, content: str, results: Sequence[WorkerResult]) -> 
         if image.get("type") in {"image", "image_group"}
         and not str(image.get("id") or "").startswith("image:web:")
     )
-    images = tuple(image for image in all_images if image.get("image_id"))
+    images = tuple(
+        image
+        for image in all_images
+        if image.get("image_id") or image.get("stored_ref") or image.get("data")
+    )
 
     policies: tuple[str, ...] = ("public_content",)
     if evidence:

@@ -26,9 +26,11 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from app.ai.hitl_config import policy_from_context
+from app.ai.image_generation import current_media_delivery_service
 from app.ai.research_budget import get_research_budget
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.tool_context import rich_response_capable_from_context
+from app.ai.utils import coerce_response_text, extract_inline_images_from_content
 from app.ai.web_research.contracts import ResearchScope
 from app.ai.web_research.grounding import GroundingParser, GroundingResolution
 from app.ai.web_research.providers import (
@@ -478,7 +480,16 @@ class SpecialistFactory:
             if build.web_research_session is not None:
                 await build.web_research_session.abort()
             raise
-        if not _final_text(produced).strip():
+        outcome = self._to_outcome(
+            definition,
+            request,
+            produced,
+            build.tool_execution,
+            build.accountant,
+            grounding=grounding,
+            web_research_session=build.web_research_session,
+        )
+        if not outcome.response.message.content.strip() and not outcome.provenance.images:
             # Why the model returned no text is not established, and a recovery
             # here would hide the evidence needed to find out. The turn fails,
             # but retriably (see `PublicContentPolicy`), and this line carries
@@ -490,15 +501,7 @@ class SpecialistFactory:
                 len(produced),
                 getattr(produced[-1], "content", None) if produced else None,
             )
-        return self._to_outcome(
-            definition,
-            request,
-            produced,
-            build.tool_execution,
-            build.accountant,
-            grounding=grounding,
-            web_research_session=build.web_research_session,
-        )
+        return outcome
 
     async def invoke_worker(self, request: SpecialistRequest, *, task: WorkerTask) -> WorkerResult:
         """Run a specialist as a Planning worker.
@@ -560,7 +563,9 @@ class SpecialistFactory:
             return _failed_worker(task, "tool_execution_failed")
 
         produced = self._produced_messages(request, result)
-        grounded_images = tuple(tool_execution.images)
+        grounded_images = tuple(
+            [*tool_execution.images, *self._inline_generated_images(definition, request, produced)]
+        )
         grounded_sources: tuple[dict[str, Any], ...] = ()
         if web_research_session is not None:
             resolution = GroundingParser(web_research_session).resolve(_final_text(produced))
@@ -580,7 +585,7 @@ class SpecialistFactory:
             position=task.position,
             agent_id=request.agent_id,
             status="completed",
-            content=_final_text(produced),
+            content=_final_text(produced) or ("Here is your image." if grounded_images else ""),
             artifacts=tuple(tool_execution.artifacts),
             evidence=grounded_sources,
             images=grounded_images,
@@ -820,7 +825,10 @@ class SpecialistFactory:
         web_research_session: Any = None,
     ) -> ResponseOutcome:
         artifacts = list(tool_execution.artifacts)
-        images = list(tool_execution.images)
+        images = [
+            *tool_execution.images,
+            *self._inline_generated_images(definition, request, produced),
+        ]
         metadata: dict[str, Any] = {"images": images} if images else {}
         if getattr(tool_execution, "mutation_outcome_unknown", False):
             # Travels on the response so the continuation decision can read it
@@ -852,7 +860,10 @@ class SpecialistFactory:
         response = AgentResponse(
             agent_type=definition.agent_type,
             agent_id=request.agent_id,
-            message=AgentMessage(role=MessageRole.ASSISTANT, content=_final_text(produced)),
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content=_final_text(produced) or ("Here is your image." if images else ""),
+            ),
             metadata=metadata,
             tool_artifacts=artifacts or None,
         )
@@ -868,6 +879,54 @@ class SpecialistFactory:
                 private_messages=tuple(produced),
             ),
         )
+
+    @staticmethod
+    def _inline_generated_images(
+        definition: SpecialistDefinition, request: SpecialistRequest, produced: list[Any]
+    ) -> list[dict[str, Any]]:
+        """Capture images from the final image specialist reply, with delivery provenance."""
+        if definition.agent_type == AgentType.IMAGE_GENERATOR:
+            final_message = next(
+                (
+                    message
+                    for message in reversed(produced)
+                    if getattr(message, "type", None) == "ai"
+                ),
+                None,
+            )
+            if final_message is not None and not getattr(final_message, "tool_calls", None):
+                prompt = next(
+                    (
+                        coerce_response_text(message.content).strip()
+                        for message in reversed(request.messages)
+                        if isinstance(message, HumanMessage)
+                    ),
+                    "",
+                )
+                media = current_media_delivery_service()
+                max_images = max(1, getattr(definition.agent, "max_images", 1))
+                images: list[dict[str, Any]] = []
+                for index, inline in enumerate(
+                    extract_inline_images_from_content(final_message.content)[:max_images]
+                ):
+                    image = {
+                        "data": inline["data"],
+                        "mime": inline["mime"],
+                        "prompt": prompt,
+                        "model": getattr(definition.agent, "model_name", ""),
+                        "aspect_ratio": getattr(definition.agent, "default_aspect_ratio", "1:1"),
+                    }
+                    if media is not None:
+                        descriptor = media.persist_final(
+                            image_index=index,
+                            mime=inline["mime"],
+                            data_b64=inline["data"],
+                        )
+                        if descriptor is not None:
+                            image["stored_ref"] = descriptor
+                    images.append(image)
+                return images
+        return []
 
 
 def _outcome_budget(outcome: Any) -> dict[str, Any] | None:
