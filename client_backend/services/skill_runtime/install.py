@@ -185,6 +185,61 @@ def _compute_source_hash(source: Path) -> str:
         raise SkillRuntimeError(UNSAFE_BUNDLE_PATH, str(exc)) from exc
 
 
+class _StageOwnership:
+    """Whether a background cleanup has taken over an install's stage.
+
+    Set when preparation is cancelled mid-flight: the worker thread may still be
+    writing into the stage, so only the cleanup that waits for it may remove it.
+    """
+
+    __slots__ = ("deferred",)
+
+    def __init__(self) -> None:
+        self.deferred = False
+
+
+async def _copy_verified_bundle(source_skill: SkillMetadata, stage: Path) -> None:
+    """Copy the bundle into ``stage`` and refuse a copy whose hash differs."""
+    await _settled_to_thread(
+        shutil.copytree,
+        source_skill.bundle_root,
+        stage,
+        symlinks=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git", ".venv"),
+    )
+    copied_hash = await _settled_to_thread(_compute_source_hash, stage)
+    if copied_hash != source_skill.source_hash:
+        raise SkillRuntimeError(
+            SKILL_INSTALL_INVALID,
+            "bundle changed while it was being copied; request a new preview",
+        )
+
+
+async def _write_install_metadata(
+    source_skill: SkillMetadata,
+    stage: Path,
+    *,
+    source_kind: Literal["path", "upload"],
+) -> dict:
+    """Write the stage's ``install.json`` and return its payload."""
+    install_payload = {
+        "bundle_name": source_skill.name,
+        "source_hash": source_skill.source_hash,
+        "source": "upload" if source_kind == "upload" else "profile",
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "enabled": True,
+        "installed": True,
+    }
+    if source_kind == "path":
+        install_payload["source_path"] = str(source_skill.bundle_root)
+    await _settled_to_thread(
+        (stage / _INSTALL_METADATA_FILENAME).write_text,
+        json.dumps(install_payload, indent=2),
+        encoding="utf-8",
+    )
+    return install_payload
+
+
 def _read_install_metadata(bundle_dir: Path) -> dict | None:
     path = bundle_dir / _INSTALL_METADATA_FILENAME
     if not path.is_file():
@@ -380,111 +435,27 @@ class SkillBundleInstaller:
             if not is_under_root(path, install_root):
                 raise SkillRuntimeError(UNSAFE_BUNDLE_PATH, "install path escapes the skills root")
 
-        runtime_cleanup_deferred = False
+        stage_ownership = _StageOwnership()
         try:
             await self._notify(observer, "copying")
-            await _settled_to_thread(
-                shutil.copytree,
-                source_skill.bundle_root,
-                stage,
-                symlinks=True,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git", ".venv"),
-            )
-            copied_hash = await _settled_to_thread(_compute_source_hash, stage)
-            if copied_hash != source_skill.source_hash:
-                raise SkillRuntimeError(
-                    SKILL_INSTALL_INVALID,
-                    "bundle changed while it was being copied; request a new preview",
-                )
+            await _copy_verified_bundle(source_skill, stage)
             relative_skill_path = source_skill.path.relative_to(source_skill.bundle_root)
-            install_payload = {
-                "bundle_name": source_skill.name,
-                "source_hash": source_skill.source_hash,
-                "source": "upload" if spec.source_kind == "upload" else "profile",
-                "installed_at": datetime.now(timezone.utc).isoformat(),
-                "enabled": True,
-                "installed": True,
-            }
-            if spec.source_kind == "path":
-                install_payload["source_path"] = str(source_skill.bundle_root)
-            await _settled_to_thread(
-                (stage / _INSTALL_METADATA_FILENAME).write_text,
-                json.dumps(install_payload, indent=2),
-                encoding="utf-8",
+            install_payload = await _write_install_metadata(
+                source_skill, stage, source_kind=spec.source_kind
             )
-            installed_skill = SkillMetadata(
-                name=source_skill.name,
-                path=stage / relative_skill_path,
-                bundle_root=stage,
-                source_hash=source_skill.source_hash,
-                executable_assets=self._registry._discover_executable_assets(stage),
-                description=source_skill.description,
-                content=source_skill.content,
-                category=source_skill.category,
-                tags=list(source_skill.tags),
-                install_metadata=install_payload,
-                declared_secrets=list(source_skill.declared_secrets),
+            installed_skill = self._staged_skill(
+                source_skill, stage, relative_skill_path, install_payload
             )
-            if installed_skill.executable_assets["python_project"]:
-                await self._notify(observer, "preparingRuntime")
-                stage_lease = filelock.FileLock(
-                    str(stage / PREPARATION_LEASE_FILENAME),
-                    thread_local=False,
-                )
-                try:
-                    await _settled_to_thread(
-                        stage_lease.acquire,
-                        timeout=SETUP_TIMEOUT_SECONDS,
-                    )
-                except BaseException:
-                    await asyncio.to_thread(stage_lease.release)
-                    (stage / PREPARATION_LEASE_FILENAME).unlink(missing_ok=True)
-                    raise
-                preparation = asyncio.create_task(
-                    asyncio.to_thread(
-                        _prepare_environment_with_runtime_lock,
-                        self._environment,
-                        installed_skill,
-                        approve_setup=spec.approve_setup,
-                    )
-                )
-                try:
-                    runtime = await asyncio.shield(preparation)
-                except asyncio.CancelledError:
-                    runtime_cleanup_deferred = True
-                    cleanup = asyncio.create_task(
-                        _cleanup_cancelled_preparation(
-                            preparation,
-                            stage=stage,
-                            stage_lease=stage_lease,
-                        )
-                    )
-                    _track_background_cleanup(cleanup)
-                    raise
-                finally:
-                    if not runtime_cleanup_deferred:
-                        await _settled_to_thread(stage_lease.release)
-                        (stage / PREPARATION_LEASE_FILENAME).unlink(missing_ok=True)
-                runtime_status = str(runtime.get("status") or "not_ready")
-            elif (
-                installed_skill.executable_assets["bin"]
-                or installed_skill.executable_assets["scripts"]
-            ):
-                runtime_status = "ready"
-            else:
-                runtime_status = "instruction_only"
+            runtime_status = await self._prepare_staged_runtime(
+                installed_skill,
+                stage,
+                approve_setup=spec.approve_setup,
+                observer=observer,
+                stage_ownership=stage_ownership,
+            )
         except BaseException:
-            if not runtime_cleanup_deferred and stage.exists():
-                await _settled_to_thread(shutil.rmtree, stage)
-            if not runtime_cleanup_deferred and (
-                existing is None or existing.source_hash != source_skill.source_hash
-            ):
-                with contextlib.suppress(Exception):
-                    await _settled_to_thread(
-                        self._environment.remove_runtime,
-                        source_skill.name,
-                        source_skill.source_hash,
-                    )
+            if not stage_ownership.deferred:
+                await self._discard_failed_stage(source_skill, existing, stage)
             raise
 
         return PreparedSkillInstall(
@@ -498,6 +469,121 @@ class SkillBundleInstaller:
             runtime_status=runtime_status,
             previous_source_hash=existing.source_hash if existing is not None else None,
         )
+
+    def _staged_skill(
+        self,
+        source_skill: SkillMetadata,
+        stage: Path,
+        relative_skill_path: Path,
+        install_payload: dict,
+    ) -> SkillMetadata:
+        """The source skill as it will be once ``stage`` is promoted."""
+        return SkillMetadata(
+            name=source_skill.name,
+            path=stage / relative_skill_path,
+            bundle_root=stage,
+            source_hash=source_skill.source_hash,
+            executable_assets=self._registry._discover_executable_assets(stage),
+            description=source_skill.description,
+            content=source_skill.content,
+            category=source_skill.category,
+            tags=list(source_skill.tags),
+            install_metadata=install_payload,
+            declared_secrets=list(source_skill.declared_secrets),
+        )
+
+    async def _prepare_staged_runtime(
+        self,
+        installed_skill: SkillMetadata,
+        stage: Path,
+        *,
+        approve_setup: bool,
+        observer: SkillInstallObserver | None,
+        stage_ownership: _StageOwnership,
+    ) -> str:
+        """Prepare a Python project's runtime in the stage; return the runtime status."""
+        assets = installed_skill.executable_assets
+        if assets["python_project"]:
+            await self._notify(observer, "preparingRuntime")
+            runtime = await self._prepare_runtime_under_stage_lease(
+                installed_skill,
+                stage,
+                approve_setup=approve_setup,
+                stage_ownership=stage_ownership,
+            )
+            return str(runtime.get("status") or "not_ready")
+        if assets["bin"] or assets["scripts"]:
+            return "ready"
+        return "instruction_only"
+
+    async def _prepare_runtime_under_stage_lease(
+        self,
+        installed_skill: SkillMetadata,
+        stage: Path,
+        *,
+        approve_setup: bool,
+        stage_ownership: _StageOwnership,
+    ) -> dict:
+        """Run environment preparation while holding the stage's preparation lease.
+
+        A cancelled caller hands the stage to a background cleanup that waits for
+        the worker thread, and marks ``stage_ownership`` so nothing else removes it.
+        """
+        stage_lease = filelock.FileLock(
+            str(stage / PREPARATION_LEASE_FILENAME),
+            thread_local=False,
+        )
+        try:
+            await _settled_to_thread(
+                stage_lease.acquire,
+                timeout=SETUP_TIMEOUT_SECONDS,
+            )
+        except BaseException:
+            await asyncio.to_thread(stage_lease.release)
+            (stage / PREPARATION_LEASE_FILENAME).unlink(missing_ok=True)
+            raise
+        preparation = asyncio.create_task(
+            asyncio.to_thread(
+                _prepare_environment_with_runtime_lock,
+                self._environment,
+                installed_skill,
+                approve_setup=approve_setup,
+            )
+        )
+        try:
+            return await asyncio.shield(preparation)
+        except asyncio.CancelledError:
+            stage_ownership.deferred = True
+            cleanup = asyncio.create_task(
+                _cleanup_cancelled_preparation(
+                    preparation,
+                    stage=stage,
+                    stage_lease=stage_lease,
+                )
+            )
+            _track_background_cleanup(cleanup)
+            raise
+        finally:
+            if not stage_ownership.deferred:
+                await _settled_to_thread(stage_lease.release)
+                (stage / PREPARATION_LEASE_FILENAME).unlink(missing_ok=True)
+
+    async def _discard_failed_stage(
+        self,
+        source_skill: SkillMetadata,
+        existing: SkillMetadata | None,
+        stage: Path,
+    ) -> None:
+        """Remove a failed install's stage, and its runtime unless the installed skill uses it."""
+        if stage.exists():
+            await _settled_to_thread(shutil.rmtree, stage)
+        if existing is None or existing.source_hash != source_skill.source_hash:
+            with contextlib.suppress(Exception):
+                await _settled_to_thread(
+                    self._environment.remove_runtime,
+                    source_skill.name,
+                    source_skill.source_hash,
+                )
 
     @staticmethod
     def _resolve_previous_bundle(

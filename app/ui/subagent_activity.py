@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 _TERMINAL_BLOCKED_STATUSES = {"failed", "timeout", "requires_approval"}
@@ -219,6 +221,98 @@ def _build_activity_view(
     }
 
 
+@dataclass
+class _ActivityParts:
+    """What the metadata sources contribute to one activity view."""
+
+    results: list[dict[str, Any]] = field(default_factory=list)
+    rationales: list[str] = field(default_factory=list)
+    dispatch_statuses: list[str] = field(default_factory=list)
+
+    def add_dispatch(self, dispatch: dict[str, Any]) -> None:
+        _append_unique_text(self.rationales, dispatch.get("rationale"))
+        status = str(dispatch.get("status") or "").strip().lower()
+        if status in _AGGREGATE_STATUSES:
+            self.dispatch_statuses.append(status)
+
+    def add_results(self, entries: Any) -> None:
+        for entry in _as_list(entries):
+            normalized = _normalize_result(entry)
+            if normalized:
+                self.results.append(normalized)
+
+
+def _collect_dispatches(parts: _ActivityParts, value: Any) -> None:
+    for dispatch in _as_list(value):
+        if isinstance(dispatch, dict):
+            parts.add_dispatch(dispatch)
+
+
+def _collect_results(parts: _ActivityParts, value: Any) -> None:
+    parts.add_results(value)
+
+
+def _is_dispatch_artifact(artifact: dict[str, Any]) -> bool:
+    tool_name = artifact.get("tool") or artifact.get("tool_name")
+    render = artifact.get("render")
+    render_type = render.get("type") if isinstance(render, dict) else None
+    return tool_name == "dispatch_subagents" or render_type == "subagent_dispatch"
+
+
+def _collect_dispatch_artifacts(parts: _ActivityParts, value: Any) -> None:
+    for artifact in _as_list(value):
+        if not isinstance(artifact, dict) or not _is_dispatch_artifact(artifact):
+            continue
+        payload = _extract_structured_dispatch_payload(artifact)
+        if not payload:
+            continue
+        parts.add_dispatch(payload)
+        parts.add_results(payload.get("results"))
+
+
+# Applied in this order: the order decides which dispatch status is last and
+# which duplicate result survives deduplication.
+_METADATA_COLLECTORS: tuple[tuple[str, Callable[[_ActivityParts, Any], None]], ...] = (
+    ("subagent_dispatches", _collect_dispatches),
+    ("subagent_results", _collect_results),
+    ("tool_artifacts", _collect_dispatch_artifacts),
+)
+
+
+def _merge_artifacts_by_call_id(existing: list[Any], artifacts: list[Any]) -> list[Any]:
+    seen_ids = {
+        art.get("tool_call_id")
+        for art in existing
+        if isinstance(art, dict) and art.get("tool_call_id")
+    }
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        tc_id = artifact.get("tool_call_id")
+        if tc_id and tc_id in seen_ids:
+            continue
+        existing.append(artifact)
+        if tc_id:
+            seen_ids.add(tc_id)
+    return existing
+
+
+def _attach_worker_artifacts(results: list[dict[str, Any]], worker_artifacts_map: Any) -> None:
+    if not isinstance(worker_artifacts_map, dict) or not worker_artifacts_map or not results:
+        return
+    for result in results:
+        worker_id = str(result.get("id") or "")
+        if not worker_id:
+            continue
+        artifacts = worker_artifacts_map.get(worker_id)
+        if isinstance(artifacts, list) and artifacts:
+            # Don't clobber inline artifacts (e.g. legacy payloads); merge new
+            # ones so the UI shows every observed worker tool invocation.
+            result["artifacts"] = _merge_artifacts_by_call_id(
+                _as_list(result.get("artifacts")), artifacts
+            )
+
+
 def build_subagent_activity_view(message_metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     """Build a compact UI view model for Planning subagent activity.
 
@@ -230,77 +324,15 @@ def build_subagent_activity_view(message_metadata: dict[str, Any] | None) -> dic
     if not isinstance(message_metadata, dict):
         return None
 
-    results: list[dict[str, Any]] = []
-    rationales: list[str] = []
-    dispatch_statuses: list[str] = []
-
-    for dispatch in _as_list(message_metadata.get("subagent_dispatches")):
-        if not isinstance(dispatch, dict):
-            continue
-        _append_unique_text(rationales, dispatch.get("rationale"))
-        status = str(dispatch.get("status") or "").strip().lower()
-        if status in _AGGREGATE_STATUSES:
-            dispatch_statuses.append(status)
-
-    for entry in _as_list(message_metadata.get("subagent_results")):
-        normalized = _normalize_result(entry)
-        if normalized:
-            results.append(normalized)
-
-    for artifact in _as_list(message_metadata.get("tool_artifacts")):
-        if not isinstance(artifact, dict):
-            continue
-        tool_name = artifact.get("tool") or artifact.get("tool_name")
-        render = artifact.get("render")
-        render_type = render.get("type") if isinstance(render, dict) else None
-        if tool_name != "dispatch_subagents" and render_type != "subagent_dispatch":
-            continue
-
-        payload = _extract_structured_dispatch_payload(artifact)
-        if not payload:
-            continue
-
-        _append_unique_text(rationales, payload.get("rationale"))
-        status = str(payload.get("status") or "").strip().lower()
-        if status in _AGGREGATE_STATUSES:
-            dispatch_statuses.append(status)
-
-        for entry in _as_list(payload.get("results")):
-            normalized = _normalize_result(entry)
-            if normalized:
-                results.append(normalized)
-
-    worker_artifacts_map = message_metadata.get("subagent_worker_artifacts")
-    if isinstance(worker_artifacts_map, dict) and worker_artifacts_map and results:
-        for result in results:
-            worker_id = str(result.get("id") or "")
-            if not worker_id:
-                continue
-            artifacts = worker_artifacts_map.get(worker_id)
-            if isinstance(artifacts, list) and artifacts:
-                # Don't clobber inline artifacts (e.g. legacy payloads); merge new
-                # ones so the UI shows every observed worker tool invocation.
-                existing = _as_list(result.get("artifacts"))
-                seen_ids = {
-                    art.get("tool_call_id")
-                    for art in existing
-                    if isinstance(art, dict) and art.get("tool_call_id")
-                }
-                for artifact in artifacts:
-                    if not isinstance(artifact, dict):
-                        continue
-                    tc_id = artifact.get("tool_call_id")
-                    if tc_id and tc_id in seen_ids:
-                        continue
-                    existing.append(artifact)
-                    if tc_id:
-                        seen_ids.add(tc_id)
-                result["artifacts"] = existing
+    parts = _ActivityParts()
+    for key, collect in _METADATA_COLLECTORS:
+        collect(parts, message_metadata.get(key))
+    _attach_worker_artifacts(parts.results, message_metadata.get("subagent_worker_artifacts"))
 
     return _build_activity_view(
-        results=results,
-        rationales=rationales,
-        dispatch_statuses=dispatch_statuses,
+        results=parts.results,
+        rationales=parts.rationales,
+        dispatch_statuses=parts.dispatch_statuses,
     )
 
 

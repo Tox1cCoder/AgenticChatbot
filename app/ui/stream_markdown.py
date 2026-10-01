@@ -235,6 +235,61 @@ def _closes_code_fence(line: str, open_fence: str) -> bool:
     )
 
 
+_MATH_DEPTH_COUNTERS = ("brace", "environment", "left", "group")
+
+# Opening and closing tokens, as (depth counter, step). Commands and bare
+# characters are separate tables: ``\{`` is an escaped brace, not a group.
+_PAIRED_MATH_COMMANDS: dict[str, tuple[str, int]] = {
+    "begin": ("environment", 1),
+    "end": ("environment", -1),
+    "begingroup": ("group", 1),
+    "endgroup": ("group", -1),
+    "left": ("left", 1),
+    "right": ("left", -1),
+}
+_PAIRED_MATH_CHARACTERS: dict[str, tuple[str, int]] = {
+    "{": ("brace", 1),
+    "}": ("brace", -1),
+}
+
+
+def _step_math_pairing(depths: dict[str, int], pairing: tuple[str, int] | None) -> bool:
+    """Apply one opening or closing token; False when a closer has no opener."""
+    if pairing is None:
+        return True
+    counter, step = pairing
+    depth = depths[counter] + step
+    if depth < 0:
+        return False
+    depths[counter] = depth
+    return True
+
+
+def _alignment_outside_environment(depths: dict[str, int], _allows_parameter: bool) -> bool:
+    return depths["environment"] == 0
+
+
+def _parameter_outside_macro_definition(_depths: dict[str, int], allows_parameter: bool) -> bool:
+    return not allows_parameter
+
+
+#: Characters KaTeX rejects at the top level, each with the predicate that
+#: names when it is stray.
+_STRAY_MATH_CHARACTERS: dict[str, Callable[[dict[str, int], bool], bool]] = {
+    "&": _alignment_outside_environment,
+    "#": _parameter_outside_macro_definition,
+}
+
+
+def _math_character_is_unparseable(
+    character: str, depths: dict[str, int], allows_parameter_marker: bool
+) -> bool:
+    if not _step_math_pairing(depths, _PAIRED_MATH_CHARACTERS.get(character)):
+        return True
+    is_stray = _STRAY_MATH_CHARACTERS.get(character)
+    return is_stray is not None and is_stray(depths, allows_parameter_marker)
+
+
 def _math_span_is_unparseable(body: str) -> bool:
     r"""Report whether KaTeX would certainly reject ``body`` as math.
 
@@ -246,10 +301,7 @@ def _math_span_is_unparseable(body: str) -> bool:
     and environments fail just as reliably. Anything else is left alone so
     working math is never rewritten.
     """
-    brace_depth = 0
-    environment_depth = 0
-    left_depth = 0
-    group_depth = 0
+    depths = dict.fromkeys(_MATH_DEPTH_COUNTERS, 0)
     allows_parameter_marker = bool(_MATH_MACRO_DEFINITION_RE.search(body))
     index = 0
     while index < len(body):
@@ -258,39 +310,14 @@ def _math_span_is_unparseable(body: str) -> bool:
             command_match = _MATH_COMMAND_RE.match(body, index)
             if command_match is None:
                 return True  # Trailing backslash: "Expected group after ..."
-            command = command_match.group(1)
-            if command == "begin":
-                environment_depth += 1
-            elif command == "end":
-                if environment_depth == 0:
-                    return True
-                environment_depth -= 1
-            elif command == "begingroup":
-                group_depth += 1
-            elif command == "endgroup":
-                if group_depth == 0:
-                    return True
-                group_depth -= 1
-            elif command == "left":
-                left_depth += 1
-            elif command == "right":
-                if left_depth == 0:
-                    return True
-                left_depth -= 1
+            if not _step_math_pairing(depths, _PAIRED_MATH_COMMANDS.get(command_match.group(1))):
+                return True
             index = command_match.end()
             continue
-        if character == "{":
-            brace_depth += 1
-        elif character == "}":
-            brace_depth -= 1
-            if brace_depth < 0:
-                return True
-        elif (character == "&" and environment_depth == 0) or (
-            character == "#" and not allows_parameter_marker
-        ):
+        if _math_character_is_unparseable(character, depths, allows_parameter_marker):
             return True
         index += 1
-    return bool(brace_depth or environment_depth or left_depth or group_depth)
+    return any(depths.values())
 
 
 def _math_span_is_currency_prose(body: str) -> bool:

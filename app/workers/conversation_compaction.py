@@ -20,7 +20,10 @@ from app.ai.model_factory import ModelFactory
 from app.ai.token_counter import TokenCounter
 from app.core.config import settings
 from app.observability.conversation_compaction import conversation_compaction_metrics
-from app.repositories.conversation_compaction import ConversationCompactionRepository
+from app.repositories.conversation_compaction import (
+    ConversationCompactionRepository,
+    MemoryWrite,
+)
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -163,18 +166,20 @@ class ConversationCompactionWorker:
 
         persisted = self.repository.persist_memory_cas(
             claim,
-            base_summary_version=compaction_input.summary_version,
-            base_cursor=compaction_input.last_summarized_sequence,
-            summary_payload=result.memory.model_dump(),
-            summary_schema_version=1,
-            last_summarized_sequence=result.last_summarized_sequence,
-            source_message_count=len(result.selection.compactable_prefix),
-            source_token_count=result.trigger.token_count,
-            summary_token_count=result.summary_token_count,
-            provider=self.compactor.provider,
-            model=self.compactor.model,
-            tokenizer=result.trigger.token_strategy,
-            prompt_version=self.compactor.prompt_version,
+            MemoryWrite(
+                base_summary_version=compaction_input.summary_version,
+                base_cursor=compaction_input.last_summarized_sequence,
+                summary_payload=result.memory.model_dump(),
+                summary_schema_version=1,
+                last_summarized_sequence=result.last_summarized_sequence,
+                source_message_count=len(result.selection.compactable_prefix),
+                source_token_count=result.trigger.token_count,
+                summary_token_count=result.summary_token_count,
+                provider=self.compactor.provider,
+                model=self.compactor.model,
+                tokenizer=result.trigger.token_strategy,
+                prompt_version=self.compactor.prompt_version,
+            ),
         )
         if not persisted:
             self._retry(claim, "cas_conflict", record_outcome=False)

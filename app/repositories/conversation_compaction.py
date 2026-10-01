@@ -57,6 +57,39 @@ class CompactionInput:
     messages: tuple[Message, ...]
 
 
+@dataclass(frozen=True)
+class MemoryWrite:
+    """A validated memory summary and the base version and cursor it was built from."""
+
+    base_summary_version: int
+    base_cursor: int | None
+    summary_payload: dict[str, Any]
+    summary_schema_version: int
+    last_summarized_sequence: int
+    source_message_count: int
+    source_token_count: int
+    summary_token_count: int
+    provider: str
+    model: str
+    tokenizer: str
+    prompt_version: str
+
+    def column_values(self) -> dict[str, Any]:
+        """The summary columns both the first insert and a CAS update write."""
+        return {
+            "summary_payload": self.summary_payload,
+            "summary_schema_version": self.summary_schema_version,
+            "last_summarized_sequence": self.last_summarized_sequence,
+            "source_message_count": self.source_message_count,
+            "source_token_count": self.source_token_count,
+            "summary_token_count": self.summary_token_count,
+            "provider": self.provider,
+            "model": self.model,
+            "tokenizer": self.tokenizer,
+            "prompt_version": self.prompt_version,
+        }
+
+
 class ConversationCompactionRepository(RepositorySessionMixin):
     """Own every short transaction in the compaction durability protocol."""
 
@@ -438,84 +471,62 @@ class ConversationCompactionRepository(RepositorySessionMixin):
                 messages=tuple(rows),
             )
 
-    def persist_memory_cas(
-        self,
-        claim: SummaryJobClaim,
-        *,
-        base_summary_version: int,
-        base_cursor: int | None,
-        summary_payload: dict[str, Any],
-        summary_schema_version: int,
-        last_summarized_sequence: int,
-        source_message_count: int,
-        source_token_count: int,
-        summary_token_count: int,
-        provider: str,
-        model: str,
-        tokenizer: str,
-        prompt_version: str,
-    ) -> bool:
+    def persist_memory_cas(self, claim: SummaryJobClaim, write: MemoryWrite) -> bool:
         """Write validated memory only if cursor, version, and lease still match."""
-        if last_summarized_sequence > claim.requested_through_sequence:
+        if write.last_summarized_sequence > claim.requested_through_sequence:
             return False
         now = self._utcnow()
         with self.session_factory() as session:
             current = session.get(ConversationMemorySummary, claim.conversation_id)
             if current is None:
-                lease = session.execute(
-                    select(ConversationSummaryJob.conversation_id).where(
-                        ConversationSummaryJob.conversation_id == claim.conversation_id,
-                        ConversationSummaryJob.status == SummaryJobStatus.PROCESSING.value,
-                        ConversationSummaryJob.lease_token == claim.lease_token,
-                        ConversationSummaryJob.lease_expires_at > now,
-                    )
-                ).scalar_one_or_none()
-                if lease is None or base_summary_version != 0 or base_cursor is not None:
-                    return False
-                session.add(
-                    ConversationMemorySummary(
-                        conversation_id=claim.conversation_id,
-                        summary_payload=summary_payload,
-                        summary_schema_version=summary_schema_version,
-                        last_summarized_sequence=last_summarized_sequence,
-                        summary_version=1,
-                        source_message_count=source_message_count,
-                        source_token_count=source_token_count,
-                        summary_token_count=summary_token_count,
-                        provider=provider,
-                        model=model,
-                        tokenizer=tokenizer,
-                        prompt_version=prompt_version,
-                        is_valid=True,
-                        updated_at=now,
-                    )
-                )
-                session.commit()
-                return True
+                return self._insert_first_memory(session, claim, write, now)
+            return self._compare_and_set_memory(session, claim, write, now)
 
-            result = session.execute(
-                self._memory_cas_update_statement(
-                    claim=claim,
-                    base_summary_version=base_summary_version,
-                    base_cursor=base_cursor,
-                    summary_payload=summary_payload,
-                    summary_schema_version=summary_schema_version,
-                    last_summarized_sequence=last_summarized_sequence,
-                    source_message_count=source_message_count,
-                    source_token_count=source_token_count,
-                    summary_token_count=summary_token_count,
-                    provider=provider,
-                    model=model,
-                    tokenizer=tokenizer,
-                    prompt_version=prompt_version,
-                    now=now,
-                )
+    @staticmethod
+    def _insert_first_memory(
+        session: Session, claim: SummaryJobClaim, write: MemoryWrite, now: datetime
+    ) -> bool:
+        """Create the first memory row, only for a version-0 base under a live lease."""
+        lease = session.execute(
+            select(ConversationSummaryJob.conversation_id).where(
+                ConversationSummaryJob.conversation_id == claim.conversation_id,
+                ConversationSummaryJob.status == SummaryJobStatus.PROCESSING.value,
+                ConversationSummaryJob.lease_token == claim.lease_token,
+                ConversationSummaryJob.lease_expires_at > now,
             )
-            if result.rowcount != 1:
-                session.rollback()
-                return False
-            session.commit()
-            return True
+        ).scalar_one_or_none()
+        if lease is None or write.base_summary_version != 0 or write.base_cursor is not None:
+            return False
+        session.add(
+            ConversationMemorySummary(
+                conversation_id=claim.conversation_id,
+                **write.column_values(),
+                summary_version=1,
+                is_valid=True,
+                updated_at=now,
+            )
+        )
+        session.commit()
+        return True
+
+    def _compare_and_set_memory(
+        self, session: Session, claim: SummaryJobClaim, write: MemoryWrite, now: datetime
+    ) -> bool:
+        """Update the existing row only if its version, cursor and the lease still match."""
+        result = session.execute(
+            self._memory_cas_update_statement(
+                claim=claim,
+                base_summary_version=write.base_summary_version,
+                base_cursor=write.base_cursor,
+                now=now,
+                **write.column_values(),
+            )
+        )
+        if result.rowcount != 1:
+            session.rollback()
+            return False
+        session.commit()
+        return True
 
     def complete_claim(self, claim: SummaryJobClaim) -> str | None:
         """Release an owned lease to idle or pending without losing a newer target."""

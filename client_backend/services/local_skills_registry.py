@@ -191,6 +191,95 @@ class SkillMetadata:
         return entry
 
 
+@dataclass(frozen=True)
+class _SkillDocument:
+    """The fields one SKILL.md contributes, before install metadata is applied."""
+
+    name: str
+    description: str
+    content: str
+    category: str | None
+    tags: list[str]
+    declared_secrets: list[str]
+    # No front matter: the name is the containing directory's, so the installer's
+    # recorded bundle name may replace it.
+    plain_markdown: bool
+
+
+def _parse_skill_document(raw: str, skill_file: Path) -> _SkillDocument | None:
+    """Read the front matter, or fall back to plain-markdown heuristics without it.
+
+    Returns None for front matter that names no skill.
+    """
+    parsed = parse_skill_front_matter(raw)
+    if parsed is None:
+        return _plain_markdown_document(raw, skill_file)
+    if not parsed.name:
+        logger.warning("Missing 'name' in front-matter of %s — skipping", skill_file)
+        return None
+    return _SkillDocument(
+        name=parsed.name,
+        description=parsed.description,
+        content=parsed.body,
+        category=parsed.category,
+        tags=list(parsed.tags),
+        declared_secrets=list(parsed.secrets),
+        plain_markdown=False,
+    )
+
+
+def _plain_markdown_document(raw: str, skill_file: Path) -> _SkillDocument:
+    """Use the directory name and the first non-heading line of the first ten."""
+    name = skill_file.parent.name
+    description = ""
+    for line in raw.strip().split("\n")[:10]:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            description = stripped
+            break
+    return _SkillDocument(
+        name=name,
+        description=description or f"Skill: {name}",
+        content=raw,
+        category=None,
+        tags=[],
+        declared_secrets=[],
+        plain_markdown=True,
+    )
+
+
+async def _read_install_metadata(bundle_root: Path) -> dict | None:
+    """The bundle's ``install.json`` object, or None when absent or unreadable."""
+    candidate_install_path = bundle_root / "install.json"
+    try:
+        if candidate_install_path.exists():
+            install_raw = await asyncio.to_thread(
+                candidate_install_path.read_text, encoding="utf-8"
+            )
+            parsed_install = json.loads(install_raw)
+            if isinstance(parsed_install, dict):
+                return parsed_install
+    except Exception as exc:
+        logger.warning("Failed to parse install.json for %s: %s", candidate_install_path, exc)
+    return None
+
+
+def _resolve_skill_name(document: _SkillDocument, install_metadata: dict | None) -> str:
+    # A plain-markdown bundle (no front matter) normally takes its
+    # name from the containing directory. For an installed bundle that
+    # directory is hash-suffixed (e.g. "plain-skill-ab12cd34ef56"),
+    # which would diverge from the name the installer recorded and
+    # returned, leaving the skill undiscoverable by that name. Prefer
+    # the installer's recorded bundle_name so an installed skill is
+    # always found and toggled under its recorded name. Front-matter
+    # names remain authoritative and are left untouched.
+    if document.plain_markdown and install_metadata:
+        recorded_name = install_metadata.get("bundle_name")
+        if isinstance(recorded_name, str) and recorded_name.strip():
+            return recorded_name
+    return document.name
+
+
 class LocalSkillsRegistry:
     """
     Registry for local skills on the device.
@@ -315,40 +404,9 @@ class LocalSkillsRegistry:
                 return None
             raw = await asyncio.to_thread(skill_file.read_text, encoding="utf-8")
 
-            parsed = parse_skill_front_matter(raw)
-
-            if parsed is not None:
-                if not parsed.name:
-                    logger.warning("Missing 'name' in front-matter of %s — skipping", skill_file)
-                    return None
-
-                name = parsed.name
-                description = parsed.description
-                category = parsed.category
-                tags = list(parsed.tags)
-                declared_secrets = list(parsed.secrets)
-                content = parsed.body
-                used_plain_markdown_fallback = False
-            else:
-                # No front matter — use directory name and first-line heuristic.
-                name = skill_file.parent.name
-                content = raw
-                used_plain_markdown_fallback = True
-
-                lines = raw.strip().split("\n")
-                description = ""
-                for line in lines[:10]:
-                    stripped = line.strip()
-                    if stripped and not stripped.startswith("#"):
-                        description = stripped
-                        break
-
-                category = None
-                tags = []
-                declared_secrets = []
-
-            if used_plain_markdown_fallback and not description:
-                description = f"Skill: {name}"
+            document = _parse_skill_document(raw, skill_file)
+            if document is None:
+                return None
 
             bundle_root = self._resolve_bundle_root(
                 resolved_skill_file,
@@ -358,34 +416,8 @@ class LocalSkillsRegistry:
                 logger.warning("Skill bundle escapes configured root: %s", bundle_root)
                 return None
 
-            install_metadata: dict | None = None
-            candidate_install_path = bundle_root / "install.json"
-            try:
-                if candidate_install_path.exists():
-                    install_raw = await asyncio.to_thread(
-                        candidate_install_path.read_text, encoding="utf-8"
-                    )
-                    parsed_install = json.loads(install_raw)
-                    if isinstance(parsed_install, dict):
-                        install_metadata = parsed_install
-            except Exception as exc:
-                logger.warning(
-                    "Failed to parse install.json for %s: %s", candidate_install_path, exc
-                )
-
-            # A plain-markdown bundle (no front matter) normally takes its
-            # name from the containing directory. For an installed bundle that
-            # directory is hash-suffixed (e.g. "plain-skill-ab12cd34ef56"),
-            # which would diverge from the name the installer recorded and
-            # returned, leaving the skill undiscoverable by that name. Prefer
-            # the installer's recorded bundle_name so an installed skill is
-            # always found and toggled under its recorded name. Front-matter
-            # names remain authoritative and are left untouched.
-            if used_plain_markdown_fallback and install_metadata:
-                recorded_name = install_metadata.get("bundle_name")
-                if isinstance(recorded_name, str) and recorded_name.strip():
-                    name = recorded_name
-
+            install_metadata = await _read_install_metadata(bundle_root)
+            name = _resolve_skill_name(document, install_metadata)
             if not is_valid_skill_name(name):
                 logger.warning(
                     "Skill name %r in %s is not portable; skipping",
@@ -407,13 +439,13 @@ class LocalSkillsRegistry:
                 bundle_root=bundle_root,
                 source_hash=source_hash,
                 executable_assets=executable_assets,
-                description=description,
-                content=content,
+                description=document.description,
+                content=document.content,
                 enabled=True,  # Default enabled, overridden by persisted state
-                category=category,
-                tags=tags,
+                category=document.category,
+                tags=document.tags,
                 install_metadata=install_metadata,
-                declared_secrets=declared_secrets,
+                declared_secrets=document.declared_secrets,
             )
 
         except Exception as e:

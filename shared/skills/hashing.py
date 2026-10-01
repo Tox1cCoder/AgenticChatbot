@@ -35,6 +35,16 @@ def compute_skill_bundle_hash(
     if not root.is_dir() or link_checker(bundle_root):
         raise UnsafeSkillBundleError("skill bundle root is missing or linked")
 
+    hasher = hashlib.sha256(_HASH_FORMAT)
+    for relative, path in sorted(_collect_bundle_entries(root, link_checker)):
+        _hash_bundle_file(hasher, relative, path, link_checker)
+    return hasher.hexdigest()
+
+
+def _collect_bundle_entries(
+    root: Path, link_checker: Callable[[Path], bool]
+) -> list[tuple[str, Path]]:
+    """Walk the bundle without following links; return ``(relative, path)`` per hashed file."""
     entries: list[tuple[str, Path]] = []
     for current_root, dir_names, file_names in os.walk(root, followlinks=False):
         current = Path(current_root)
@@ -44,62 +54,81 @@ def compute_skill_bundle_hash(
                 raise UnsafeSkillBundleError(f"skill bundle contains linked directory: {dir_name}")
         dir_names[:] = sorted(name for name in dir_names if name not in _IGNORED_DIR_NAMES)
         for file_name in file_names:
-            path = current / file_name
-            if link_checker(path):
-                raise UnsafeSkillBundleError(f"skill bundle contains linked file: {file_name}")
-            relative = path.relative_to(root).as_posix()
-            if relative == _INSTALL_METADATA_FILENAME or path.suffix == ".pyc":
-                continue
-            try:
-                path.resolve().relative_to(root)
-            except ValueError as exc:
-                raise UnsafeSkillBundleError(
-                    f"skill bundle path escapes its root: {relative}"
-                ) from exc
-            entries.append((relative, path))
+            entry = _bundle_file_entry(root, current, file_name, link_checker)
+            if entry is not None:
+                entries.append(entry)
+    return entries
 
-    hasher = hashlib.sha256(_HASH_FORMAT)
-    for relative, path in sorted(entries):
-        descriptor: int | None = None
-        try:
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_BINARY", 0)
-                | getattr(os, "O_NONBLOCK", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
-            descriptor = os.open(path, flags)
-            before = os.fstat(descriptor)
-            if not stat.S_ISREG(before.st_mode):
-                raise UnsafeSkillBundleError(f"skill bundle path is not a regular file: {relative}")
-            relative_bytes = relative.encode("utf-8")
-            _add_record_field(hasher, relative_bytes)
-            hasher.update(struct.pack(">I", stat.S_IMODE(before.st_mode)))
-            hasher.update(struct.pack(">Q", before.st_size))
-            bytes_read = 0
-            with os.fdopen(descriptor, "rb") as stream:
-                descriptor = None
-                while chunk := stream.read(1024 * 1024):
-                    bytes_read += len(chunk)
-                    hasher.update(chunk)
-                after_open = os.fstat(stream.fileno())
-            after = path.stat(follow_symlinks=False)
-        except OSError as exc:
-            raise UnsafeSkillBundleError(f"skill bundle changed while hashing: {relative}") from exc
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-        if (
-            bytes_read != before.st_size
-            or not stat.S_ISREG(after.st_mode)
-            or (after_open.st_dev, after_open.st_ino) != (before.st_dev, before.st_ino)
-            or after_open.st_size != before.st_size
-            or after_open.st_mtime_ns != before.st_mtime_ns
-            or stat.S_IMODE(after_open.st_mode) != stat.S_IMODE(before.st_mode)
-            or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
-            or after.st_size != before.st_size
-            or after.st_mtime_ns != before.st_mtime_ns
-            or link_checker(path)
-        ):
-            raise UnsafeSkillBundleError(f"skill bundle changed while hashing: {relative}")
-    return hasher.hexdigest()
+
+def _bundle_file_entry(
+    root: Path, current: Path, file_name: str, link_checker: Callable[[Path], bool]
+) -> tuple[str, Path] | None:
+    """One file's ``(relative, path)``, None when it is not hashed; raises when unsafe."""
+    path = current / file_name
+    if link_checker(path):
+        raise UnsafeSkillBundleError(f"skill bundle contains linked file: {file_name}")
+    relative = path.relative_to(root).as_posix()
+    if relative == _INSTALL_METADATA_FILENAME or path.suffix == ".pyc":
+        return None
+    try:
+        path.resolve().relative_to(root)
+    except ValueError as exc:
+        raise UnsafeSkillBundleError(f"skill bundle path escapes its root: {relative}") from exc
+    return relative, path
+
+
+def _hash_bundle_file(
+    hasher, relative: str, path: Path, link_checker: Callable[[Path], bool]
+) -> None:
+    """Fold one file's record into ``hasher``, refusing a file that changes while read."""
+    descriptor: int | None = None
+    try:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise UnsafeSkillBundleError(f"skill bundle path is not a regular file: {relative}")
+        relative_bytes = relative.encode("utf-8")
+        _add_record_field(hasher, relative_bytes)
+        hasher.update(struct.pack(">I", stat.S_IMODE(before.st_mode)))
+        hasher.update(struct.pack(">Q", before.st_size))
+        bytes_read = 0
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = None
+            while chunk := stream.read(1024 * 1024):
+                bytes_read += len(chunk)
+                hasher.update(chunk)
+            after_open = os.fstat(stream.fileno())
+        after = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise UnsafeSkillBundleError(f"skill bundle changed while hashing: {relative}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if _changed_while_hashing(before, after_open, after, bytes_read) or link_checker(path):
+        raise UnsafeSkillBundleError(f"skill bundle changed while hashing: {relative}")
+
+
+def _changed_while_hashing(
+    before: os.stat_result,
+    after_open: os.stat_result,
+    after: os.stat_result,
+    bytes_read: int,
+) -> bool:
+    """Whether the open file or the path changed between the first and last stat."""
+    return (
+        bytes_read != before.st_size
+        or not stat.S_ISREG(after.st_mode)
+        or (after_open.st_dev, after_open.st_ino) != (before.st_dev, before.st_ino)
+        or after_open.st_size != before.st_size
+        or after_open.st_mtime_ns != before.st_mtime_ns
+        or stat.S_IMODE(after_open.st_mode) != stat.S_IMODE(before.st_mode)
+        or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+        or after.st_size != before.st_size
+        or after.st_mtime_ns != before.st_mtime_ns
+    )

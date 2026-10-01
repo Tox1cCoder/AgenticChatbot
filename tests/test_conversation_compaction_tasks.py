@@ -58,9 +58,9 @@ class FakeRepository:
             last_summarized_sequence=None,
         )
 
-    def persist_memory_cas(self, claim, **kwargs):
+    def persist_memory_cas(self, claim, write):
         self.events.append("memory_cas")
-        self.persist_kwargs = kwargs
+        self.persist_write = write
         return self.cas
 
     def complete_claim(self, claim):
@@ -129,8 +129,8 @@ async def test_lease_commits_before_provider_and_success_persists_then_completes
         "memory_cas",
         "complete",
     ]
-    assert repository.persist_kwargs["base_summary_version"] == 0
-    assert repository.persist_kwargs["base_cursor"] is None
+    assert repository.persist_write.base_summary_version == 0
+    assert repository.persist_write.base_cursor is None
 
 
 @pytest.mark.asyncio

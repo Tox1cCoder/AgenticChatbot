@@ -2126,6 +2126,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
+        self._check_generation_budgets()
+        self._check_model_usage_windows()
+        self._check_tool_execution_limits()
+        self._normalize_redis_urls()
+        self._check_security_settings()
+        self._check_conversation_summary()
+        self._check_production_settings()
+        return self
+
+    def _check_generation_budgets(self) -> None:
         # A hard rung at or below its soft rung means the framework raises on
         # exactly the call the soft budget reserved for the answer, turning a
         # validated partial back into a generic execution error.
@@ -2139,6 +2149,8 @@ class Settings(BaseSettings):
                 "generation hard tool-call limit must exceed the soft limit, "
                 "or no synthesis call is reserved"
             )
+
+    def _check_model_usage_windows(self) -> None:
         if self.model_usage_reconcile_minutes >= self.model_usage_raw_retention_days * 1_440:
             raise ValueError(
                 "model usage reconcile window must be strictly shorter than raw-event retention"
@@ -2162,6 +2174,8 @@ class Settings(BaseSettings):
                 "model usage unhealthy rollup lag must be greater than or equal "
                 "to degraded rollup lag"
             )
+
+    def _check_tool_execution_limits(self) -> None:
         if (
             self.tool_execution_max_interactive_timeout_seconds
             <= self.tool_execution_cancellation_grace_seconds
@@ -2184,6 +2198,7 @@ class Settings(BaseSettings):
             if override.disable_outer_timeout:
                 raise ValueError("deployment policy cannot disable the outer timeout")
 
+    def _normalize_redis_urls(self) -> None:
         if self.redis_password:
             self.redis_url = _inject_redis_password(self.redis_url, self.redis_password)
             self.celery_broker_url = _inject_redis_password(
@@ -2195,6 +2210,8 @@ class Settings(BaseSettings):
         self.redis_url = _normalize_redis_loopback_host(self.redis_url)
         self.celery_broker_url = _normalize_redis_loopback_host(self.celery_broker_url)
         self.celery_result_backend = _normalize_redis_loopback_host(self.celery_result_backend)
+
+    def _check_security_settings(self) -> None:
         # Unset is valid everywhere: app.core.server_secrets then uses the key
         # stored in the database, generating it once.
         if not self.secret_key.strip() or (
@@ -2205,6 +2222,8 @@ class Settings(BaseSettings):
             raise ValueError("api_debug must be disabled outside development")
         if self.environment != "development":
             self._check_deployment_hardening()
+
+    def _check_conversation_summary(self) -> None:
         if (
             self.conversation_summary_enabled
             and self.conversation_summary_trigger_messages == 0
@@ -2238,19 +2257,21 @@ class Settings(BaseSettings):
             raise ValueError(
                 "conversation summary retry max must be greater than or equal to retry base"
             )
-        if self.environment.strip().lower() == "production":
-            if not self.conversation_summary_provider.strip():
-                raise ValueError("conversation summary provider must be explicit in production")
-            if not self.conversation_summary_model.strip():
-                raise ValueError("conversation summary model must be explicit in production")
-            if "preview" in self.conversation_summary_model.strip().lower():
-                raise ValueError("conversation summary model must be stable in production")
-            if self.langsmith_tracing and not self.model_usage_user_hash_secret.strip():
-                raise ValueError(
-                    "model_usage_user_hash_secret must be set in production when "
-                    "LangSmith tracing is enabled"
-                )
-        return self
+
+    def _check_production_settings(self) -> None:
+        if self.environment.strip().lower() != "production":
+            return
+        if not self.conversation_summary_provider.strip():
+            raise ValueError("conversation summary provider must be explicit in production")
+        if not self.conversation_summary_model.strip():
+            raise ValueError("conversation summary model must be explicit in production")
+        if "preview" in self.conversation_summary_model.strip().lower():
+            raise ValueError("conversation summary model must be stable in production")
+        if self.langsmith_tracing and not self.model_usage_user_hash_secret.strip():
+            raise ValueError(
+                "model_usage_user_hash_secret must be set in production when "
+                "LangSmith tracing is enabled"
+            )
 
     def _check_deployment_hardening(self) -> None:
         """Refuse the permissive local-development defaults in a deployment.

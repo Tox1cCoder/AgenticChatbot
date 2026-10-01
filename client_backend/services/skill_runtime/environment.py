@@ -145,98 +145,13 @@ class SkillEnvironmentManager:
             raise SkillRuntimeError(UNSAFE_BUNDLE_PATH, "runtime stage escapes profile root")
 
         try:
-            stage.mkdir(parents=True)
-            venv_root = stage / "venv"
-            self._venv_builder(venv_root)
-            python_path = self._venv_python(venv_root)
-            pip_install = [
-                str(python_path),
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--no-input",
-            ]
-            lock_path = skill.bundle_root / "requirements.lock"
-            commands = []
-            if lock_path.is_file():
-                if not is_under_root(lock_path.resolve(), skill.bundle_root.resolve()):
-                    raise SkillRuntimeError(
-                        UNSAFE_BUNDLE_PATH,
-                        "dependency lock escapes the skill bundle",
-                    )
-                commands.append([*pip_install, "-r", str(lock_path)])
-                commands.append(
-                    [
-                        *pip_install,
-                        "--no-build-isolation",
-                        "--no-deps",
-                        str(skill.bundle_root),
-                    ]
-                )
-            else:
-                commands.append([*pip_install, str(skill.bundle_root)])
-
-            log_bytes = b""
-            for command in commands:
-                completed = self._runner(
-                    command,
-                    cwd=str(skill.bundle_root),
-                    capture_output=True,
-                    timeout=SETUP_TIMEOUT_SECONDS,
-                    env=self._setup_environment(),
-                )
-                stdout = completed.stdout or b""
-                stderr = completed.stderr or b""
-                log_bytes = (log_bytes + stdout + b"\n" + stderr + b"\n")[-MAX_SETUP_LOG_BYTES:]
-                (stage / "setup.log").write_bytes(log_bytes)
-                if completed.returncode != 0:
-                    raise SkillRuntimeError(
-                        SKILL_SETUP_FAILED,
-                        f"Python setup for skill '{skill.name}' failed with exit code "
-                        f"{completed.returncode}",
-                        repair={"type": "inspect_setup_failure", "skill": skill.name},
-                    )
-
-            commands = self._discover_runtime_commands(
-                venv_root,
-                preview["declared_commands"],
-            )
-            if not commands:
-                raise SkillRuntimeError(
-                    SKILL_SETUP_FAILED,
-                    f"Python setup for skill '{skill.name}' produced no console commands",
-                    repair={"type": "check_project_scripts", "skill": skill.name},
-                )
-
-            metadata = {
-                "format_version": RUNTIME_FORMAT_VERSION,
-                "skill": skill.name,
-                "source_hash": skill.source_hash,
-                "sidecar_python": str(Path(sys.executable).resolve()),
-                "platform": self._platform_id(),
-                "commands": commands,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            (stage / "runtime.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-
-            if target.exists():
-                os.replace(target, backup)
-            try:
-                os.replace(stage, target)
-            except Exception:
-                if backup.exists() and not target.exists():
-                    os.replace(backup, target)
-                raise
-            if backup.exists():
-                shutil.rmtree(backup)
+            self._build_stage(skill, stage, preview["declared_commands"])
+            self._promote_stage(stage, target, backup)
         except SkillRuntimeError:
-            if stage.exists():
-                shutil.rmtree(stage)
+            self._discard_stage(stage)
             raise
         except Exception as exc:
-            if stage.exists():
-                shutil.rmtree(stage)
+            self._discard_stage(stage)
             raise SkillRuntimeError(
                 SKILL_SETUP_FAILED,
                 f"Python setup for skill '{skill.name}' failed: {exc.__class__.__name__}",
@@ -244,6 +159,114 @@ class SkillEnvironmentManager:
             ) from exc
 
         return self.inspect(skill)
+
+    def _build_stage(self, skill: SkillMetadata, stage: Path, declared_commands: list[str]) -> None:
+        """Create the venv in ``stage``, install the bundle, and record its commands."""
+        stage.mkdir(parents=True)
+        venv_root = stage / "venv"
+        self._venv_builder(venv_root)
+        setup_commands = self._setup_commands(skill, self._venv_python(venv_root))
+        self._run_setup_commands(skill, stage, setup_commands)
+        self._write_runtime_metadata(skill, stage, venv_root, declared_commands)
+
+    @staticmethod
+    def _setup_commands(skill: SkillMetadata, python_path: Path) -> list[list[str]]:
+        """The pip commands that install the bundle, pinned by its lock when present."""
+        pip_install = [
+            str(python_path),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+        ]
+        lock_path = skill.bundle_root / "requirements.lock"
+        if not lock_path.is_file():
+            return [[*pip_install, str(skill.bundle_root)]]
+        if not is_under_root(lock_path.resolve(), skill.bundle_root.resolve()):
+            raise SkillRuntimeError(
+                UNSAFE_BUNDLE_PATH,
+                "dependency lock escapes the skill bundle",
+            )
+        return [
+            [*pip_install, "-r", str(lock_path)],
+            [
+                *pip_install,
+                "--no-build-isolation",
+                "--no-deps",
+                str(skill.bundle_root),
+            ],
+        ]
+
+    def _run_setup_commands(
+        self, skill: SkillMetadata, stage: Path, commands: list[list[str]]
+    ) -> None:
+        """Run each command, keeping the log tail in ``setup.log``; stop at a failure."""
+        log_bytes = b""
+        for command in commands:
+            completed = self._runner(
+                command,
+                cwd=str(skill.bundle_root),
+                capture_output=True,
+                timeout=SETUP_TIMEOUT_SECONDS,
+                env=self._setup_environment(),
+            )
+            stdout = completed.stdout or b""
+            stderr = completed.stderr or b""
+            log_bytes = (log_bytes + stdout + b"\n" + stderr + b"\n")[-MAX_SETUP_LOG_BYTES:]
+            (stage / "setup.log").write_bytes(log_bytes)
+            if completed.returncode != 0:
+                raise SkillRuntimeError(
+                    SKILL_SETUP_FAILED,
+                    f"Python setup for skill '{skill.name}' failed with exit code "
+                    f"{completed.returncode}",
+                    repair={"type": "inspect_setup_failure", "skill": skill.name},
+                )
+
+    def _write_runtime_metadata(
+        self,
+        skill: SkillMetadata,
+        stage: Path,
+        venv_root: Path,
+        declared_commands: list[str],
+    ) -> None:
+        commands = self._discover_runtime_commands(venv_root, declared_commands)
+        if not commands:
+            raise SkillRuntimeError(
+                SKILL_SETUP_FAILED,
+                f"Python setup for skill '{skill.name}' produced no console commands",
+                repair={"type": "check_project_scripts", "skill": skill.name},
+            )
+
+        metadata = {
+            "format_version": RUNTIME_FORMAT_VERSION,
+            "skill": skill.name,
+            "source_hash": skill.source_hash,
+            "sidecar_python": str(Path(sys.executable).resolve()),
+            "platform": self._platform_id(),
+            "commands": commands,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (stage / "runtime.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _promote_stage(stage: Path, target: Path, backup: Path) -> None:
+        """Swap ``stage`` into ``target``, restoring the previous runtime if the swap fails."""
+        if target.exists():
+            os.replace(target, backup)
+        try:
+            os.replace(stage, target)
+        except Exception:
+            if backup.exists() and not target.exists():
+                os.replace(backup, target)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup)
+
+    @staticmethod
+    def _discard_stage(stage: Path) -> None:
+        if stage.exists():
+            shutil.rmtree(stage)
 
     def preparation_lock_path(self, skill: SkillMetadata) -> Path:
         """Return the cross-process lock shared by all runtimes for one skill."""

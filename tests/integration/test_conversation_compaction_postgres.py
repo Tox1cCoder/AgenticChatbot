@@ -19,7 +19,10 @@ from app.models.enums import MessageRole
 from app.models.feedback import Feedback
 from app.models.message import Message
 from app.models.user import User
-from app.repositories.conversation_compaction import ConversationCompactionRepository
+from app.repositories.conversation_compaction import (
+    ConversationCompactionRepository,
+    MemoryWrite,
+)
 from app.repositories.message import MessageRepository
 from app.schemas.message import MessageUpdate
 
@@ -196,33 +199,37 @@ def test_owned_memory_input_cas_and_mutation_invalidation(
 
     assert repository.persist_memory_cas(
         claim,
-        base_summary_version=0,
-        base_cursor=None,
-        summary_payload={"facts": ["old fact"]},
-        summary_schema_version=1,
-        last_summarized_sequence=target.sequence,
-        source_message_count=2,
-        source_token_count=10,
-        summary_token_count=3,
-        provider="gemini",
-        model="gemini-2.5-flash",
-        tokenizer="local_bytes_v1",
-        prompt_version="v1",
+        MemoryWrite(
+            base_summary_version=0,
+            base_cursor=None,
+            summary_payload={"facts": ["old fact"]},
+            summary_schema_version=1,
+            last_summarized_sequence=target.sequence,
+            source_message_count=2,
+            source_token_count=10,
+            summary_token_count=3,
+            provider="gemini",
+            model="gemini-2.5-flash",
+            tokenizer="local_bytes_v1",
+            prompt_version="v1",
+        ),
     )
     assert not repository.persist_memory_cas(
         claim,
-        base_summary_version=0,
-        base_cursor=None,
-        summary_payload={"facts": ["stale"]},
-        summary_schema_version=1,
-        last_summarized_sequence=target.sequence,
-        source_message_count=2,
-        source_token_count=10,
-        summary_token_count=3,
-        provider="gemini",
-        model="gemini-2.5-flash",
-        tokenizer="local_bytes_v1",
-        prompt_version="v1",
+        MemoryWrite(
+            base_summary_version=0,
+            base_cursor=None,
+            summary_payload={"facts": ["stale"]},
+            summary_schema_version=1,
+            last_summarized_sequence=target.sequence,
+            source_message_count=2,
+            source_token_count=10,
+            summary_token_count=3,
+            provider="gemini",
+            model="gemini-2.5-flash",
+            tokenizer="local_bytes_v1",
+            prompt_version="v1",
+        ),
     )
     memory = repository.get_owned_valid_memory(conversation_id, owner_id)
     assert memory is not None
@@ -271,18 +278,20 @@ def test_expired_lease_cannot_load_persist_or_complete(seeded_repository, sessio
     assert repository.load_compaction_input(claim, owner_id=owner_id) is None
     assert not repository.persist_memory_cas(
         claim,
-        base_summary_version=0,
-        base_cursor=None,
-        summary_payload={"facts": ["stale"]},
-        summary_schema_version=1,
-        last_summarized_sequence=target.sequence,
-        source_message_count=1,
-        source_token_count=2,
-        summary_token_count=1,
-        provider="gemini",
-        model="gemini-2.5-flash",
-        tokenizer="local_bytes_v1",
-        prompt_version="v1",
+        MemoryWrite(
+            base_summary_version=0,
+            base_cursor=None,
+            summary_payload={"facts": ["stale"]},
+            summary_schema_version=1,
+            last_summarized_sequence=target.sequence,
+            source_message_count=1,
+            source_token_count=2,
+            summary_token_count=1,
+            provider="gemini",
+            model="gemini-2.5-flash",
+            tokenizer="local_bytes_v1",
+            prompt_version="v1",
+        ),
     )
     assert repository.complete_claim(claim) is None
 

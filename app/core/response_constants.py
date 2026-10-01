@@ -333,6 +333,47 @@ def _image_locator(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _payload_image_locators(payload: Any) -> set[str]:
+    """Locators for an image payload and, for an ``image_group``, each cell."""
+    locators: set[str] = set()
+    locator = _image_locator(payload)
+    if locator:
+        locators.add(locator)
+    cells = payload.get("items") if isinstance(payload, dict) else None
+    if isinstance(cells, list):
+        for cell in cells:
+            cell_locator = _image_locator(cell) if isinstance(cell, dict) else None
+            if cell_locator:
+                locators.add(cell_locator)
+    return locators
+
+
+def _candidate_image_keys(candidates: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
+    """Return the ids and locators of every typed image candidate."""
+    candidate_ids: set[str] = set()
+    candidate_locators: set[str] = set()
+    for candidate in candidates:
+        if not _is_image_candidate(candidate):
+            continue
+        candidate_id = candidate.get("id")
+        if isinstance(candidate_id, str) and candidate_id:
+            candidate_ids.add(candidate_id)
+        candidate_locators |= _payload_image_locators(candidate.get("payload") or {})
+    return candidate_ids, candidate_locators
+
+
+def _matches_candidate_image(
+    image: Any, candidate_ids: set[str], candidate_locators: set[str]
+) -> bool:
+    if not isinstance(image, dict):
+        return False
+    candidate_id = image.get("rich_item_id") or image.get("id")
+    if isinstance(candidate_id, str) and candidate_id in candidate_ids:
+        return True
+    locator = _image_locator(image)
+    return bool(locator and locator in candidate_locators)
+
+
 def _strip_rich_candidate_images_from_metadata_images(
     metadata: dict[str, Any],
     *,
@@ -348,37 +389,12 @@ def _strip_rich_candidate_images_from_metadata_images(
     if not isinstance(images, list) or not images:
         return
 
-    candidate_ids: set[str] = set()
-    candidate_locators: set[str] = set()
-    for candidate in candidates:
-        if not _is_image_candidate(candidate):
-            continue
-        candidate_id = candidate.get("id")
-        if isinstance(candidate_id, str) and candidate_id:
-            candidate_ids.add(candidate_id)
-        payload = candidate.get("payload") or {}
-        locator = _image_locator(payload)
-        if locator:
-            candidate_locators.add(locator)
-        cells = payload.get("items") if isinstance(payload, dict) else None
-        if isinstance(cells, list):
-            for cell in cells:
-                cell_locator = _image_locator(cell) if isinstance(cell, dict) else None
-                if cell_locator:
-                    candidate_locators.add(cell_locator)
-
-    kept: list[Any] = []
-    for image in images:
-        if not isinstance(image, dict):
-            kept.append(image)
-            continue
-        candidate_id = image.get("rich_item_id") or image.get("id")
-        if isinstance(candidate_id, str) and candidate_id in candidate_ids:
-            continue
-        locator = _image_locator(image)
-        if locator and locator in candidate_locators:
-            continue
-        kept.append(image)
+    candidate_ids, candidate_locators = _candidate_image_keys(candidates)
+    kept = [
+        image
+        for image in images
+        if not _matches_candidate_image(image, candidate_ids, candidate_locators)
+    ]
     if kept:
         metadata["images"] = kept
     else:
@@ -478,16 +494,7 @@ def build_bot_metadata(
     if persona:
         metadata.setdefault("persona_used", persona)
 
-    if response and response.tool_artifacts:
-        existing_artifacts = metadata.get("tool_artifacts")
-        if isinstance(existing_artifacts, list):
-            merged_artifacts = list(existing_artifacts)
-            for artifact in response.tool_artifacts:
-                if artifact not in merged_artifacts:
-                    merged_artifacts.append(artifact)
-            metadata["tool_artifacts"] = merged_artifacts
-        else:
-            metadata["tool_artifacts"] = list(response.tool_artifacts)
+    _merge_response_tool_artifacts(metadata, response)
 
     if response and response.metadata and "images" in response.metadata:
         metadata["images"] = response.metadata["images"]
@@ -497,6 +504,37 @@ def build_bot_metadata(
     if live_widgets:
         metadata["live_widgets"] = live_widgets
 
+    _drop_redundant_agent_fields(metadata)
+
+    if not getattr(settings, "inline_rich_response_enabled", False):
+        # Keep legacy attachment/widget metadata readable while rollout is
+        # disabled, but never persist the internal candidate handoff field.
+        metadata.pop("_rich_item_candidates", None)
+        metadata.pop("_inline_rich_response_v1", None)
+        metadata.pop("_presented_rich_image_ids", None)
+        return metadata
+
+    _attach_rich_items(metadata, response, live_widgets)
+    return metadata
+
+
+def _merge_response_tool_artifacts(
+    metadata: dict[str, Any], response: WorkflowResponse | None
+) -> None:
+    if not (response and response.tool_artifacts):
+        return
+    existing_artifacts = metadata.get("tool_artifacts")
+    if isinstance(existing_artifacts, list):
+        merged_artifacts = list(existing_artifacts)
+        for artifact in response.tool_artifacts:
+            if artifact not in merged_artifacts:
+                merged_artifacts.append(artifact)
+        metadata["tool_artifacts"] = merged_artifacts
+    else:
+        metadata["tool_artifacts"] = list(response.tool_artifacts)
+
+
+def _drop_redundant_agent_fields(metadata: dict[str, Any]) -> None:
     # Prefer the canonical ``agent`` field. Once it exists, drop the redundant
     # custom-agent compatibility fields so persisted messages carry one shape.
     # ``custom_agent_warnings`` is intentionally preserved (still useful when
@@ -509,24 +547,37 @@ def build_bot_metadata(
         ):
             metadata.pop(redundant_key, None)
 
-    if not getattr(settings, "inline_rich_response_enabled", False):
-        # Keep legacy attachment/widget metadata readable while rollout is
-        # disabled, but never persist the internal candidate handoff field.
-        metadata.pop("_rich_item_candidates", None)
-        metadata.pop("_inline_rich_response_v1", None)
-        metadata.pop("_presented_rich_image_ids", None)
-        return metadata
 
-    # ── Rich items finalization ─────────────────────────────────────────
-    # The transient `_rich_item_candidates` field is the workflow-internal
-    # handoff. It is consumed and removed here; it must never appear in the
-    # persisted assistant metadata.
+def _pop_rich_item_candidates(metadata: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Consume the workflow-internal rich-item handoff fields.
+
+    The transient ``_rich_item_candidates`` field is the workflow-internal
+    handoff. It is consumed and removed here; it must never appear in the
+    persisted assistant metadata. Returns the candidates and whether the
+    response declared itself inline-rich capable.
+    """
     raw_candidates = metadata.pop("_rich_item_candidates", None)
     capable_response = bool(metadata.pop("_inline_rich_response_v1", False))
     metadata.pop("_presented_rich_image_ids", None)
     candidates: list[dict[str, Any]] = []
     if isinstance(raw_candidates, list):
         candidates = [c for c in raw_candidates if isinstance(c, dict)]
+    return candidates, capable_response
+
+
+def _response_text(response: WorkflowResponse | None) -> str:
+    message_obj = getattr(response, "message", None) if response is not None else None
+    message_content = getattr(message_obj, "content", None) if message_obj is not None else None
+    return message_content if isinstance(message_content, str) else ""
+
+
+def _attach_rich_items(
+    metadata: dict[str, Any],
+    response: WorkflowResponse | None,
+    live_widgets: list[dict[str, Any]],
+) -> None:
+    """Materialize ``rich_items`` and its warnings when the response has rich activity."""
+    candidates, capable_response = _pop_rich_item_candidates(metadata)
 
     widget_items = [_widget_rich_item_from_live_widget(widget) for widget in (live_widgets or [])]
     canvas_item = _canvas_rich_item_from_artifact(metadata.get("canvas_artifact"))
@@ -534,18 +585,14 @@ def build_bot_metadata(
     # Only opt the message into the v1 contract when there is actual rich-item
     # activity. Legacy messages with neither markers nor candidates retain the
     # pre-feature shape so existing readers continue to function.
-    content = ""
-    message_obj = getattr(response, "message", None) if response is not None else None
-    message_content = getattr(message_obj, "content", None) if message_obj is not None else None
-    if isinstance(message_content, str):
-        content = message_content
+    content = _response_text(response)
     has_markers = bool(parse_inline_rich_references(content))
     has_v1_signal = (
         bool(candidates) or has_markers or (capable_response and bool(widget_items or canvas_item))
     )
 
     if not has_v1_signal:
-        return metadata
+        return
 
     rich_items, warnings = _finalize_rich_items(
         content=content,
@@ -564,5 +611,3 @@ def build_bot_metadata(
         metadata,
         candidates=candidates,
     )
-
-    return metadata

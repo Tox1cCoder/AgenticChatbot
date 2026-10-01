@@ -21,6 +21,7 @@ from client_backend.schemas.mcp_config import (
     CustomServerDefinition,
     MCPProfileDocument,
     MCPProfileScope,
+    MCPRegistryDocument,
 )
 from client_backend.services.mcp_config_store import MCPConfigStore
 
@@ -95,6 +96,129 @@ def _bundle_signature(value: dict[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in result.items() if item not in (None, [], "")}
 
 
+_ServerCredentials = tuple[dict[str, str], dict[str, str]]
+
+
+@dataclass(frozen=True)
+class _MigrationPlan:
+    """The v2 documents a legacy profile maps to, built before anything is written."""
+
+    overrides: dict[str, BundledOverride]
+    custom: dict[str, Any]
+    credentials: dict[str, _ServerCredentials]
+
+
+def _custom_server_definition(raw: dict[str, Any]) -> tuple[dict[str, Any], _ServerCredentials]:
+    """A legacy custom server as a v2 definition plus its ``(env, headers)`` secrets."""
+    transport = str(raw.get("transport") or "stdio").strip().lower()
+    if transport == "http":
+        transport = "streamable_http"
+    env = {str(key): str(value) for key, value in (raw.get("env") or {}).items()}
+    headers = {str(key): str(value) for key, value in (raw.get("headers") or {}).items()}
+    definition: dict[str, Any] = {
+        "transport": transport,
+        "enabled": bool(raw.get("enabled", True)),
+        "description": str(raw.get("description") or ""),
+    }
+    if transport == "stdio":
+        definition.update(
+            {
+                "command": raw.get("command"),
+                "args": list(raw.get("args") or []),
+                "cwd": raw.get("cwd"),
+                "envKeys": sorted(env),
+            }
+        )
+    else:
+        definition.update(
+            {
+                "url": raw.get("url"),
+                "headerKeys": sorted(headers),
+            }
+        )
+    return definition, (env, headers)
+
+
+def _plan_migration(
+    legacy_servers: dict[str, dict[str, Any]], registry: MCPRegistryDocument
+) -> _MigrationPlan:
+    """Map every legacy server; raise when a modified one uses a bundled name."""
+    overrides: dict[str, BundledOverride] = {}
+    custom: dict[str, Any] = {}
+    credentials: dict[str, _ServerCredentials] = {}
+    conflicts: list[str] = []
+
+    for name, raw in legacy_servers.items():
+        bundled = registry.servers.get(name)
+        if bundled is not None:
+            expected = bundled.model_dump(by_alias=True)
+            if _bundle_signature(raw) != _bundle_signature(expected):
+                conflicts.append(name)
+                continue
+            overrides[name] = BundledOverride(
+                enabled=bool(raw.get("enabled", bundled.enabled_by_default))
+            )
+            continue
+
+        definition, server_credentials = _custom_server_definition(raw)
+        custom[name] = _CUSTOM_ADAPTER.validate_python(definition)
+        credentials[name] = server_credentials
+
+    if conflicts:
+        joined = ", ".join(sorted(conflicts))
+        raise MCPConfigMigrationConflictError(
+            f"customized definitions use reserved bundled names: {joined}"
+        )
+    return _MigrationPlan(overrides=overrides, custom=custom, credentials=credentials)
+
+
+def _write_encrypted_backup(backup_path: Path, source_bytes: bytes) -> None:
+    backup_path.write_text(
+        json.dumps(encrypt_local_secret(source_bytes)),
+        encoding="utf-8",
+    )
+    with contextlib.suppress(OSError):
+        os.chmod(backup_path, 0o600)
+
+
+def _write_profile_with_credentials(
+    store: MCPConfigStore,
+    profile: MCPProfileDocument,
+    credentials: dict[str, _ServerCredentials],
+) -> None:
+    """Store each server's secrets, then the profile; restore the secret file on failure."""
+    secret_snapshot = (
+        store.secret_store.path.read_bytes() if store.secret_store.path.is_file() else None
+    )
+    try:
+        for name, (env, headers) in credentials.items():
+            store.secret_store.set_for_server(name, env=env, headers=headers)
+        store._write_profile(profile)
+    except Exception:
+        if secret_snapshot is None:
+            store.secret_store.path.unlink(missing_ok=True)
+        else:
+            store.secret_store.path.write_bytes(secret_snapshot)
+        raise
+
+
+def _write_receipt(
+    receipt_path: Path,
+    *,
+    source_bytes: bytes,
+    backup_path: Path,
+    servers: list[str],
+) -> None:
+    receipt = {
+        "schemaVersion": 2,
+        "migratedAt": datetime.now(timezone.utc).isoformat(),
+        "sourceSha256": hashlib.sha256(source_bytes).hexdigest(),
+        "backupPath": str(backup_path),
+        "servers": servers,
+    }
+    receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+
+
 def migrate_legacy_mcp_profile(
     scope: MCPProfileScope,
     *,
@@ -118,99 +242,28 @@ def migrate_legacy_mcp_profile(
     if not isinstance(payload, dict):
         raise ValueError("legacy MCP configuration must be an object")
     legacy_servers = _legacy_servers(payload)
-    registry = store.load_registry()
-
-    overrides: dict[str, BundledOverride] = {}
-    custom: dict[str, Any] = {}
-    credentials: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
-    conflicts: list[str] = []
-
-    for name, raw in legacy_servers.items():
-        bundled = registry.servers.get(name)
-        if bundled is not None:
-            expected = bundled.model_dump(by_alias=True)
-            if _bundle_signature(raw) != _bundle_signature(expected):
-                conflicts.append(name)
-                continue
-            overrides[name] = BundledOverride(
-                enabled=bool(raw.get("enabled", bundled.enabled_by_default))
-            )
-            continue
-
-        transport = str(raw.get("transport") or "stdio").strip().lower()
-        if transport == "http":
-            transport = "streamable_http"
-        env = {str(key): str(value) for key, value in (raw.get("env") or {}).items()}
-        headers = {str(key): str(value) for key, value in (raw.get("headers") or {}).items()}
-        definition: dict[str, Any] = {
-            "transport": transport,
-            "enabled": bool(raw.get("enabled", True)),
-            "description": str(raw.get("description") or ""),
-        }
-        if transport == "stdio":
-            definition.update(
-                {
-                    "command": raw.get("command"),
-                    "args": list(raw.get("args") or []),
-                    "cwd": raw.get("cwd"),
-                    "envKeys": sorted(env),
-                }
-            )
-        else:
-            definition.update(
-                {
-                    "url": raw.get("url"),
-                    "headerKeys": sorted(headers),
-                }
-            )
-        custom[name] = _CUSTOM_ADAPTER.validate_python(definition)
-        credentials[name] = (env, headers)
-
-    if conflicts:
-        joined = ", ".join(sorted(conflicts))
-        raise MCPConfigMigrationConflictError(
-            f"customized definitions use reserved bundled names: {joined}"
-        )
+    plan = _plan_migration(legacy_servers, store.load_registry())
 
     migration_dir = store.profile_path.parent / "migration"
     migration_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup_path = migration_dir / f"legacy-{timestamp}.encrypted.json"
-    backup_path.write_text(
-        json.dumps(encrypt_local_secret(source_bytes)),
-        encoding="utf-8",
-    )
-    with contextlib.suppress(OSError):
-        os.chmod(backup_path, 0o600)
+    _write_encrypted_backup(backup_path, source_bytes)
 
     profile = MCPProfileDocument(
         schemaVersion=2,
-        bundledOverrides=overrides,
-        customServers=custom,
+        bundledOverrides=plan.overrides,
+        customServers=plan.custom,
     )
-    secret_snapshot = (
-        store.secret_store.path.read_bytes() if store.secret_store.path.is_file() else None
-    )
-    try:
-        for name, (env, headers) in credentials.items():
-            store.secret_store.set_for_server(name, env=env, headers=headers)
-        store._write_profile(profile)
-    except Exception:
-        if secret_snapshot is None:
-            store.secret_store.path.unlink(missing_ok=True)
-        else:
-            store.secret_store.path.write_bytes(secret_snapshot)
-        raise
+    _write_profile_with_credentials(store, profile, plan.credentials)
 
     receipt_path = migration_dir / f"receipt-{timestamp}.json"
-    receipt = {
-        "schemaVersion": 2,
-        "migratedAt": datetime.now(timezone.utc).isoformat(),
-        "sourceSha256": hashlib.sha256(source_bytes).hexdigest(),
-        "backupPath": str(backup_path),
-        "servers": sorted(legacy_servers),
-    }
-    receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    _write_receipt(
+        receipt_path,
+        source_bytes=source_bytes,
+        backup_path=backup_path,
+        servers=sorted(legacy_servers),
+    )
     return MigrationResult(
         status="migrated",
         migrated_servers=tuple(sorted(legacy_servers)),

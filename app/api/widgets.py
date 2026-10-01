@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -180,6 +181,75 @@ def _parse_json_dict(value: Any) -> dict[str, Any] | None:
     return None
 
 
+_WIDGET_STATE_TOOLS = {"widget_create", "widget_update", "widget_close"}
+
+
+def _find_live_widget(metadata: dict[str, Any], widget_id: str) -> dict[str, Any] | None:
+    for candidate in metadata.get("live_widgets") or []:
+        if isinstance(candidate, dict) and str(candidate.get("widget_id") or "") == widget_id:
+            return candidate
+    return None
+
+
+def _first_artifact_output(artifact: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("output", "tool_output", "result"):
+        output_payload = _parse_json_dict(artifact.get(key))
+        if output_payload:
+            return output_payload
+    return None
+
+
+def _widget_state_artifacts(
+    metadata: dict[str, Any], widget_id: str
+) -> Iterator[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """Yield ``(tool_name, output, args)`` for each successful call on ``widget_id``."""
+    for artifact in metadata.get("tool_artifacts") or []:
+        if not isinstance(artifact, dict) or _artifact_failed(artifact):
+            continue
+        tool_name = artifact.get("tool") or artifact.get("tool_name")
+        if tool_name not in _WIDGET_STATE_TOOLS:
+            continue
+        output_payload = _first_artifact_output(artifact)
+        if not output_payload or str(output_payload.get("widget_id") or "") != widget_id:
+            continue
+        args = artifact.get("args")
+        yield tool_name, output_payload, args if isinstance(args, dict) else {}
+
+
+class _WidgetSnapshotFold:
+    """A widget's fields as its tool calls leave them, folded in call order.
+
+    A plain class, not a dataclass: the widget API tests load this module from
+    its file path without registering it in ``sys.modules``, which the
+    dataclass decorator requires.
+    """
+
+    __slots__ = ("latest_state", "status", "title", "version")
+
+    def __init__(self, live_widget: dict[str, Any] | None) -> None:
+        live = live_widget or {}
+        self.title: Any = live.get("title")
+        self.status: str = str(live.get("status") or "active").strip().lower() or "active"
+        self.version: int = int(live.get("version") or 1)
+        self.latest_state: dict[str, Any] | None = None
+
+    def apply(self, tool_name: str, output: dict[str, Any], args: dict[str, Any]) -> None:
+        self.title = output.get("title") or args.get("title") or self.title
+        self.status = (
+            str(output.get("status") or self.status or "active").strip().lower() or "active"
+        )
+        self.version = int(output.get("version") or self.version or 1)
+
+        if tool_name == "widget_create":
+            initial_state = _parse_json_dict(args.get("initial_state"))
+            if initial_state is not None and self.latest_state is None:
+                self.latest_state = initial_state
+        elif tool_name == "widget_update":
+            updated_state = _parse_json_dict(args.get("state"))
+            if updated_state is not None:
+                self.latest_state = updated_state
+
+
 def _extract_widget_snapshot_from_metadata(
     *,
     metadata: Any,
@@ -189,56 +259,14 @@ def _extract_widget_snapshot_from_metadata(
     if not isinstance(metadata, dict):
         return None
 
-    live_widget = None
-    for candidate in metadata.get("live_widgets") or []:
-        if isinstance(candidate, dict) and str(candidate.get("widget_id") or "") == widget_id:
-            live_widget = candidate
-            break
+    fold = _WidgetSnapshotFold(_find_live_widget(metadata, widget_id))
+    for tool_name, output_payload, args in _widget_state_artifacts(metadata, widget_id):
+        fold.apply(tool_name, output_payload, args)
 
-    latest_state: dict[str, Any] | None = None
-    title = (live_widget or {}).get("title")
-    status = str((live_widget or {}).get("status") or "active").strip().lower() or "active"
-    version = int((live_widget or {}).get("version") or 1)
-
-    for artifact in metadata.get("tool_artifacts") or []:
-        if not isinstance(artifact, dict):
-            continue
-        if _artifact_failed(artifact):
-            continue
-
-        tool_name = artifact.get("tool") or artifact.get("tool_name")
-        if tool_name not in {"widget_create", "widget_update", "widget_close"}:
-            continue
-
-        output_payload = None
-        for key in ("output", "tool_output", "result"):
-            output_payload = _parse_json_dict(artifact.get(key))
-            if output_payload:
-                break
-        if not output_payload or str(output_payload.get("widget_id") or "") != widget_id:
-            continue
-
-        args = artifact.get("args")
-        if not isinstance(args, dict):
-            args = {}
-
-        title = output_payload.get("title") or args.get("title") or title
-        status = str(output_payload.get("status") or status or "active").strip().lower() or "active"
-        version = int(output_payload.get("version") or version or 1)
-
-        if tool_name == "widget_create":
-            initial_state = _parse_json_dict(args.get("initial_state"))
-            if initial_state is not None and latest_state is None:
-                latest_state = initial_state
-        elif tool_name == "widget_update":
-            updated_state = _parse_json_dict(args.get("state"))
-            if updated_state is not None:
-                latest_state = updated_state
-
-    if not latest_state:
+    if not fold.latest_state:
         return None
     try:
-        validate_html_widget_state(latest_state)
+        validate_html_widget_state(fold.latest_state)
     except ValueError:
         logger.warning("Ignoring persisted widget %s with invalid HTML state", widget_id)
         return None
@@ -246,10 +274,10 @@ def _extract_widget_snapshot_from_metadata(
     return {
         "widget_id": widget_id,
         "session_id": conversation_id,
-        "title": title,
-        "state": latest_state,
-        "status": status,
-        "version": version,
+        "title": fold.title,
+        "state": fold.latest_state,
+        "status": fold.status,
+        "version": fold.version,
     }
 
 
@@ -620,6 +648,103 @@ async def widget_action(
     )
 
 
+def _verified_widget_claims(
+    token: str, *, widget_id: str, session_id: str
+) -> dict[str, Any] | None:
+    """The token's claims when it is valid and names this widget and session."""
+    token_service = get_widget_token_service()
+    try:
+        claims = token_service.verify(token)
+    except pyjwt.InvalidTokenError:
+        return None
+
+    if claims.get("wid") != widget_id or claims.get("sid") != session_id:
+        return None
+    return claims
+
+
+async def _handle_user_state_patch(
+    websocket: WebSocket,
+    patch_data: Any,
+    *,
+    widget_id: str,
+    store: Any,
+    connect_record: Any,
+    last_seen: dict[str, tuple[int, str, float]],
+    send_lock: asyncio.Lock,
+) -> None:
+    """Apply one client ``user_state_patch`` and report the result on the socket."""
+    if not isinstance(patch_data, dict):
+        return
+    current = await store.get(widget_id)
+    contract_error = _html_patch_contract_error(
+        current if current is not None else connect_record, patch_data
+    )
+    if contract_error:
+        await _send_widget_event(
+            websocket,
+            {"type": "error", "message": contract_error},
+            send_lock,
+        )
+        return
+    try:
+        updated = await store.patch(widget_id, patch_data)
+        last_seen["value"] = _widget_record_signature(updated)
+        await _send_widget_event(
+            websocket,
+            _widget_event_payload("widget_update", updated),
+            send_lock,
+        )
+    except (KeyError, ValueError) as e:
+        await _send_widget_event(
+            websocket,
+            {"type": "error", "message": str(e)},
+            send_lock,
+        )
+
+
+async def _receive_client_messages(
+    websocket: WebSocket,
+    *,
+    widget_id: str,
+    store: Any,
+    connect_record: Any,
+    last_seen: dict[str, tuple[int, str, float]],
+    send_lock: asyncio.Lock,
+) -> None:
+    """Handle client messages until the socket raises (a disconnect included)."""
+    while True:
+        raw = await websocket.receive_text()
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        msg_type = msg.get("type")
+
+        if msg_type == "pong":
+            continue
+
+        if msg_type == "user_state_patch":
+            await _handle_user_state_patch(
+                websocket,
+                msg.get("patch"),
+                widget_id=widget_id,
+                store=store,
+                connect_record=connect_record,
+                last_seen=last_seen,
+                send_lock=send_lock,
+            )
+
+
+async def _stop_widget_tasks(*tasks: asyncio.Task[None]) -> None:
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 # ---------------------------------------------------------------------------
 # WS /widgets/{widget_id}/connect
 # ---------------------------------------------------------------------------
@@ -642,15 +767,8 @@ async def widget_connect(
       user_state_patch   — shallow-merge patch from UI interaction
       pong               — keepalive reply
     """
-    # Verify token
-    token_service = get_widget_token_service()
-    try:
-        claims = token_service.verify(token)
-    except pyjwt.InvalidTokenError:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
-    if claims.get("wid") != widget_id or claims.get("sid") != session_id:
+    claims = _verified_widget_claims(token, widget_id=widget_id, session_id=session_id)
+    if claims is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -689,56 +807,18 @@ async def widget_connect(
     )
 
     try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-
-            msg_type = msg.get("type")
-
-            if msg_type == "pong":
-                continue
-
-            if msg_type == "user_state_patch":
-                patch_data = msg.get("patch")
-                if not isinstance(patch_data, dict):
-                    continue
-                current = await store.get(widget_id)
-                contract_error = _html_patch_contract_error(
-                    current if current is not None else record, patch_data
-                )
-                if contract_error:
-                    await _send_widget_event(
-                        websocket,
-                        {"type": "error", "message": contract_error},
-                        send_lock,
-                    )
-                    continue
-                try:
-                    updated = await store.patch(widget_id, patch_data)
-                    last_seen["value"] = _widget_record_signature(updated)
-                    await _send_widget_event(
-                        websocket,
-                        _widget_event_payload("widget_update", updated),
-                        send_lock,
-                    )
-                except (KeyError, ValueError) as e:
-                    await _send_widget_event(
-                        websocket,
-                        {"type": "error", "message": str(e)},
-                        send_lock,
-                    )
+        await _receive_client_messages(
+            websocket,
+            widget_id=widget_id,
+            store=store,
+            connect_record=record,
+            last_seen=last_seen,
+            send_lock=send_lock,
+        )
     except WebSocketDisconnect:
         pass
     except Exception:
         logger.debug("Widget WS error for %s", widget_id, exc_info=True)
     finally:
-        ping_task.cancel()
-        watch_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await ping_task
-        with contextlib.suppress(asyncio.CancelledError):
-            await watch_task
+        await _stop_widget_tasks(ping_task, watch_task)
         await manager.disconnect(widget_id, websocket)

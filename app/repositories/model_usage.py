@@ -167,6 +167,54 @@ class RecordEventCommand:
         """Stable idempotency key: ``<operation_id>:<attempt>`` (data-contract.md §4.1)."""
         return f"{self.operation_id}:{self.attempt}"
 
+    @property
+    def bucket_start_utc(self) -> datetime:
+        """The UTC minute whose rollup this attempt folds into."""
+        return self.started_at.astimezone(timezone.utc).replace(second=0, microsecond=0)
+
+    def event_values(self) -> dict[str, Any]:
+        """Column values for this attempt's immutable ``model_usage_events`` row."""
+        event_row: dict[str, Any] = {
+            "event_key": self.event_key,
+            "operation_id": self.operation_id,
+            "attempt": self.attempt,
+            "user_id": self.context.user_id,
+            "conversation_id": self.context.conversation_id,
+            "request_message_id": self.context.request_message_id,
+            "document_id": self.context.document_id,
+            "correlation_id": self.context.correlation_id,
+            "langsmith_run_id": self.context.langsmith_run_id,
+            "provider_request_id": self.provider_request_id,
+            "provider": self.provider,
+            "model": self.model,
+            "operation": self.context.operation,
+            "agent_id": self.context.agent_id,
+            "status": self.status,
+            "usage_source": self.usage.source,
+            "generated_images": self.usage.generated_images,
+            "latency_ms": self.latency_ms,
+            "error_code": self.error_code,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+        }
+        for field in NULLABLE_TOKEN_FIELDS:
+            event_row[field] = getattr(self.usage, field)
+        return event_row
+
+    def rollup_key(self, bucket_start_utc: datetime) -> str:
+        """The ``rollup_key`` of this attempt's minute rollup row."""
+        return compute_rollup_key(
+            bucket_start_utc=bucket_start_utc,
+            user_id=self.context.user_id,
+            conversation_id=self.context.conversation_id,
+            provider=self.provider,
+            model=self.model,
+            operation=self.context.operation,
+            agent_id=self.context.agent_id,
+            status=self.status,
+            usage_source=self.usage.source,
+        )
+
 
 @dataclass(frozen=True)
 class RecordResult:
@@ -268,6 +316,24 @@ def _partition_rows(rows: Iterable[_T], *, batch_size: int) -> Iterator[list[_T]
         yield batch
 
 
+def _rows_with_rollup_keys(aggregates: Iterable[Mapping[str, Any]]) -> Iterator[dict[str, Any]]:
+    """Copy each aggregate row and add the key ``record_event`` gives its dimensions."""
+    for aggregate in aggregates:
+        row = dict(aggregate)
+        row["rollup_key"] = compute_rollup_key(
+            bucket_start_utc=row["bucket_start_utc"],
+            user_id=row["user_id"],
+            conversation_id=row["conversation_id"],
+            provider=row["provider"],
+            model=row["model"],
+            operation=row["operation"],
+            agent_id=row["agent_id"],
+            status=row["status"],
+            usage_source=row["usage_source"],
+        )
+        yield row
+
+
 class ModelUsageRepository:
     """Own the model-usage ledger's write transaction and bounded queries."""
 
@@ -284,55 +350,15 @@ class ModelUsageRepository:
         already recorded, so the rollup upsert is skipped entirely and the
         transaction rolls back to a no-op read.
         """
-        started_at = command.started_at
-        bucket_start_utc = started_at.astimezone(timezone.utc).replace(second=0, microsecond=0)
-
-        event_values: dict[str, Any] = {
-            "event_key": command.event_key,
-            "operation_id": command.operation_id,
-            "attempt": command.attempt,
-            "user_id": command.context.user_id,
-            "conversation_id": command.context.conversation_id,
-            "request_message_id": command.context.request_message_id,
-            "document_id": command.context.document_id,
-            "correlation_id": command.context.correlation_id,
-            "langsmith_run_id": command.context.langsmith_run_id,
-            "provider_request_id": command.provider_request_id,
-            "provider": command.provider,
-            "model": command.model,
-            "operation": command.context.operation,
-            "agent_id": command.context.agent_id,
-            "status": command.status,
-            "usage_source": command.usage.source,
-            "generated_images": command.usage.generated_images,
-            "latency_ms": command.latency_ms,
-            "error_code": command.error_code,
-            "started_at": started_at,
-            "completed_at": command.completed_at,
-        }
-        for field in NULLABLE_TOKEN_FIELDS:
-            event_values[field] = getattr(command.usage, field)
-
+        bucket_start_utc = command.bucket_start_utc
         event_insert = (
             insert(ModelUsageEvent)
-            .values(**event_values)
+            .values(**command.event_values())
             .on_conflict_do_nothing(index_elements=["event_key"])
             .returning(ModelUsageEvent.id)
         )
-
-        rollup_key = compute_rollup_key(
-            bucket_start_utc=bucket_start_utc,
-            user_id=command.context.user_id,
-            conversation_id=command.context.conversation_id,
-            provider=command.provider,
-            model=command.model,
-            operation=command.context.operation,
-            agent_id=command.context.agent_id,
-            status=command.status,
-            usage_source=command.usage.source,
-        )
         minute_upsert = self._minute_upsert_statement(
-            rollup_key=rollup_key,
+            rollup_key=command.rollup_key(bucket_start_utc),
             bucket_start_utc=bucket_start_utc,
             command=command,
         )
@@ -664,6 +690,41 @@ class ModelUsageRepository:
         insert_batch_size: int,
     ) -> int:
         """Atomically replace one bounded time chunk from server aggregates."""
+        aggregate_statement = self._minute_aggregate_statement(
+            start_inclusive=start_inclusive,
+            end_exclusive=end_exclusive,
+            insert_batch_size=insert_batch_size,
+        )
+
+        with self.session_factory() as session:
+            self._lock_minute_range(
+                session, start_inclusive=start_inclusive, end_exclusive=end_exclusive
+            )
+            session.execute(
+                delete(ModelUsageMinute).where(
+                    ModelUsageMinute.bucket_start_utc >= start_inclusive,
+                    ModelUsageMinute.bucket_start_utc < end_exclusive,
+                )
+            )
+            aggregates = session.execute(aggregate_statement).mappings()
+
+            written = 0
+            for batch in _partition_rows(
+                _rows_with_rollup_keys(aggregates), batch_size=insert_batch_size
+            ):
+                session.execute(insert(ModelUsageMinute), batch)
+                written += len(batch)
+            session.commit()
+            return written
+
+    @staticmethod
+    def _minute_aggregate_statement(
+        *,
+        start_inclusive: datetime,
+        end_exclusive: datetime,
+        insert_batch_size: int,
+    ):
+        """Raw events in the range, grouped into the rows a minute rollup holds."""
         bucket = func.date_trunc("minute", ModelUsageEvent.started_at, "UTC").label(
             "bucket_start_utc"
         )
@@ -692,7 +753,7 @@ class ModelUsageRepository:
                     func.count(event_column).label(f"{field}_known_count"),
                 )
             )
-        aggregate_statement = (
+        return (
             select(bucket, *dimensions, *aggregate_expressions)
             .where(
                 ModelUsageEvent.started_at >= start_inclusive,
@@ -703,55 +764,29 @@ class ModelUsageRepository:
             .execution_options(stream_results=True, yield_per=insert_batch_size)
         )
 
-        with self.session_factory() as session:
-            session.execute(
-                text(
-                    "SELECT pg_advisory_xact_lock("
-                    "(:namespace * 4294967296::bigint) + "
-                    "floor(extract(epoch FROM minute_at) / 60)::bigint) "
-                    "FROM generate_series("
-                    ":start_inclusive, "
-                    ":end_exclusive - interval '1 minute', "
-                    "interval '1 minute'"
-                    ") AS minute_at "
-                    "ORDER BY minute_at"
-                ),
-                {
-                    "namespace": _MINUTE_LOCK_NAMESPACE,
-                    "start_inclusive": start_inclusive,
-                    "end_exclusive": end_exclusive,
-                },
-            ).all()
-            session.execute(
-                delete(ModelUsageMinute).where(
-                    ModelUsageMinute.bucket_start_utc >= start_inclusive,
-                    ModelUsageMinute.bucket_start_utc < end_exclusive,
-                )
-            )
-            aggregates = session.execute(aggregate_statement).mappings()
-
-            def rebuilt_rows() -> Iterator[dict[str, Any]]:
-                for aggregate in aggregates:
-                    row = dict(aggregate)
-                    row["rollup_key"] = compute_rollup_key(
-                        bucket_start_utc=row["bucket_start_utc"],
-                        user_id=row["user_id"],
-                        conversation_id=row["conversation_id"],
-                        provider=row["provider"],
-                        model=row["model"],
-                        operation=row["operation"],
-                        agent_id=row["agent_id"],
-                        status=row["status"],
-                        usage_source=row["usage_source"],
-                    )
-                    yield row
-
-            written = 0
-            for batch in _partition_rows(rebuilt_rows(), batch_size=insert_batch_size):
-                session.execute(insert(ModelUsageMinute), batch)
-                written += len(batch)
-            session.commit()
-            return written
+    @staticmethod
+    def _lock_minute_range(
+        session: Session, *, start_inclusive: datetime, end_exclusive: datetime
+    ) -> None:
+        """Take every minute's exclusive advisory lock in the range, in minute order."""
+        session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "(:namespace * 4294967296::bigint) + "
+                "floor(extract(epoch FROM minute_at) / 60)::bigint) "
+                "FROM generate_series("
+                ":start_inclusive, "
+                ":end_exclusive - interval '1 minute', "
+                "interval '1 minute'"
+                ") AS minute_at "
+                "ORDER BY minute_at"
+            ),
+            {
+                "namespace": _MINUTE_LOCK_NAMESPACE,
+                "start_inclusive": start_inclusive,
+                "end_exclusive": end_exclusive,
+            },
+        ).all()
 
     def delete_raw_events_older_than(self, cutoff: datetime, *, batch_size: int = 500) -> int:
         """Delete ``model_usage_events`` rows started before ``cutoff``, in batches."""
