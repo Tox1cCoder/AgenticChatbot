@@ -17,10 +17,23 @@ LangGraph, Streamlit (`demo.py`), local sidecar `client_backend/` on :8100.
 **Spec:** the audit reports, summarised in the Appendix. The session note is at
 `~/claude-assistant/state/sessions/2026-09-25-codebase-audit.md`.
 
-## Status (2026-10-01, end of round 4)
+## Follow-up remediation (2026-10-01)
+
+The independent review reproduced additional Continue and approval defects despite
+the earlier passing suite. Implementation and verification are tracked in
+[the follow-up plan](2026-10-01-refactor-remediation.md). The round tables below
+are historical reports, including their original unfinished findings.
+
+The renewed request lifts Task 6's earlier deferral. The follow-up covers the confirmed
+code/configuration/test findings, package deletion, and local skill secret migration.
+[Final security remediation](2026-10-01-final-security-remediation.md) completes the
+server MCP administrator/stdio restrictions and the Take100 password rotation. The
+attendance password rotation needs the current site URL because its saved tunnel is offline.
+
+## Historical status (2026-10-01, end of round 4)
 
 Round 4 shipped: `3adb3eee` (epoch carried through pauses, epoch cap enforced, research
-accounting kept), `99ee77e3` + `3b1d7bc7` (Phase 5 splits, all ≤ 8), `b71f8609` (dead
+accounting kept), `99ee77e3` + `3b1d7bc7` (named Phase 5 targets split to ≤ 8), `b71f8609` (dead
 state keys), `1c743e7f`, `496429b6`, `41b93954` (generation row settled on every turn
 ending — reproduced on PostgreSQL), `aa8157b4`, `4697d43d` (fallback keeps tool
 exclusions), `26ade534` (Python 3.11 + ruff py311; UP042 ignored on purpose). Full suite
