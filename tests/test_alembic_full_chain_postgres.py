@@ -9,7 +9,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -869,7 +869,7 @@ _CHUNK_INSERT = (
     "'hello', repeat('0', 64), 5, 1, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, :status)"
 )
 
-_DELETED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_DELETED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 
 _RESOLVER_OF = "SELECT resolved_by_user_id FROM hitl_interrupts WHERE id = :id"
 

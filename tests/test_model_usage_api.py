@@ -2,7 +2,7 @@
 
 import inspect
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -36,9 +36,9 @@ setup_auto_injection(Container)
 
 _USER_A = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 _USER_B = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
-_GENERATED_AT = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
-_RANGE_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
-_RANGE_END = datetime(2026, 1, 2, tzinfo=timezone.utc)
+_GENERATED_AT = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
+_RANGE_START = datetime(2026, 1, 1, tzinfo=UTC)
+_RANGE_END = datetime(2026, 1, 2, tzinfo=UTC)
 _CONVERSATION_ID = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
 
 

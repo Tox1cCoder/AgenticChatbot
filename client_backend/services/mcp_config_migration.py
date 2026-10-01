@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -211,7 +211,7 @@ def _write_receipt(
 ) -> None:
     receipt = {
         "schemaVersion": 2,
-        "migratedAt": datetime.now(timezone.utc).isoformat(),
+        "migratedAt": datetime.now(UTC).isoformat(),
         "sourceSha256": hashlib.sha256(source_bytes).hexdigest(),
         "backupPath": str(backup_path),
         "servers": servers,
@@ -246,7 +246,7 @@ def migrate_legacy_mcp_profile(
 
     migration_dir = store.profile_path.parent / "migration"
     migration_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     backup_path = migration_dir / f"legacy-{timestamp}.encrypted.json"
     _write_encrypted_backup(backup_path, source_bytes)
 

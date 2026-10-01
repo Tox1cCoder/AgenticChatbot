@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -92,7 +92,7 @@ class _UpstreamResponse:
 
 
 def _session() -> LocalSessionPayload:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return LocalSessionPayload(
         user_id="user-123",
         server_user_id="user-123",

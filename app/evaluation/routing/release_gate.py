@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.evaluation.routing.contracts import (
     REQUIRED_CATEGORIES,
@@ -85,7 +85,7 @@ def check_routing_release(
     dataset therefore *fails* composition instead of silently passing it — a
     caller who forgets the argument gets a refusal, not an unchecked release.
     """
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     reasons: set[str] = set()
 
     reasons |= _review_reasons(report, review)

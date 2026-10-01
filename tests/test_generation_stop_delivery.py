@@ -20,6 +20,7 @@ need a worker registry the lifecycle deliberately does not keep.
 
 from __future__ import annotations
 
+from datetime import UTC
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -315,12 +316,12 @@ def _streaming_service(control, events):
     service.tool_approval_setting_repository = None
     service.persisted: list[dict] = []
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     message_id = uuid4()
 
     def _created(_entity):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return SimpleNamespace(
             id=message_id,
             conversation_id=CONVERSATION_ID,

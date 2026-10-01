@@ -11,7 +11,7 @@ import json
 import os
 import secrets
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -54,7 +54,7 @@ def create_local_session_token(
     device_id: str | None = None,
 ) -> str:
     """Sign a local session JWT the UI presents to this sidecar."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expires = now + timedelta(minutes=client_settings.local_session_expire_minutes)
 
     payload = {
@@ -87,8 +87,8 @@ def verify_local_session_token(token: str) -> LocalSessionPayload:
             server_user_id=payload["server_user_id"],
             device_id=payload.get("device_id"),
             device_identifier=payload.get("device_identifier") or payload["device_id"],
-            exp=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
-            iat=datetime.fromtimestamp(payload["iat"], tz=timezone.utc),
+            exp=datetime.fromtimestamp(payload["exp"], tz=UTC),
+            iat=datetime.fromtimestamp(payload["iat"], tz=UTC),
         )
     except jwt.ExpiredSignatureError as e:
         raise LocalSessionError("Local session has expired") from e

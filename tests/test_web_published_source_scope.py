@@ -8,7 +8,7 @@ of sources the answer actually rests on.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -128,7 +128,7 @@ def _session(*cohorts: tuple[ProviderImageCandidate, ...], text: tuple[str, ...]
             text=(Text(*text),), images=(Images(*cohorts),), openers=(Opener(),)
         ),
         image_service=ImageService(),
-        now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 16, tzinfo=UTC),
     )
     scope = ResearchScope(
         conversation_id=str(uuid4()), user_id=str(uuid4()), logical_turn_id=str(uuid4())

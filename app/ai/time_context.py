@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
@@ -8,10 +8,10 @@ from app.core.config import settings
 
 def _coerce_utc(value: datetime | None) -> datetime:
     if value is None:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _resolve_timezone(timezone_name: str | None) -> tuple[ZoneInfo | timezone, str, str | None]:
@@ -19,7 +19,7 @@ def _resolve_timezone(timezone_name: str | None) -> tuple[ZoneInfo | timezone, s
     try:
         return ZoneInfo(candidate), candidate, None
     except Exception:
-        return timezone.utc, "UTC", "configured timezone was invalid"
+        return UTC, "UTC", "configured timezone was invalid"
 
 
 def build_runtime_time_context_block(

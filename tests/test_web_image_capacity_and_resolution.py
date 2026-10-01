@@ -8,7 +8,7 @@ the provider's 500px proxy over the original, and neither loss was reported.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -205,7 +205,7 @@ async def _run(
             text=(SaturatingText(text_count),), images=(UnrelatedImages(image_count),)
         ),
         image_service=image_service or RecordingImageService(),
-        now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 16, tzinfo=UTC),
     )
     session = service.new_session(_scope(), ResearchBudget(), mode=mode)
     bundle = await session.search(
@@ -231,7 +231,7 @@ def _scripted_session(
             text=(SaturatingText(text_count),), images=(ScriptedImages(*cohorts),)
         ),
         image_service=image_service or RecordingImageService(),
-        now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 16, tzinfo=UTC),
     )
     session = service.new_session(_scope(), ResearchBudget(), mode="quick")
     return session, visual_intent
@@ -419,7 +419,7 @@ async def test_losing_every_candidate_is_reported() -> None:
     service = WebResearchService(
         resolver=ProviderResolver(text=(SaturatingText(5),), images=(UnusablePages(6),)),
         image_service=RecordingImageService(),
-        now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 16, tzinfo=UTC),
     )
     session = service.new_session(_scope(), ResearchBudget(), mode="quick")
 
@@ -463,7 +463,7 @@ async def test_visual_followup_can_reuse_the_text_query_once() -> None:
             text=(SaturatingText(5),), images=(UnrelatedImages(2),)
         ),
         image_service=RecordingImageService(),
-        now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 16, tzinfo=UTC),
     )
     session = service.new_session(_scope(), ResearchBudget(), mode="quick")
     first = await session.search(
@@ -667,7 +667,7 @@ async def test_a_deliberate_open_still_fits_once_the_catalog_is_full() -> None:
         ),
         image_service=RecordingImageService(),
         max_candidate_catalog=8,
-        now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 16, tzinfo=UTC),
     )
     session = service.new_session(_scope(), ResearchBudget(), mode="quick")
     await session.search(

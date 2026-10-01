@@ -16,6 +16,7 @@ import json
 import threading
 import typing
 from dataclasses import replace
+from datetime import UTC
 from uuid import uuid4
 
 import pytest
@@ -597,7 +598,7 @@ def test_sync_wrapper_repository_failure_enqueues_and_returns_response():
 
 def test_classify_status_maps_known_exceptions():
     assert classify_status(TimeoutError()) == "timeout"
-    assert classify_status(asyncio.TimeoutError()) == "timeout"
+    assert classify_status(TimeoutError()) == "timeout"
     assert classify_status(ValueError()) == "error"
 
 
@@ -610,10 +611,10 @@ def test_classify_error_returns_bounded_class_name_not_message():
 
 
 def test_serialize_deserialize_round_trip_preserves_event_key():
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    started = datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc)
-    completed = datetime(2026, 7, 20, 12, 0, 1, tzinfo=timezone.utc)
+    started = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
+    completed = datetime(2026, 7, 20, 12, 0, 1, tzinfo=UTC)
     operation_id = uuid4()
     command = RecordEventCommand(
         operation_id=operation_id,

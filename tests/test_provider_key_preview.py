@@ -7,7 +7,7 @@ every re-encryption of the same key.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -36,7 +36,7 @@ def _stored(api_key_encrypted: str) -> SimpleNamespace:
         id=uuid4(),
         provider_type="openai",
         is_default=True,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         provider_metadata={},
         api_key_encrypted=api_key_encrypted,
     )

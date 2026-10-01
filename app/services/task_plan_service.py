@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -203,7 +203,7 @@ class TaskPlanService(ITaskPlanService):
         self, conversation_id: UUID, descriptions: list[str]
     ) -> list[TaskPlanRead]:
         normalized = self._normalize_descriptions(descriptions)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         with self.task_plan_repository.session_factory() as session:
             max_task_order = (
@@ -245,7 +245,7 @@ class TaskPlanService(ITaskPlanService):
         preserve_existing_status: bool,
     ) -> list[TaskPlanRead]:
         normalized_todos = self._normalize_todos(todos)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         with self.task_plan_repository.session_factory() as session:
             # Acquire a row-level lock on the Conversation to serialise concurrent

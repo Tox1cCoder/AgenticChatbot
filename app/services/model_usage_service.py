@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -32,7 +32,7 @@ from app.schemas.model_usage import (
 
 logger = logging.getLogger(__name__)
 
-_UTC = timezone.utc
+_UTC = UTC
 USAGE_DASHBOARD_DEFAULT_DAYS = 30
 USAGE_CONVERSATION_DEFAULT_DAYS = 730
 USAGE_MAX_RANGE_DAYS = 730

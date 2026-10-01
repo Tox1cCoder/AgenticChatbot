@@ -64,7 +64,7 @@ function Test-PythonCandidate {
     }
     $probeArguments = @($PrefixArguments) + @(
         "-c",
-        "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"
+        "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
     )
     try {
         & $Command @probeArguments 2>$null
@@ -87,7 +87,7 @@ function Find-CompatiblePython {
             return $candidate
         }
     }
-    throw "Python 3.10 or newer is required but no compatible interpreter was found on PATH."
+    throw "Python 3.11 or newer is required but no compatible interpreter was found on PATH."
 }
 
 function Test-VenvPython {

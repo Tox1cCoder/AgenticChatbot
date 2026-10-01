@@ -99,7 +99,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 
 ## Tech Stack
 
-- **Runtime**: Python 3.10+, FastAPI, Uvicorn, asyncio
+- **Runtime**: Python 3.11+, FastAPI, Uvicorn, asyncio
 - **AI**: LangChain 1.x, LangGraph 1.x, LangSmith, langchain-google-genai, langchain-openai, langchain-mcp-adapters, Tavily
 - **Persistence**: SQLAlchemy 2.x + Alembic, PostgreSQL 14+, psycopg driver
 - **Background**: Celery 5.x + Redis 7.x
@@ -178,7 +178,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 
 | Component | Requirement | Notes |
 |---|---|---|
-| Python | **3.10+** | 3.13 is the current development runtime. Use 3.11 only for the frozen CUDA environment (`requirements.txt` / `environment.yml`), which pins packages without 3.13 wheels |
+| Python | **3.11+** | 3.13 is the current development runtime. Use 3.11 only for the frozen CUDA environment (`requirements.txt` / `environment.yml`), which pins packages without 3.13 wheels |
 | PostgreSQL | **14+** | Required; holds auth, conversations, plans, feedback, HITL state, LangGraph checkpoints |
 | Redis | **7+** | Strongly recommended. Required for Celery, live widgets, client runtime state, HITL timeouts |
 | Qdrant | latest | Required for document retrieval / RAG |
@@ -1608,7 +1608,7 @@ templates instead of embedding launcher text in either builder.
 On Windows, run `start-client-backend.bat` (Explorer/cmd) or
 `./start-client-backend.ps1` (PowerShell). The launcher supports Windows
 PowerShell 5.1 and PowerShell 7 without relying on `Get-FileHash`. It selects
-Python 3.10+, creates or repairs the bundle-owned `.venv`, bootstraps missing pip
+Python 3.11+, creates or repairs the bundle-owned `.venv`, bootstraps missing pip
 with `ensurepip`, and installs `requirements-client.txt` only when its SHA-256 or
 the interpreter major/minor changes. The marker is written only after a
 successful install. If the venv is corrupt, only the bundle-owned `.venv` is

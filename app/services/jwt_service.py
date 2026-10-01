@@ -1,6 +1,6 @@
 """JWT Service for token management and authentication utilities"""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 
@@ -26,21 +26,21 @@ class JwtService:
         self, delta: timedelta | None = None, now: datetime | None = None
     ) -> datetime:
         if now is None:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
         if delta:
             return now + delta
         return now + timedelta(minutes=self.access_token_expire_minutes)
 
     def create_access_token(self, data: dict, expires_delta: timedelta | None = None) -> str:
         to_encode = data.copy()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expire = self._calculate_expiration_time(expires_delta, now)
         to_encode.update({"exp": int(expire.timestamp()), "iat": int(now.timestamp())})
         return jwt.encode(to_encode, get_signing_key(), algorithm=self.algorithm)
 
     def create_refresh_token(self, data: dict) -> str:
         to_encode = data.copy()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expire = now + timedelta(days=self.refresh_token_expire_days)
         to_encode.update(
             {

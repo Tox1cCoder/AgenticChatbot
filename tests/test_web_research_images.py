@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -109,7 +109,7 @@ async def _session(
         image_service=image_service,
         max_download_bytes=max_download_bytes,
         max_model_bytes=max_model_bytes,
-        now=lambda: datetime(2026, 9, 15, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 15, tzinfo=UTC),
     )
     session = service.new_session(_scope(), ResearchBudget(), mode="quick")
     bundle = await session.search(

@@ -2,7 +2,7 @@
 Shared utilities for factory timestamp generation
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 class TimestampUtils:
@@ -11,7 +11,7 @@ class TimestampUtils:
     @staticmethod
     def now() -> datetime:
         """Generate current UTC timestamp for entity creation/updates"""
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     @staticmethod
     def get_timestamp_dict(created_at: datetime = None, updated_at: datetime = None) -> dict:

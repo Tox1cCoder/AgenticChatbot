@@ -12,7 +12,7 @@ import contextlib
 import json
 import logging
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -444,7 +444,7 @@ async def _ping_loop(websocket: WebSocket, send_lock: asyncio.Lock) -> None:
                 websocket,
                 {
                     "type": "ping",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                 },
                 send_lock,
             )
@@ -631,7 +631,7 @@ async def widget_action(
         "control_values": record.state.get("control_values")
         if isinstance(record.state.get("control_values"), dict)
         else {},
-        "at": datetime.now(timezone.utc).isoformat(),
+        "at": datetime.now(UTC).isoformat(),
     }
     try:
         await store.patch(widget_id, {"last_action": last_action_entry})

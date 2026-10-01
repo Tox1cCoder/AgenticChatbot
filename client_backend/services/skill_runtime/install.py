@@ -9,7 +9,7 @@ import json
 import shutil
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -226,7 +226,7 @@ async def _write_install_metadata(
         "bundle_name": source_skill.name,
         "source_hash": source_skill.source_hash,
         "source": "upload" if source_kind == "upload" else "profile",
-        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "installed_at": datetime.now(UTC).isoformat(),
         "enabled": True,
         "installed": True,
     }

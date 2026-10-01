@@ -7,7 +7,7 @@ and must not carry the server's key resolution.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
@@ -39,7 +39,7 @@ class WidgetTokenService:
         user_id: str,
         ttl_seconds: int = WIDGET_TOKEN_TTL_SECONDS,
     ) -> tuple[str, datetime]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=ttl_seconds)
         payload = {
             "sub": user_id,

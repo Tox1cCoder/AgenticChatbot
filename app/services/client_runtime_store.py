@@ -14,7 +14,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -54,7 +54,7 @@ _RESULT_TTL_SECONDS = 300
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _coerce_datetime(value: str | None) -> datetime | None:
@@ -450,7 +450,7 @@ class InMemoryClientRuntimeStore(BaseClientRuntimeStore):
                 message = await asyncio.wait_for(
                     queue.get(), timeout=max(0.0, deadline - loop.time())
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return None
             with self._lock:
                 if isinstance(message, RuntimeCancelMessage):

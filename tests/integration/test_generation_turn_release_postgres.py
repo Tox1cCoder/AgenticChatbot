@@ -24,7 +24,7 @@ import itertools
 import os
 import sys
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
@@ -251,7 +251,7 @@ def _clean_registry():
 
 
 def _row(message_id: UUID, conversation_id: UUID, content: str, sender: int) -> SimpleNamespace:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return SimpleNamespace(
         id=message_id,
         conversation_id=conversation_id,

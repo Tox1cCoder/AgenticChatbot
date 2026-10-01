@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -118,7 +118,7 @@ def test_a_concurrent_duplicate_returns_the_row_that_won(owned_factory):
 def test_a_soft_deleted_row_does_not_block_a_new_one(owned_factory):
     factory, user_id, conversation_id = owned_factory
     repository = ChatImageRepository(factory)
-    repository.create(_row(user_id, conversation_id, deleted_at=datetime.now(timezone.utc)))
+    repository.create(_row(user_id, conversation_id, deleted_at=datetime.now(UTC)))
 
     fresh = repository.create(_row(user_id, conversation_id))
 

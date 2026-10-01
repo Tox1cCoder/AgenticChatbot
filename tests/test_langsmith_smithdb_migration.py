@@ -13,7 +13,7 @@ import inspect
 import io
 import re
 import tokenize
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,7 +92,7 @@ class FakeClient:
 def _project(*, feedback=None, session_feedback=None, started=None):
     return SimpleNamespace(
         id=uuid4(),
-        start_time=started or datetime(2025, 1, 2, tzinfo=timezone.utc),
+        start_time=started or datetime(2025, 1, 2, tzinfo=UTC),
         feedback_stats=feedback,
         session_feedback_stats=session_feedback,
     )
@@ -109,7 +109,7 @@ def _run(**feedback_stats):
 
 
 async def test_experiment_metrics_use_smithdb_v2_with_full_time_window():
-    started = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    started = datetime(2025, 1, 2, tzinfo=UTC)
     project = _project(
         feedback={"groundedness": {"avg": 0.8}},
         session_feedback={"abstention_recall": {"avg": 0.7}},

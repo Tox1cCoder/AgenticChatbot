@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -690,7 +690,7 @@ class _FakeImageRepo:
 
     def __init__(self):
         self.rows: dict[UUID, SimpleNamespace] = {}
-        self._next_created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._next_created_at = datetime(2026, 1, 1, tzinfo=UTC)
 
     def delete_unlinked_by_document_id(
         self,
@@ -730,7 +730,7 @@ def test_active_generation_created_at_reads_from_generation_repository(tmp_path)
     ``created_at`` to distinguish it from a later abandoned attempt."""
     service = _build_service(tmp_path)
     generation_repo = MagicMock()
-    active_created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    active_created_at = datetime(2026, 1, 1, tzinfo=UTC)
     generation_repo.get_active.return_value = SimpleNamespace(created_at=active_created_at)
     service.document_index_service = SimpleNamespace(generation_repository=generation_repo)
     document_id = str(uuid4())
@@ -793,7 +793,7 @@ def test_temp_cleanup_keeps_the_images_of_a_live_document(tmp_path):
         folder = images_root / str(folder_id)
         folder.mkdir(parents=True)
         (folder / "chart.png").write_bytes(b"png")
-        old = (datetime.now(timezone.utc) - timedelta(days=3)).timestamp()
+        old = (datetime.now(UTC) - timedelta(days=3)).timestamp()
         os.utime(folder, (old, old))
     service.document_image_repository.get_image_paths_by_document_id.side_effect = (
         lambda document_id: ["chart.png"] if document_id == live_id else []

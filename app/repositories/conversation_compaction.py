@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 from uuid import UUID, uuid4
 
@@ -105,7 +105,7 @@ class ConversationCompactionRepository(RepositorySessionMixin):
 
     @staticmethod
     def _utcnow() -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     @staticmethod
     def _job_upsert_statement(
@@ -733,7 +733,7 @@ class ConversationCompactionRepository(RepositorySessionMixin):
         oldest_age = 0.0
         if oldest_updated is not None:
             if oldest_updated.tzinfo is None:
-                oldest_updated = oldest_updated.replace(tzinfo=timezone.utc)
+                oldest_updated = oldest_updated.replace(tzinfo=UTC)
             oldest_age = max(0.0, (now - oldest_updated).total_seconds())
         return {
             "job_counts": job_counts,

@@ -71,7 +71,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -574,7 +574,7 @@ def run_benchmark(
     manifest_loader: Callable[[Path], list[dict[str, Any]]] = load_corpus_manifest,
     golden_rows_loader: Callable[[Path], list[dict[str, Any]]] = load_golden_dataset,
     git_sha_fn: Callable[[], str] = current_git_sha,
-    now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
     ingest_fn: Callable[..., list[dict[str, Any]]] | None = None,
     query_target: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     metrics_fetcher: Callable[[], str] | None = None,

@@ -7,7 +7,7 @@ repaired; a model that explicitly asks about 2024 is left alone.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -55,7 +55,7 @@ def test_as_of_query_preserves_historical_year():
     )
     normalized = normalize_web_search(
         request,
-        now=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        now=datetime(2026, 9, 4, tzinfo=UTC),
         configured_max_results=8,
     )
     assert "2024" in normalized.query

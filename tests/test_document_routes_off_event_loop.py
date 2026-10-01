@@ -14,7 +14,7 @@ loop's own thread.
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -59,7 +59,7 @@ def _document(conversation_id=None):
         filename="notes.txt",
         file_type="text/plain",
         status=1,
-        upload_time=datetime.now(timezone.utc),
+        upload_time=datetime.now(UTC),
     )
 
 

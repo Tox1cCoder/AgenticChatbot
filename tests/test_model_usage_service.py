@@ -1,7 +1,7 @@
 """Unit tests for user-scoped model usage analytics."""
 
 from dataclasses import fields
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -46,13 +46,13 @@ def test_usage_schemas_use_camel_case_aliases_and_zero_defaults() -> None:
     }
 
     usage_range = UsageRange(
-        from_=datetime(2026, 7, 1, tzinfo=timezone.utc),
-        to=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        from_=datetime(2026, 7, 1, tzinfo=UTC),
+        to=datetime(2026, 7, 2, tzinfo=UTC),
         bucket="day",
         timezone="UTC",
     )
     assert usage_range.model_dump(by_alias=True)["from"] == datetime(
-        2026, 7, 1, tzinfo=timezone.utc
+        2026, 7, 1, tzinfo=UTC
     )
 
 
@@ -118,10 +118,10 @@ async def test_usage_query_params_expose_public_from_and_return_route_validation
 
 
 def test_usage_response_models_share_typed_nested_shapes() -> None:
-    generated_at = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    generated_at = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
     usage_range = UsageRange(
-        from_=datetime(2026, 7, 1, tzinfo=timezone.utc),
-        to=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        from_=datetime(2026, 7, 1, tzinfo=UTC),
+        to=datetime(2026, 7, 2, tzinfo=UTC),
         bucket="day",
         timezone="UTC",
     )
@@ -292,7 +292,7 @@ class PopulatedUsageRepository(EmptyUsageRepository):
 
 
 def make_empty_service(
-    *, now: datetime = datetime(2026, 7, 21, 12, 34, tzinfo=timezone.utc)
+    *, now: datetime = datetime(2026, 7, 21, 12, 34, tzinfo=UTC)
 ) -> tuple[ModelUsageService, EmptyUsageRepository]:
     repository = EmptyUsageRepository()
     return (
@@ -307,7 +307,7 @@ def make_empty_service(
 
 def test_dashboard_defaults_to_last_30_local_days_and_returns_empty_buckets() -> None:
     repository = EmptyUsageRepository()
-    now = datetime(2026, 7, 21, 12, 34, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 21, 12, 34, tzinfo=UTC)
     service = ModelUsageService(
         repository=repository,
         conversation_repository=OwningConversationRepository(),
@@ -316,8 +316,8 @@ def test_dashboard_defaults_to_last_30_local_days_and_returns_empty_buckets() ->
 
     result = service.get_dashboard(user_id=uuid4(), query=UsageDashboardQuery())
 
-    assert result.range.from_ == datetime(2026, 6, 22, tzinfo=timezone.utc)
-    assert result.range.to == datetime(2026, 7, 22, tzinfo=timezone.utc)
+    assert result.range.from_ == datetime(2026, 6, 22, tzinfo=UTC)
+    assert result.range.to == datetime(2026, 7, 22, tzinfo=UTC)
     assert len(result.series) == 30
     assert result.totals == UsageTotals()
     assert result.coverage == UsageCoverage()
@@ -328,7 +328,7 @@ def test_dashboard_uses_one_bounded_bucket_query() -> None:
     service = ModelUsageService(
         repository=repository,
         conversation_repository=OwningConversationRepository(),
-        clock=lambda: datetime(2026, 7, 21, 12, 34, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 7, 21, 12, 34, tzinfo=UTC),
     )
 
     result = service.get_dashboard(user_id=uuid4(), query=UsageDashboardQuery())
@@ -341,7 +341,7 @@ def test_dashboard_uses_one_bounded_bucket_query() -> None:
 
 def test_conversation_defaults_to_all_730_retained_days() -> None:
     repository = EmptyUsageRepository()
-    now = datetime(2026, 7, 21, 12, 34, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 21, 12, 34, tzinfo=UTC)
     service = ModelUsageService(
         repository=repository,
         conversation_repository=OwningConversationRepository(),
@@ -354,8 +354,8 @@ def test_conversation_defaults_to_all_730_retained_days() -> None:
         query=ConversationUsageQuery(),
     )
 
-    assert result.range.from_ == datetime(2024, 7, 22, tzinfo=timezone.utc)
-    assert result.range.to == datetime(2026, 7, 22, tzinfo=timezone.utc)
+    assert result.range.from_ == datetime(2024, 7, 22, tzinfo=UTC)
+    assert result.range.to == datetime(2026, 7, 22, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -363,38 +363,38 @@ def test_conversation_defaults_to_all_730_retained_days() -> None:
     [
         (
             UsageDashboardQuery(
-                from_=datetime(2026, 7, 2, tzinfo=timezone.utc),
-                to=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                from_=datetime(2026, 7, 2, tzinfo=UTC),
+                to=datetime(2026, 7, 1, tzinfo=UTC),
             ),
             "after",
         ),
         (
             UsageDashboardQuery(
-                from_=datetime(2024, 7, 1, tzinfo=timezone.utc),
-                to=datetime(2026, 7, 2, tzinfo=timezone.utc),
+                from_=datetime(2024, 7, 1, tzinfo=UTC),
+                to=datetime(2026, 7, 2, tzinfo=UTC),
             ),
             "two years",
         ),
         (
             UsageDashboardQuery(
-                from_=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                to=datetime(2026, 2, 2, tzinfo=timezone.utc),
+                from_=datetime(2026, 1, 1, tzinfo=UTC),
+                to=datetime(2026, 2, 2, tzinfo=UTC),
                 bucket="hour",
             ),
             "31 days",
         ),
         (
             UsageDashboardQuery(
-                from_=datetime(2026, 7, 1, 0, 30, tzinfo=timezone.utc),
-                to=datetime(2026, 7, 1, 1, 30, tzinfo=timezone.utc),
+                from_=datetime(2026, 7, 1, 0, 30, tzinfo=UTC),
+                to=datetime(2026, 7, 1, 1, 30, tzinfo=UTC),
                 bucket="hour",
             ),
             "top of hour",
         ),
         (
             UsageDashboardQuery(
-                from_=datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc),
-                to=datetime(2026, 7, 2, 1, 0, tzinfo=timezone.utc),
+                from_=datetime(2026, 7, 1, 1, 0, tzinfo=UTC),
+                to=datetime(2026, 7, 2, 1, 0, tzinfo=UTC),
                 bucket="day",
             ),
             "midnight",
@@ -432,8 +432,8 @@ def test_kathmandu_day_boundaries_query_quarter_hour_utc_instants() -> None:
     service.get_dashboard(user_id=uuid4(), query=query)
 
     summary_scope = next(kwargs for name, kwargs in repository.calls if name == "summary")
-    assert summary_scope["start_inclusive"] == datetime(2026, 6, 30, 18, 15, tzinfo=timezone.utc)
-    assert summary_scope["end_exclusive"] == datetime(2026, 7, 1, 18, 15, tzinfo=timezone.utc)
+    assert summary_scope["start_inclusive"] == datetime(2026, 6, 30, 18, 15, tzinfo=UTC)
+    assert summary_scope["end_exclusive"] == datetime(2026, 7, 1, 18, 15, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -492,7 +492,7 @@ def test_historical_sub_minute_zone_boundary_is_rejected() -> None:
 
 
 def test_default_historical_sub_minute_zone_boundary_is_rejected() -> None:
-    service, _ = make_empty_service(now=datetime(1900, 1, 20, 12, tzinfo=timezone.utc))
+    service, _ = make_empty_service(now=datetime(1900, 1, 20, 12, tzinfo=UTC))
 
     with pytest.raises(ValidationException, match="minute-aligned"):
         service.get_dashboard(
@@ -525,7 +525,7 @@ def test_dashboard_uses_only_known_total_sums_and_reports_mutually_exclusive_cov
     service = ModelUsageService(
         repository=repository,
         conversation_repository=OwningConversationRepository(),
-        clock=lambda: datetime(2026, 7, 21, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 7, 21, tzinfo=UTC),
     )
 
     result = service.get_dashboard(user_id=uuid4(), query=UsageDashboardQuery())
@@ -572,13 +572,13 @@ def test_bangkok_minutes_regroup_into_local_days_and_missing_days_are_zero_fille
     repository = PopulatedUsageRepository()
     repository.minute_rows = [
         minute_row(
-            datetime(2026, 6, 30, 17, 0, tzinfo=timezone.utc),
+            datetime(2026, 6, 30, 17, 0, tzinfo=UTC),
             request_count=1,
             total_tokens_sum=7,
             total_tokens_known_count=1,
         ),
         minute_row(
-            datetime(2026, 7, 1, 16, 59, tzinfo=timezone.utc),
+            datetime(2026, 7, 1, 16, 59, tzinfo=UTC),
             request_count=2,
             total_tokens_sum=9,
             total_tokens_known_count=2,
@@ -622,8 +622,8 @@ def test_new_york_local_day_series_has_dst_aware_duration(
     result = service.get_dashboard(user_id=uuid4(), query=query)
 
     assert len(result.series) == 1
-    elapsed = result.series[0].end.astimezone(timezone.utc) - result.series[0].start.astimezone(
-        timezone.utc
+    elapsed = result.series[0].end.astimezone(UTC) - result.series[0].start.astimezone(
+        UTC
     )
     assert elapsed == timedelta(hours=expected_hours)
 
@@ -677,7 +677,7 @@ def test_lord_howe_hour_series_uses_local_wall_hour_boundaries(
     assert [
         int(
             (
-                point.end.astimezone(timezone.utc) - point.start.astimezone(timezone.utc)
+                point.end.astimezone(UTC) - point.start.astimezone(UTC)
             ).total_seconds()
             // 60
         )
@@ -689,7 +689,7 @@ def test_ambiguous_local_midnight_fold_keeps_daily_usage_in_selected_interval() 
     repository = PopulatedUsageRepository()
     repository.minute_rows = [
         minute_row(
-            datetime(2024, 11, 3, 5, 30, tzinfo=timezone.utc),
+            datetime(2024, 11, 3, 5, 30, tzinfo=UTC),
             request_count=1,
             total_tokens_sum=11,
             total_tokens_known_count=1,
@@ -874,8 +874,8 @@ def test_dimension_breakdown_applies_server_side_limit_and_deterministic_rank() 
 
     repository.get_dimension_breakdown(
         user_id=uuid4(),
-        start_inclusive=datetime(2026, 7, 1, tzinfo=timezone.utc),
-        end_exclusive=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        start_inclusive=datetime(2026, 7, 1, tzinfo=UTC),
+        end_exclusive=datetime(2026, 7, 2, tzinfo=UTC),
         dimension="provider",
         limit=20,
     )
@@ -893,8 +893,8 @@ def test_nullable_agent_breakdown_ranks_by_public_unknown_key_before_limit() -> 
 
     repository.get_dimension_breakdown(
         user_id=uuid4(),
-        start_inclusive=datetime(2026, 7, 1, tzinfo=timezone.utc),
-        end_exclusive=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        start_inclusive=datetime(2026, 7, 1, tzinfo=UTC),
+        end_exclusive=datetime(2026, 7, 2, tzinfo=UTC),
         dimension="agent_id",
         limit=20,
     )
@@ -914,8 +914,8 @@ def test_top_conversations_is_tenant_scoped_half_open_and_bounded_in_sql() -> No
 
     repository.get_top_conversations(
         user_id=user_id,
-        start_inclusive=datetime(2026, 7, 1, tzinfo=timezone.utc),
-        end_exclusive=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        start_inclusive=datetime(2026, 7, 1, tzinfo=UTC),
+        end_exclusive=datetime(2026, 7, 2, tzinfo=UTC),
         limit=20,
     )
 

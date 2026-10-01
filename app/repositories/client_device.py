@@ -4,7 +4,7 @@ Repository for managing client device records.
 Provides CRUD operations for the client_devices table.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -134,7 +134,7 @@ class ClientDeviceRepository:
             return None
 
         device.status = status
-        device.last_seen_at = datetime.now(timezone.utc)
+        device.last_seen_at = datetime.now(UTC)
 
         self.session.commit()
         self.session.refresh(device)
@@ -212,12 +212,12 @@ class ClientDeviceRepository:
         Returns:
             Number of devices marked offline.
         """
-        cutoff = datetime.now(timezone.utc).timestamp() - timeout_seconds
+        cutoff = datetime.now(UTC).timestamp() - timeout_seconds
 
         result = self.session.execute(
             select(ClientDevice).where(
                 ClientDevice.status == DeviceStatus.ONLINE,
-                ClientDevice.last_seen_at < datetime.fromtimestamp(cutoff, tz=timezone.utc),
+                ClientDevice.last_seen_at < datetime.fromtimestamp(cutoff, tz=UTC),
             )
         )
 

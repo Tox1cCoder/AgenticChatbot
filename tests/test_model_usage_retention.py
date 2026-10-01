@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -100,7 +100,7 @@ def test_reconcile_partitions_full_window_into_bounded_chunks(monkeypatch):
         return 1
 
     monkeypatch.setattr(repository, "_reconcile_minute_chunk", reconcile_chunk)
-    start = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
+    start = datetime(2026, 7, 20, 0, 0, tzinfo=UTC)
     end = start + timedelta(minutes=125)
 
     assert (
@@ -142,12 +142,12 @@ def test_reconcile_uses_exact_complete_minute_window(monkeypatch):
             )
             return 4
 
-    now = datetime(2026, 7, 21, 12, 34, 56, 123456, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 21, 12, 34, 56, 123456, tzinfo=UTC)
     monkeypatch.setattr(worker, "_build_repository", lambda: Repository())
     monkeypatch.setattr(settings, "model_usage_tracking_enabled", True)
 
     assert worker.reconcile_model_usage(now=now) == 4
-    assert captured["end"] == datetime(2026, 7, 21, 12, 34, tzinfo=timezone.utc)
+    assert captured["end"] == datetime(2026, 7, 21, 12, 34, tzinfo=UTC)
     assert captured["start"] == captured["end"] - timedelta(
         minutes=settings.model_usage_reconcile_minutes
     )
@@ -186,7 +186,7 @@ def test_cleanup_uses_configured_retention_and_batch_size(monkeypatch):
             captured.update(rollup_cutoff=cutoff, rollup_batch=batch_size)
             return 12
 
-    now = datetime(2026, 7, 21, 4, 5, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 21, 4, 5, tzinfo=UTC)
     monkeypatch.setattr(worker, "_build_repository", lambda: Repository())
     monkeypatch.setattr(settings, "model_usage_tracking_enabled", True)
 

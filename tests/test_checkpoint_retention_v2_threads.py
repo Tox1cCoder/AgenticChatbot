@@ -12,7 +12,7 @@ survive ordinary expiry-driven cleanup.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -80,7 +80,7 @@ def _interrupt(thread_id: str):
     return SimpleNamespace(id=uuid4(), thread_id=thread_id)
 
 
-NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
 
 
 # ----------------------------------------------------------------------

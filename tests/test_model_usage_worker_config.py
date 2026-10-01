@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -110,7 +110,7 @@ def test_cleanup_task_delegates_to_repository(monkeypatch):
     assert result == {"raw_events_deleted": 3, "rollups_deleted": 5}
     assert captured["raw_batch"] == settings.model_usage_cleanup_batch_size
     assert captured["rollup_batch"] == settings.model_usage_cleanup_batch_size
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     raw_age_days = (now - captured["raw_cutoff"]).total_seconds() / 86400
     rollup_age_days = (now - captured["rollup_cutoff"]).total_seconds() / 86400
     assert round(raw_age_days) == settings.model_usage_raw_retention_days

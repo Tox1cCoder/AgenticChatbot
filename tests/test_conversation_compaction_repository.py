@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import inspect
@@ -43,7 +43,7 @@ class _DetachingPersistenceSession:
         self.message = message
 
     def flush(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.message.created_at = now
         self.message.updated_at = now
         self.message.deleted_at = None
@@ -77,7 +77,7 @@ def test_job_upsert_coalesces_targets_and_preserves_a_live_lease() -> None:
     statement = ConversationCompactionRepository._job_upsert_statement(
         conversation_id=uuid4(),
         requested_through_sequence=7,
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
     )
 
     sql = _sql(statement)
@@ -92,7 +92,7 @@ def test_job_upsert_coalesces_targets_and_preserves_a_live_lease() -> None:
 def test_generic_claim_uses_skip_locked_and_due_filter() -> None:
     statement = ConversationCompactionRepository._claim_select_statement(
         conversation_id=None,
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
     )
 
     sql = _sql(statement)
@@ -105,7 +105,7 @@ def test_notification_claim_ignores_debounce_but_still_locks() -> None:
     conversation_id = uuid4()
     statement = ConversationCompactionRepository._claim_select_statement(
         conversation_id=conversation_id,
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
     )
 
     sql = _sql(statement)

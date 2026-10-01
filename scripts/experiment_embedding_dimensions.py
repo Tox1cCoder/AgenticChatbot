@@ -67,7 +67,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -405,7 +405,7 @@ def run_experiment(
     args: argparse.Namespace,
     *,
     experiment_hook: Callable[[int, str], dict[str, Any]] | None = None,
-    now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
     git_sha_fn: Callable[[], str] = current_git_sha,
 ) -> dict[str, Any]:
     corpus_manifest_path = Path(args.corpus_manifest)

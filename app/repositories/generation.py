@@ -18,7 +18,7 @@ import logging
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import insert, select, update
@@ -54,7 +54,7 @@ _RETURNED = tuple(Generation.__table__.c)
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class GenerationRepository(RepositorySessionMixin):

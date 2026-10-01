@@ -3,7 +3,7 @@ TaskPlan repository for database operations.
 """
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -97,8 +97,8 @@ class TaskPlanCRUDStrategy(
 
         if task:
             task.status = TaskStatus.completed
-            task.completed_at = datetime.now(timezone.utc)
-            task.updated_at = datetime.now(timezone.utc)
+            task.completed_at = datetime.now(UTC)
+            task.updated_at = datetime.now(UTC)
             db.commit()
             db.refresh(task)
 

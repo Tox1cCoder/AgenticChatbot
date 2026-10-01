@@ -20,7 +20,7 @@ whether a language is served acceptably at all.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -193,7 +193,7 @@ def test_a_review_manifest_carries_exactly_five_fields():
         dataset_sha256="a" * 64,
         approved=False,
         reviewing_team="unreviewed",
-        reviewed_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        reviewed_at=datetime(2026, 9, 4, tzinfo=UTC),
         label_guideline_version="v1",
     )
     assert set(review.model_dump()) == {
@@ -336,7 +336,7 @@ def test_build_report_records_the_exact_tuple_it_was_run_against():
         provider="gemini",
         model="gemini-3-pro",
         inventory_version="inventory-v1",
-        generated_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 9, 4, tzinfo=UTC),
     )
 
     assert isinstance(report, RoutingEvaluationReport)
@@ -362,7 +362,7 @@ def test_build_report_refuses_a_prediction_for_an_unknown_case():
             provider="gemini",
             model="gemini-3-pro",
             inventory_version="inventory-v1",
-            generated_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+            generated_at=datetime(2026, 9, 4, tzinfo=UTC),
         )
 
 
@@ -377,7 +377,7 @@ def test_build_report_refuses_two_predictions_for_one_case():
             provider="gemini",
             model="gemini-3-pro",
             inventory_version="inventory-v1",
-            generated_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+            generated_at=datetime(2026, 9, 4, tzinfo=UTC),
         )
 
 

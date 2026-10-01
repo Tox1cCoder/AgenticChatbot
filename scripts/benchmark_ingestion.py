@@ -44,7 +44,7 @@ import logging
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -410,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Write JSON output
     json_output = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "corpus_dir": str(corpus_dir),
         "parallelism": parallelism,
         "total_wall_s": round(total_wall_s, 1),

@@ -8,7 +8,7 @@ there is what the model is shown.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -25,7 +25,7 @@ from app.models.project import Project
 from app.models.user import User
 from app.repositories.conversation_search import ConversationSearchRepository, build_tsquery
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 
 
 @pytest.fixture

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -37,7 +37,7 @@ _UNAVAILABLE_ARGUMENTS = {"<unavailable>": True}
 
 def new_audit_id() -> str:
     """Return a fresh, sortable, unique audit id for one execution."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     return f"skill-exec-{timestamp}-{uuid4().hex[:6]}"
 
 
@@ -68,7 +68,7 @@ class SkillAuditWriter:
                 return
 
             record = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "audit_id": audit_id,
                 "user_id": resolved_user_id,
                 "device_id": device_id,
@@ -183,7 +183,7 @@ class SkillLifecycleAuditWriter:
                     event,
                 )
             record = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "event": str(event),
                 "user_id": str(user_id),
                 "device_id": _optional_str(device_id),

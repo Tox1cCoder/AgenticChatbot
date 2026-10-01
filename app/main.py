@@ -3,7 +3,7 @@ import inspect
 import logging
 import sys
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import uvicorn
@@ -596,7 +596,7 @@ async def health_check_qdrant():
 @app.get("/health/all")
 async def health_check_all():
     """Check health of all services"""
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
 
     celery_health = await health_check_celery()
 

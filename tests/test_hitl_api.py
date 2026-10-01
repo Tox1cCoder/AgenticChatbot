@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -65,7 +65,7 @@ def _create_interrupt(
                 user_id=user_id,
                 thread_id=str(conversation_id),
                 status=status,
-                expires_at=expires_at or datetime.now(timezone.utc) + timedelta(minutes=5),
+                expires_at=expires_at or datetime.now(UTC) + timedelta(minutes=5),
                 action_requests_json=[],
                 interrupt_metadata_json={},
             )
@@ -162,7 +162,7 @@ def test_get_interrupt_state_hides_foreign_expired_interrupt_without_expiring_it
             session_factory,
             foreign_user_id,
             status=HITLInterruptStatus.PENDING,
-            expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            expires_at=datetime.now(UTC) - timedelta(minutes=1),
         )
 
         response = client.get(f"/hitl/interrupts/{interrupt_id}")
@@ -186,7 +186,7 @@ def test_get_interrupt_state_lazily_expires_owned_pending_interrupt(api):
         session_factory,
         user_id,
         status=HITLInterruptStatus.PENDING,
-        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
     )
 
     response = client.get(f"/hitl/interrupts/{interrupt_id}")

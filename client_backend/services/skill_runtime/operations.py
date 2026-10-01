@@ -31,7 +31,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -154,7 +154,7 @@ class SkillInstallationService:
         self._installer_factory = installer_factory or self._default_installer
         self._uploads = upload_service
         self._catalog = catalog_service
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._audit = audit
         self._tasks: dict[str, asyncio.Task] = {}
         self._recovered: set[str] = set()

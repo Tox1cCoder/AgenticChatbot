@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -284,7 +284,7 @@ def test_interrupt_resume_rejects_device_mismatch():
         thread_id="thread-1",
         device_id=interrupt_device_id,
         status=HITLInterruptStatus.PENDING,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )
 
     service = MessageService(
@@ -321,7 +321,7 @@ def test_interrupt_resume_rejects_failed_continuation_before_resolved_branch():
         thread_id="thread-1",
         device_id=None,
         status=HITLInterruptStatus.FAILED,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )
 
     service = MessageService(
@@ -429,7 +429,7 @@ async def test_cleanup_stale_sessions_fails_pending_requests_without_waiting_for
         device_id=uuid4(),
         session_id="stale-session",
         user_id=uuid4(),
-        last_heartbeat=datetime.now(timezone.utc)
+        last_heartbeat=datetime.now(UTC)
         - timedelta(seconds=settings.client_runtime_heartbeat_interval_seconds * 3),
     )
     await store.put_session(stale_session)

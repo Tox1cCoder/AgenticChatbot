@@ -25,7 +25,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, NotRequired
 
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
@@ -33,7 +33,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command, Send
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import TypedDict
 
 from app.ai.schemas import (
     AgentMessage,

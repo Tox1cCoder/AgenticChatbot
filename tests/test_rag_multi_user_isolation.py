@@ -9,6 +9,7 @@ These tests protect against:
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -612,7 +613,7 @@ def _sqlite_image_repository():
 def test_native_image_search_authorizes_document_image_through_parent_document():
     """RAGRetriever.search_images must re-check scope in SQL, not trust the
     Qdrant payload — a foreign tenant's image id must never hydrate."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.models.conversation import Conversation
     from app.models.document import Document
@@ -655,7 +656,7 @@ def test_native_image_search_authorizes_document_image_through_parent_document()
                         filename_key="mine.pdf",
                         file_type="application/pdf",
                         status=2,
-                        upload_time=datetime.now(timezone.utc),
+                        upload_time=datetime.now(UTC),
                     ),
                     Document(
                         id=other_document_id,
@@ -664,7 +665,7 @@ def test_native_image_search_authorizes_document_image_through_parent_document()
                         filename_key="theirs.pdf",
                         file_type="application/pdf",
                         status=2,
-                        upload_time=datetime.now(timezone.utc),
+                        upload_time=datetime.now(UTC),
                     ),
                 ]
             )

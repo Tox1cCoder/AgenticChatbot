@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, update
@@ -138,7 +138,7 @@ class ToolExecutionReceiptRepository(RepositorySessionMixin):
                 "result_json": result,
                 "artifact_ref": (result or {}).get("artifact_ref"),
                 "provider_receipt_id": provider_receipt_id,
-                "completed_at": datetime.now(timezone.utc),
+                "completed_at": datetime.now(UTC),
             },
         )
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import anyio
@@ -73,7 +73,7 @@ class MCPServerRuntime:
 
     def mark_running(self, tools: list[MCPTool]) -> None:
         self.tools = tools
-        self.started_at = datetime.now(timezone.utc)
+        self.started_at = datetime.now(UTC)
         self.error_message = None
         self._running = True
 

@@ -10,7 +10,7 @@ import time
 import unicodedata
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1004,7 +1004,7 @@ class DocumentProcessingService:
 
             removed_count = 0
             removed_folders = 0
-            cutoff_time = datetime.now(timezone.utc).timestamp() - (older_than_hours * 3600)
+            cutoff_time = datetime.now(UTC).timestamp() - (older_than_hours * 3600)
 
             for filename in os.listdir(temp_dir):
                 if filename.startswith("."):

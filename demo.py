@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from datetime import time as datetime_time
 from functools import lru_cache
 from html.parser import HTMLParser
@@ -3733,13 +3733,13 @@ def _local_usage_hour_candidates(
     instants: set[datetime] = set()
     for fold in (0, 1):
         candidate = naive.replace(tzinfo=zone, fold=fold)
-        instant = candidate.astimezone(timezone.utc)
+        instant = candidate.astimezone(UTC)
         round_trip = instant.astimezone(zone)
         if round_trip.replace(tzinfo=None) != naive or instant in instants:
             continue
         instants.add(instant)
         candidates.append(candidate)
-    candidates.sort(key=lambda value: value.astimezone(timezone.utc))
+    candidates.sort(key=lambda value: value.astimezone(UTC))
     return tuple(candidates)
 
 
@@ -4455,7 +4455,7 @@ def refresh_model_config_options_cache(
     snapshot = get_model_config_options(force_refresh=force_refresh)
     if snapshot:
         st.session_state.model_config_options_cache = snapshot
-        st.session_state.model_config_options_last_fetch = datetime.now(timezone.utc).isoformat()
+        st.session_state.model_config_options_last_fetch = datetime.now(UTC).isoformat()
         st.session_state.model_config_options_error = None
         if defer_form_state_sync:
             st.session_state.model_config_options_needs_form_sync = True
@@ -7796,7 +7796,7 @@ def _upsert_stream_tool_trace(tool_event: dict[str, Any]) -> None:
             ),
             None,
         )
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
 
     if item_index is None:
         item = {

@@ -3,7 +3,7 @@ Authentication helpers for the local client backend.
 """
 
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -17,7 +17,7 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def _build_compat_session_payload(user_id: str) -> LocalSessionPayload:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     bridge = get_runtime_bridge()
     return LocalSessionPayload(
         user_id=str(user_id),

@@ -3,7 +3,7 @@ Command strategy pattern interfaces for repository write operations.
 """
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Generic, TypeVar
 from uuid import UUID
 
@@ -90,7 +90,7 @@ class DefaultCommandStrategy(CommandStrategy[ModelType, CreateSchemaType, Update
             return False
 
         if soft_delete:
-            db_obj.deleted_at = datetime.now(timezone.utc)
+            db_obj.deleted_at = datetime.now(UTC)
         else:
             db.delete(db_obj)
         db.commit()

@@ -13,7 +13,7 @@ that refusal is the correct state rather than a bug to work around.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -38,7 +38,7 @@ from app.evaluation.routing.release_gate import (
     check_routing_release,
 )
 
-NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 DATASET_SHA = "c" * 64
 CATEGORIES = REQUIRED_CATEGORIES
 PRIMARY_BY_CATEGORY = {

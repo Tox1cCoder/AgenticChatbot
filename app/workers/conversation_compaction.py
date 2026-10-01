@@ -6,7 +6,7 @@ import asyncio
 import logging
 import random
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 from uuid import UUID
 
@@ -202,7 +202,7 @@ class ConversationCompactionWorker:
             max_seconds=self.settings.conversation_summary_retry_max_seconds,
             jitter=self.jitter,
         )
-        retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        retry_at = datetime.now(UTC) + timedelta(seconds=delay)
         self.repository.fail_claim(
             claim,
             error_code=error_code,

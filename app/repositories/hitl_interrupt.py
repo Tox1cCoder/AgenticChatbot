@@ -1,7 +1,7 @@
 """Repository for durable HITL interrupt lifecycle records."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -71,7 +71,7 @@ class HITLInterruptRepository:
         Returns False if the interrupt was already resolved, resolving,
         expired, or not found.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self.session_factory() as db:
             result = db.execute(
                 update(HITLInterrupt)
@@ -96,7 +96,7 @@ class HITLInterruptRepository:
         resolution_source: str = "user",
     ) -> None:
         """Mark an interrupt as fully resolved after graph resumption."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self.session_factory() as db:
             db.execute(
                 update(HITLInterrupt)
@@ -120,7 +120,7 @@ class HITLInterruptRepository:
 
     def mark_failed(self, interrupt_id: str, *, resolution_source: str) -> bool:
         """Mark a claimed interrupt as failed if it is still resolving."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self.session_factory() as db:
             result = db.execute(
                 update(HITLInterrupt)
@@ -144,7 +144,7 @@ class HITLInterruptRepository:
         resolution_source: str = "timeout",
     ) -> None:
         """Mark an interrupt as expired."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self.session_factory() as db:
             db.execute(
                 update(HITLInterrupt)
@@ -162,7 +162,7 @@ class HITLInterruptRepository:
 
     def expire_pending_if_due_for_user(self, interrupt_id: str, user_id: UUID) -> bool:
         """Expire an owned pending interrupt only when its stored expiry is due."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self.session_factory() as db:
             result = db.execute(
                 update(HITLInterrupt)
@@ -195,7 +195,7 @@ class HITLInterruptRepository:
 
         Returns the number of records expired.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self.session_factory() as db:
             result = db.execute(
                 update(HITLInterrupt)

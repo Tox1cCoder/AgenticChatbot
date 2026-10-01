@@ -5,7 +5,7 @@ Handles CRUD operations for storing and retrieving user-specific AI provider
 API keys and configurations.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import and_
@@ -178,7 +178,7 @@ class ModelProviderRepository:
             if not provider:
                 return False
 
-            provider.deleted_at = datetime.now(timezone.utc)
+            provider.deleted_at = datetime.now(UTC)
             session.commit()
             return True
 
@@ -199,6 +199,6 @@ class ModelProviderRepository:
             if not provider:
                 return False
 
-            provider.deleted_at = datetime.now(timezone.utc)
+            provider.deleted_at = datetime.now(UTC)
             session.commit()
             return True

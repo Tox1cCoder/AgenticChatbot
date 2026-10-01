@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -77,7 +77,7 @@ def test_an_unknown_email_still_runs_a_password_check(monkeypatch):
 
 def test_a_soft_deleted_user_cannot_log_in():
     with pytest.raises(HTTPException) as caught:
-        _login(_user(deleted_at=datetime.now(timezone.utc)))
+        _login(_user(deleted_at=datetime.now(UTC)))
 
     assert caught.value.status_code == 401
     assert caught.value.detail == "Invalid email or password"

@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Callable, Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from itertools import count
 from uuid import UUID, uuid4
 
@@ -46,7 +46,7 @@ TenantFactory = Callable[..., tuple[UUID, UUID | None, UUID | None]]
 #: this process wrote to the current minute". That held when the module was run
 #: alone on an empty database and nowhere else. Anchoring on a distinct past
 #: minute makes the exact counts mean what they say.
-_UNIQUE_MINUTE_EPOCH = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(
+_UNIQUE_MINUTE_EPOCH = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(
     days=365
 )
 _unique_minute_offsets = count()
@@ -224,7 +224,7 @@ def _command(
     latency_ms: int = 250,
     started_at: datetime | None = None,
 ) -> RecordEventCommand:
-    started = started_at or datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    started = started_at or datetime.now(UTC).replace(second=0, microsecond=0)
     return RecordEventCommand(
         operation_id=operation_id or uuid4(),
         attempt=attempt,
@@ -258,7 +258,7 @@ def _command(
 
 
 def _rollup_key_for(command: RecordEventCommand, conversation_id: UUID | None) -> str:
-    bucket = command.started_at.astimezone(timezone.utc).replace(second=0, microsecond=0)
+    bucket = command.started_at.astimezone(UTC).replace(second=0, microsecond=0)
     return compute_rollup_key(
         bucket_start_utc=bucket,
         user_id=command.context.user_id,
@@ -341,7 +341,7 @@ def test_same_logical_operation_distinct_attempts_are_recorded(
 ) -> None:
     user_id, conversation_id, _ = tenant_factory()
     operation_id = uuid4()
-    started = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    started = datetime.now(UTC).replace(second=0, microsecond=0)
 
     first_command = _command(
         user_id=user_id,
@@ -390,7 +390,7 @@ def test_user_and_conversation_filters_never_cross_tenants(
 ) -> None:
     user_a, conversation_a, _ = tenant_factory()
     user_b, conversation_b, _ = tenant_factory()
-    window_start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(
+    window_start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(
         minutes=5
     )
     window_end = window_start + timedelta(minutes=10)
@@ -448,7 +448,7 @@ def test_bucket_series_aggregates_intervals_in_sql_and_stays_tenant_bounded(
 ) -> None:
     user_a, conversation_a, _ = tenant_factory()
     user_b, conversation_b, _ = tenant_factory()
-    start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=10)
+    start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=10)
     intervals = [
         (start, start + timedelta(minutes=2)),
         (start + timedelta(minutes=2), start + timedelta(minutes=4)),
@@ -518,7 +518,7 @@ def test_latest_conversation_context_uses_visible_assistant_metadata_not_helper_
 ) -> None:
     user_id, conversation_id, _ = tenant_factory()
     other_user_id, other_conversation_id, _ = tenant_factory()
-    started = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    started = datetime.now(UTC).replace(second=0, microsecond=0)
     expected = {
         "provider": "gemini",
         "model": "gemini-3-pro-image",
@@ -772,7 +772,7 @@ def test_reconcile_server_aggregation_preserves_all_sums_and_known_counts(
     repository, tenant_factory, session_factory
 ) -> None:
     user_id, conversation_id, _ = tenant_factory()
-    minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    minute = datetime.now(UTC).replace(second=0, microsecond=0)
     repository.record_event(
         _command(
             user_id=user_id,
@@ -829,7 +829,7 @@ def test_reconcile_minute_lock_serializes_same_minute_but_not_other_minute(
     repository, tenant_factory, session_factory
 ) -> None:
     user_id, conversation_id, _ = tenant_factory()
-    minute = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=2)
+    minute = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=2)
     repository.record_event(
         _command(user_id=user_id, conversation_id=conversation_id, started_at=minute)
     )
@@ -974,7 +974,7 @@ def test_rollup_fk_deletes_do_not_mutate_hashed_dimensions(
 def test_cleanup_deletes_raw_older_than_90_days_and_rollups_older_than_2_years(
     repository, tenant_factory, session_factory
 ) -> None:
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
 
     raw_user_id, raw_conversation_id, _ = tenant_factory()
     raw_cutoff = now - timedelta(days=90)
@@ -1062,7 +1062,7 @@ def test_health_snapshot_uses_complete_minutes_and_content_free_aggregates(
     fields stay absolute because this event is the newest thing in the window.
     """
     user_id, conversation_id, _ = tenant_factory()
-    complete_minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    complete_minute = datetime.now(UTC).replace(second=0, microsecond=0)
     event_minute = complete_minute - timedelta(minutes=1)
     observed_at = complete_minute + timedelta(seconds=45)
 

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from types import SimpleNamespace
 from uuid import uuid4
@@ -211,7 +211,7 @@ def test_interrupt_resume_rejects_incomplete_multi_tool_decisions():
         user_id=user_id,
         device_id=None,
         status=HITLInterruptStatus.PENDING,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
         action_requests_json=[
             {
                 "task_id": "tool-1",
@@ -275,7 +275,7 @@ def test_interrupt_resume_requires_tool_call_id_when_task_id_differs():
         user_id=user_id,
         device_id=None,
         status=HITLInterruptStatus.PENDING,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
         action_requests_json=[
             {
                 "task_id": "approval-row-1",

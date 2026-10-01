@@ -5,15 +5,11 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import unquote
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    import tomli as tomllib
 
 from app.ai import agent_config
 from app.core.config import Settings

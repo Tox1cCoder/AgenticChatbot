@@ -32,14 +32,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NotRequired
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.config import get_config
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import TypedDict
 
 from app.ai.workflow.execution_budget import (
     ExecutionBudgetAccountant,

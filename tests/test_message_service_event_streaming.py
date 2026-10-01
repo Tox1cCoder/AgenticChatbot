@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -23,7 +23,7 @@ from .conftest import async_double
 
 
 def _message_row(*, conversation_id, sender: int, content: str) -> SimpleNamespace:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return SimpleNamespace(
         id=uuid4(),
         conversation_id=conversation_id,

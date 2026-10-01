@@ -47,7 +47,7 @@ partial/file-ordering contract locks.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -262,7 +262,7 @@ class _UnauthedAuthStub:
 
 
 def _session() -> LocalSessionPayload:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return LocalSessionPayload(
         user_id="user-1",
         server_user_id="user-1",

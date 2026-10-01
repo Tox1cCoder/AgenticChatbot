@@ -26,7 +26,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -179,7 +179,7 @@ async def _run(args: argparse.Namespace) -> int:
         provider=provider,
         model=model,
         inventory_version=inventory.version,
-        generated_at=datetime.now(timezone.utc),
+        generated_at=datetime.now(UTC),
     )
 
     out = Path(args.output)

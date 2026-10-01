@@ -27,7 +27,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -65,7 +65,7 @@ class StreamingAttempt(Protocol):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def classify_status(exc: BaseException) -> UsageStatus:

@@ -8,17 +8,13 @@ import platform
 import shutil
 import subprocess
 import sys
+import tomllib
 import uuid
 import venv
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
-    import tomli as tomllib  # type: ignore[no-redef]
 
 from client_backend.core.paths import (
     get_skill_runtimes_root,
@@ -245,7 +241,7 @@ class SkillEnvironmentManager:
             "sidecar_python": str(Path(sys.executable).resolve()),
             "platform": self._platform_id(),
             "commands": commands,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         (stage / "runtime.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 

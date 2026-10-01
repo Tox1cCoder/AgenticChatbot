@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -57,7 +57,7 @@ async def test_retry_then_fallback_preserves_one_source_registry() -> None:
     fallback.health_key = "fallback:key-b"
     service = WebResearchService(
         resolver=ProviderResolver(text=(primary, fallback)),
-        now=lambda: datetime(2026, 9, 15, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 15, tzinfo=UTC),
         retry_backoff=lambda _attempt: None,
     )
 
@@ -75,7 +75,7 @@ async def test_image_failure_does_not_discard_text_success() -> None:
     )
     service = WebResearchService(
         resolver=ProviderResolver(text=(text,), images=(ImageFailure(),)),
-        now=lambda: datetime(2026, 9, 15, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 15, tzinfo=UTC),
         retry_backoff=lambda _attempt: None,
     )
     request = REQUEST.model_copy(
@@ -90,7 +90,7 @@ async def test_image_failure_does_not_discard_text_success() -> None:
 
 
 def test_health_is_partitioned_by_provider_configuration() -> None:
-    now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 15, tzinfo=UTC)
     health = ProviderHealthRegistry(
         failure_threshold=1,
         cooldown=timedelta(minutes=1),
@@ -106,7 +106,7 @@ def test_health_is_partitioned_by_provider_configuration() -> None:
 def test_an_expired_breaker_leaves_no_per_partition_state_behind() -> None:
     """Health keys are per user and device; the singleton must not accumulate them."""
 
-    clock = [datetime(2026, 9, 15, tzinfo=timezone.utc)]
+    clock = [datetime(2026, 9, 15, tzinfo=UTC)]
     health = ProviderHealthRegistry(
         failure_threshold=1,
         cooldown=timedelta(minutes=1),
@@ -154,7 +154,7 @@ async def test_valid_image_sources_are_admitted_before_text_sources() -> None:
     )
     service = WebResearchService(
         resolver=ProviderResolver(text=(text,), images=(ImageProvider(),)),
-        now=lambda: datetime(2026, 9, 15, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 15, tzinfo=UTC),
     )
     request = REQUEST.model_copy(update={"visual_intent": "figure", "image_query": "a"})
 
@@ -196,7 +196,7 @@ async def test_open_resolves_source_ids_in_the_same_registry() -> None:
     opener = Opener()
     service = WebResearchService(
         resolver=ProviderResolver(text=(text,), openers=(opener,)),
-        now=lambda: datetime(2026, 9, 15, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 15, tzinfo=UTC),
     )
     session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
     await session.search(REQUEST)
@@ -334,7 +334,7 @@ async def test_an_exhausted_text_quota_is_named_not_reported_as_an_empty_result(
     text = FreshTextProvider()
     service = WebResearchService(
         resolver=ProviderResolver(text=(text,)),
-        now=lambda: datetime(2026, 9, 22, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 22, tzinfo=UTC),
     )
     session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
 
@@ -376,7 +376,7 @@ async def test_a_saturated_text_quota_still_lets_an_image_search_run() -> None:
 
     service = WebResearchService(
         resolver=ProviderResolver(text=(text,), images=(OneImage(),)),
-        now=lambda: datetime(2026, 9, 22, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 22, tzinfo=UTC),
     )
     session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
 

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
@@ -30,7 +30,7 @@ class Document(Base):
     # computed once at import, stamping every document a process uploads with
     # that process's start time and making upload_time ordering arbitrary.
     upload_time = Column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
     # Celery task ID persisted at enqueue time for ownership-safe status polling.
     processing_task_id = Column(String(255), nullable=True)

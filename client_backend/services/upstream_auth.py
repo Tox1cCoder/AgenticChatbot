@@ -5,7 +5,7 @@ Handles token storage, refresh, and credential management for the server connect
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -117,7 +117,7 @@ class UpstreamAuthService:
             user_id=user_id,
             username=email,
             tokens=tokens,
-            stored_at=datetime.now(timezone.utc),
+            stored_at=datetime.now(UTC),
             server_url=self._client.base_url,
         )
         self._current_user_id = user_id
@@ -168,7 +168,7 @@ class UpstreamAuthService:
 
             # Update stored credentials with new tokens
             credentials.tokens = new_tokens
-            credentials.stored_at = datetime.now(timezone.utc)
+            credentials.stored_at = datetime.now(UTC)
             self._save_credentials(credentials)
 
             self._credentials = credentials
@@ -207,7 +207,7 @@ class UpstreamAuthService:
 
         new_tokens = await self._client.refresh_token()
         self._credentials.tokens = new_tokens
-        self._credentials.stored_at = datetime.now(timezone.utc)
+        self._credentials.stored_at = datetime.now(UTC)
         self._save_credentials(self._credentials)
         return new_tokens
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -267,7 +267,7 @@ def test_conversation_counts_excludes_soft_deleted(repo_env):
                 owner_id=owner_id,
                 title="gone",
                 project_id=project.id,
-                deleted_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+                deleted_at=datetime(2026, 9, 1, tzinfo=UTC),
             )
         )
         s.commit()

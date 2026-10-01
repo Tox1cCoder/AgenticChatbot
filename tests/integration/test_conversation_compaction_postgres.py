@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -151,7 +151,7 @@ def test_claim_token_retry_dead_and_expired_lease_reconciliation(
     assert repository.complete_claim(wrong) is None
     assert not repository.fail_claim(wrong, error_code="timeout", permanent=False)
 
-    retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    retry_at = datetime.now(UTC) - timedelta(seconds=1)
     assert repository.fail_claim(
         claim,
         error_code="provider_timeout",
@@ -163,7 +163,7 @@ def test_claim_token_retry_dead_and_expired_lease_reconciliation(
     assert retry_claim.attempt_count == 1
     with session_factory.begin() as session:
         job = session.get(ConversationSummaryJob, conversation_id)
-        job.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        job.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
 
     due = repository.reconcile_due_jobs(dispatch_debounce_seconds=30)
     assert conversation_id in due
@@ -273,7 +273,7 @@ def test_expired_lease_cannot_load_persist_or_complete(seeded_repository, sessio
     assert claim is not None
     with session_factory.begin() as session:
         job = session.get(ConversationSummaryJob, conversation_id)
-        job.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        job.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
 
     assert repository.load_compaction_input(claim, owner_id=owner_id) is None
     assert not repository.persist_memory_cas(

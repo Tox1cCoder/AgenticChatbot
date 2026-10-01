@@ -12,7 +12,7 @@ Covers:
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -396,7 +396,7 @@ class TestHITLResumeSessionValidation:
             thread_id="thread-1",
             device_id=device_id,
             status=HITLInterruptStatus.PENDING,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
             session_id="session-old",
             catalog_version=1,
             tool_instance_id="old_instance_id",
@@ -438,7 +438,7 @@ class TestHITLResumeSessionValidation:
             device_id=device_id,
             user_id=user_id,
             status=HITLInterruptStatus.PENDING,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
             session_id="session-old",
             catalog_version=1,
             tool_instance_id="instance-old",
@@ -516,7 +516,7 @@ class TestHITLResumeSessionValidation:
             device_id=device_id,
             user_id=user_id,
             status=HITLInterruptStatus.PENDING,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
             session_id="session-1",
             catalog_version=1,
             tool_instance_id="instance-v1",

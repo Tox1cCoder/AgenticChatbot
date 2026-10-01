@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import and_, or_, select
@@ -77,7 +77,7 @@ class DocumentIndexGenerationRepository:
                 raise ValueError("an active generation cannot be marked failed")
             generation.status = "failed"
             generation.failure_code = bounded_code
-            generation.failed_at = datetime.now(timezone.utc)
+            generation.failed_at = datetime.now(UTC)
             db.commit()
             db.refresh(generation)
             return generation
@@ -110,7 +110,7 @@ class DocumentIndexGenerationRepository:
                         .with_for_update()
                     ).scalar_one_or_none()
 
-                retired_at = datetime.now(timezone.utc)
+                retired_at = datetime.now(UTC)
                 old_active_ids = [
                     row.id
                     for row in db.query(DocumentIndexGeneration.id)
@@ -137,7 +137,7 @@ class DocumentIndexGenerationRepository:
                 db.flush()
                 target.status = "active"
                 target.failure_code = None
-                target.activated_at = datetime.now(timezone.utc)
+                target.activated_at = datetime.now(UTC)
                 target.retired_at = None
                 target.failed_at = None
                 db.commit()

@@ -34,7 +34,7 @@ import base64
 import json
 import os
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -147,7 +147,7 @@ def _sizes_banner() -> str:
 
 
 def _message_row(*, conversation_id: UUID, sender: int, content: str, metadata: dict):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return SimpleNamespace(
         id=uuid4(),
         conversation_id=conversation_id,

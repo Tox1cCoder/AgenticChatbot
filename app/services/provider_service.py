@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -71,7 +71,7 @@ def key_preview(api_key: str | None) -> str:
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _catalog_is_stale(last_synced_at: Any, ttl_seconds: int = PROVIDER_CATALOG_TTL_SECONDS) -> bool:
@@ -83,8 +83,8 @@ def _catalog_is_stale(last_synced_at: Any, ttl_seconds: int = PROVIDER_CATALOG_T
     except ValueError:
         return True
     if synced.tzinfo is None:
-        synced = synced.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - synced).total_seconds() > ttl_seconds
+        synced = synced.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - synced).total_seconds() > ttl_seconds
 
 
 class ProviderService:

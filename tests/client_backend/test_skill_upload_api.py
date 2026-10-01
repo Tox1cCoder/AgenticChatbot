@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -42,7 +42,7 @@ def _valid_skill_zip_bytes() -> bytes:
 
 
 def _upload_record(**overrides) -> SkillUploadRecord:
-    now = datetime(2026, 7, 31, 10, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 10, 0, tzinfo=UTC)
     payload = {
         "upload_id": "upload-a",
         "owner": USER_ID,
@@ -67,7 +67,7 @@ def _upload_record(**overrides) -> SkillUploadRecord:
 
 
 def _operation(**overrides) -> SkillInstallationOperationModel:
-    now = datetime(2026, 7, 31, 10, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 10, 1, tzinfo=UTC)
     payload = {
         "operation_id": "operationa",
         "upload_id": "upload-a",

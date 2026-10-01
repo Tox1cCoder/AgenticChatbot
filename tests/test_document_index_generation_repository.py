@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -85,13 +85,13 @@ def test_recently_retired_old_generation_keeps_full_rollback_window(generation_d
     repository.activate(old.id)
     with generation_db() as db:
         stored = db.get(type(old), old.id)
-        stored.created_at = datetime.now(timezone.utc) - timedelta(days=30)
+        stored.created_at = datetime.now(UTC) - timedelta(days=30)
         db.commit()
     replacement = _create(repository, document_id)
 
     repository.activate(replacement.id)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=168)
+    cutoff = datetime.now(UTC) - timedelta(hours=168)
     assert repository.purgeable_before(document_id, cutoff) == []
 
 
@@ -229,7 +229,7 @@ def test_delete_unlinked_images_keeps_rows_no_newer_than_active_generation(gener
     from app.repositories.document_image import DocumentImageRepository
 
     document_id = uuid4()
-    active_generation_created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    active_generation_created_at = datetime(2026, 1, 1, tzinfo=UTC)
     kept_id, deleted_id = uuid4(), uuid4()
     with generation_db() as db:
         db.add_all(
@@ -316,11 +316,11 @@ def test_failed_generation_becomes_purgeable_by_failure_age_only(generation_db):
     repository.mark_failed(failed.id, "INDEX_BUILD_RUNTIMEERROR")
     with generation_db() as db:
         stored = db.get(type(failed), failed.id)
-        stored.failed_at = datetime.now(timezone.utc) - timedelta(days=8)
+        stored.failed_at = datetime.now(UTC) - timedelta(days=8)
         db.commit()
 
     purgeable = repository.purgeable_before(
-        document_id, datetime.now(timezone.utc) - timedelta(days=7)
+        document_id, datetime.now(UTC) - timedelta(days=7)
     )
 
     assert [row.id for row in purgeable] == [failed.id]
@@ -402,7 +402,7 @@ class _GenerationRepositoryFake:
                 id=old_generation_id,
                 document_id=document_id,
                 status="active",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
         }
         self.activation_error: Exception | None = None
@@ -415,7 +415,7 @@ class _GenerationRepositoryFake:
             document_id=document_id,
             status="building",
             failure_code=None,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             **metadata,
         )
         self.rows[generation_id] = row
@@ -710,7 +710,7 @@ def test_reconciliation_retries_when_active_generation_changes_mid_cleanup():
         id=generation_b_id,
         document_id=document_id,
         status="ready",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     for generation_id in (generation_a_id, generation_b_id):
         point_id = uuid4()
@@ -775,7 +775,7 @@ def test_purge_removes_failed_generation_artifacts_without_touching_active():
     )
 
     purged = service.purge_retired_generations(
-        document_id, datetime.now(timezone.utc) - timedelta(days=7)
+        document_id, datetime.now(UTC) - timedelta(days=7)
     )
 
     assert purged == [failed_id]

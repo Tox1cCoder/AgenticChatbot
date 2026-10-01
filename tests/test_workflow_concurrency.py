@@ -217,7 +217,7 @@ def test_timeout_must_be_positive():
 # real turn entrypoints enter it, and that a conflict reaches the caller as a
 # typed event rather than an unhandled exception.
 
-from datetime import datetime, timezone  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from unittest.mock import AsyncMock  # noqa: E402
 from uuid import uuid4  # noqa: E402
@@ -237,7 +237,7 @@ from .conftest import async_double  # noqa: E402
 
 
 def _row(*, conversation_id, sender: int, content: str) -> SimpleNamespace:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return SimpleNamespace(
         id=uuid4(),
         conversation_id=conversation_id,

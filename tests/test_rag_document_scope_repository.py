@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -137,7 +137,7 @@ def test_chunk_hydration_rejects_retired_generations(rag_scope_db):
                 conversation_id=conversation_id,
                 filename="versioned.pdf",
                 filename_key="versioned.pdf",
-                upload_time=datetime.now(timezone.utc),
+                upload_time=datetime.now(UTC),
             )
         )
         session.add_all(
@@ -194,7 +194,7 @@ def test_chunk_windows_exclude_wrong_owner_and_wrong_conversation(rag_scope_db):
                 conversation_id=conversation_id,
                 filename="owned.pdf",
                 filename_key="owned.pdf",
-                upload_time=datetime.now(timezone.utc),
+                upload_time=datetime.now(UTC),
             )
         )
         session.add(_active_generation(document_id))
@@ -223,7 +223,7 @@ def test_search_and_image_repository_paths_exclude_mixed_tenant_rows(rag_scope_d
     owned_chunk = _chunk(owned_document_id, 0)
     foreign_chunk = _chunk(foreign_document_id, 0)
     owned_image_id, foreign_image_id = uuid4(), uuid4()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with rag_scope_db.factory.begin() as session:
         session.add_all([_user(owner_id), _user(other_id)])
         session.add_all(
@@ -362,7 +362,7 @@ def test_search_and_image_repository_paths_exclude_mixed_tenant_rows(rag_scope_d
 
 def test_duplicate_filename_resolution_is_rejected(rag_scope_db):
     owner_id, conversation_id = uuid4(), uuid4()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with rag_scope_db.factory.begin() as session:
         session.add(_user(owner_id))
         session.add(Conversation(id=conversation_id, owner_id=owner_id, title="duplicates"))
@@ -398,7 +398,7 @@ def test_duplicate_filename_resolution_is_rejected(rag_scope_db):
 
 def test_filename_resolution_finds_document_on_later_listing_page(rag_scope_db):
     owner_id, conversation_id = uuid4(), uuid4()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     target_id = uuid4()
     documents = [
         _document(
@@ -447,7 +447,7 @@ def test_filename_resolution_finds_document_on_later_listing_page(rag_scope_db):
 
 def test_document_listing_has_deterministic_id_order_when_upload_times_tie(rag_scope_db):
     owner_id, conversation_id = uuid4(), uuid4()
-    tied_time = datetime.now(timezone.utc)
+    tied_time = datetime.now(UTC)
     document_ids = [uuid4(), uuid4(), uuid4()]
     with rag_scope_db.factory.begin() as session:
         session.add(_user(owner_id))
@@ -510,7 +510,7 @@ def test_scoped_cursor_is_true_only_for_another_authorized_chunk(rag_scope_db):
                 conversation_id=conversation_id,
                 filename="cursor.pdf",
                 filename_key="cursor.pdf",
-                upload_time=datetime.now(timezone.utc),
+                upload_time=datetime.now(UTC),
             )
         )
         session.add(_active_generation(document_id))
@@ -534,7 +534,7 @@ def test_evidence_expansion_stays_in_active_seed_generation_and_scope(rag_scope_
     conversation_id, other_conversation_id = uuid4(), uuid4()
     document_id, foreign_document_id = uuid4(), uuid4()
     active_generation_id, retired_generation_id = uuid4(), uuid4()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     active_chunks = [_chunk(document_id, index) for index in range(4)]
     for chunk in active_chunks:
         chunk.index_generation_id = active_generation_id

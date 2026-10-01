@@ -15,7 +15,7 @@ import hashlib
 import json
 import platform
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from mcp.shared.exceptions import McpError
@@ -317,7 +317,7 @@ class RuntimeBridgeService:
         try:
             await asyncio.wait_for(self._connected_event.wait(), timeout=timeout_value)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("Timed out waiting for initial runtime bridge connection")
             return False
 
@@ -519,7 +519,7 @@ class RuntimeBridgeService:
                     f"Unexpected runtime handshake message: {dump_runtime_message(message)}"
                 )
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             self._set_state(
                 status=RuntimeStatus.CONNECTED,
                 connected_at=now,
@@ -552,7 +552,7 @@ class RuntimeBridgeService:
         while not self._stop_requested and self._websocket is not None:
             await asyncio.sleep(client_settings.heartbeat_interval_seconds)
             await self._send_runtime_message(RuntimeHeartbeatMessage())
-            self._set_state(last_heartbeat=datetime.now(timezone.utc))
+            self._set_state(last_heartbeat=datetime.now(UTC))
 
     async def _receive_loop(self) -> None:
         while not self._stop_requested and self._websocket is not None:
@@ -577,7 +577,7 @@ class RuntimeBridgeService:
             return
 
         if isinstance(message, RuntimeHeartbeatMessage):
-            self._set_state(last_heartbeat=datetime.now(timezone.utc))
+            self._set_state(last_heartbeat=datetime.now(UTC))
             return
 
         if isinstance(message, RuntimeErrorMessage):
@@ -725,7 +725,7 @@ class RuntimeBridgeService:
         A cancelled request gets no reply: the server stopped waiting before it
         sent the cancel.
         """
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
         # The budget runs from arrival, not from the start of execution: time
         # spent waiting for a slot is time the server is already counting.
         deadline = asyncio.get_running_loop().time() + float(request.timeout_seconds)
@@ -737,7 +737,7 @@ class RuntimeBridgeService:
                 max_text_bytes=request.max_result_text_bytes,
                 max_media_bytes=request.max_result_media_bytes,
             )
-            duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+            duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
             payload = ToolDispatchResult(
                 request_id=request.request_id,
                 success=True,
@@ -746,7 +746,7 @@ class RuntimeBridgeService:
                 truncated=truncated,
             )
         except Exception as exc:
-            duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+            duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
             error_context = self._build_runtime_error_context(
                 exc,
                 detail={
@@ -984,7 +984,7 @@ class RuntimeBridgeService:
 
         return {
             "tools": tools,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "tool_count": len(tools),
             "mcp_server_count": mcp_catalog.get("server_count", 0),
             "active_servers": mcp_catalog.get("active_servers", []),

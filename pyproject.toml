@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "sample-chatbot"
 version = "1.0"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     # Core Framework
     "fastapi==0.139.2",
@@ -153,7 +153,7 @@ exclude = [
 line-length = 100
 
 # Phiên bản Python tối thiểu dự án hỗ trợ
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # Bật các rule kiểm tra (Mặc định Ruff chỉ bật E và F)
@@ -169,7 +169,11 @@ select = [
 ]
 
 # Bỏ qua một số rule cụ thể nếu thấy phiền
-ignore = []
+ignore = [
+    # (str, Enum) -> StrEnum changes str(member) from "Class.MEMBER" to the value,
+    # which alters logs, f-strings and anything serialized through str().
+    "UP042",
+]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI dependency-injection markers are the idiomatic way to declare route

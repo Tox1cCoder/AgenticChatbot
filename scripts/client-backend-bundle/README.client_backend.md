@@ -17,7 +17,7 @@ its bundle-owned `.venv`.
 
 ## Fast Start On Another PC
 
-1. Install Python 3.10 or newer.
+1. Install Python 3.11 or newer.
 2. Copy this folder or unzip `client-backend-bundle.zip`.
 3. Copy `.env.client.example` to `.env.client`.
 4. Set at least `CLIENT_SERVER_API_BASE_URL`.

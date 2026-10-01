@@ -23,7 +23,7 @@ uses the same configured database/session provider as API processes.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.core.config import settings
 from app.observability.model_usage import model_usage_metrics
@@ -90,8 +90,8 @@ def reconcile_model_usage(*, now: datetime | None = None) -> int:
     if not settings.model_usage_tracking_enabled:
         return 0
     complete_minute = (
-        (now or datetime.now(timezone.utc))
-        .astimezone(timezone.utc)
+        (now or datetime.now(UTC))
+        .astimezone(UTC)
         .replace(second=0, microsecond=0)
     )
     start = complete_minute - timedelta(minutes=settings.model_usage_reconcile_minutes)
@@ -119,7 +119,7 @@ def cleanup_model_usage(*, now: datetime | None = None) -> dict:
             "rollups_deleted": 0,
             "tracking_enabled": False,
         }
-    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    current = (now or datetime.now(UTC)).astimezone(UTC)
     raw_cutoff = current - timedelta(days=settings.model_usage_raw_retention_days)
     rollup_cutoff = current - timedelta(days=settings.model_usage_rollup_retention_days)
     repository = _build_repository()

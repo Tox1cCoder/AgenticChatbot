@@ -1,3 +1,5 @@
+from datetime import UTC
+
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
@@ -301,7 +303,7 @@ async def test_restore_of_a_traversing_user_id_touches_nothing(tmp_path, monkeyp
 
 @pytest.mark.asyncio
 async def test_rejected_restore_does_not_leave_dead_tokens_on_the_client(tmp_path, monkeypatch):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from client_backend.core.config import client_settings
     from client_backend.services.server_api import AuthenticationError
@@ -330,7 +332,7 @@ async def test_rejected_restore_does_not_leave_dead_tokens_on_the_client(tmp_pat
             user_id="user-123",
             username="user@example.com",
             tokens=TokenPair(access_token="dead-access", refresh_token="dead-refresh"),
-            stored_at=datetime.now(timezone.utc),
+            stored_at=datetime.now(UTC),
             server_url=client.base_url,
         )
     )
@@ -428,7 +430,7 @@ class _StoppableBridge:
 @pytest.fixture
 def signed_in_sidecar(tmp_path, monkeypatch):
     """The real auth service, signed in with credentials stored on disk."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import httpx
     from fastapi import FastAPI
@@ -457,7 +459,7 @@ def signed_in_sidecar(tmp_path, monkeypatch):
         user_id="user-123",
         username="user@example.com",
         tokens=tokens,
-        stored_at=datetime.now(timezone.utc),
+        stored_at=datetime.now(UTC),
         server_url=server_client.base_url,
     )
     service._current_user_id = "user-123"

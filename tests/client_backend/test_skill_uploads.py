@@ -13,7 +13,7 @@ import io
 import json
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -98,7 +98,7 @@ class _AsyncReader:
 
 class _FrozenClock:
     def __init__(self) -> None:
-        self._now = datetime(2026, 7, 31, 10, 0, 0, tzinfo=timezone.utc)
+        self._now = datetime(2026, 7, 31, 10, 0, 0, tzinfo=UTC)
 
     def __call__(self) -> datetime:
         return self._now

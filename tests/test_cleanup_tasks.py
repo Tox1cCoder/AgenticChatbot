@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from dependency_injector import providers
 
@@ -44,7 +44,7 @@ def test_health_check_task_builds_the_agent_from_application_settings(monkeypatc
 
 
 def test_redis_interrupt_scan_closes_its_client(monkeypatch):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     stale = (now - timedelta(minutes=settings.hitl_approval_timeout_minutes + 5)).isoformat()
 
     class FakeRedis:

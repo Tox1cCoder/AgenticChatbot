@@ -6,7 +6,7 @@ See response_format.md Task 5.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -415,7 +415,7 @@ async def test_non_capable_stream_receives_only_v1_selected_image_file_part():
 
 
 def _message_row(*, conversation_id, sender: int, content: str) -> SimpleNamespace:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return SimpleNamespace(
         id=uuid4(),
         created_at=now,

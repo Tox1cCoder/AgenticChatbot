@@ -10,7 +10,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -124,7 +124,7 @@ class ProviderHealthRegistry:
     ) -> None:
         self.failure_threshold = max(1, int(failure_threshold))
         self.cooldown = cooldown
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self._failures: dict[str, int] = {}
         self._opened_at: dict[str, datetime] = {}
 
@@ -169,7 +169,7 @@ class WebResearchService:
         metrics: Any | None = None,
     ) -> None:
         self.resolver = resolver or ProviderResolver()
-        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.now = now or (lambda: datetime.now(UTC))
         self.health = health or ProviderHealthRegistry(now=self.now)
         self.retry_backoff = retry_backoff or (lambda _attempt: None)
         self.image_service = image_service

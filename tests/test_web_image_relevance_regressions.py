@@ -11,7 +11,7 @@ control that keeps that boundary honest and failing.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from hashlib import sha256
 from io import BytesIO
 from types import SimpleNamespace
@@ -134,7 +134,7 @@ def _build(*cohorts: tuple[ProviderImageCandidate, ...]):
     service = WebResearchService(
         resolver=ProviderResolver(text=(Text(),), images=(Images(*cohorts),)),
         image_service=image_service,
-        now=lambda: datetime(2026, 9, 17, tzinfo=timezone.utc),
+        now=lambda: datetime(2026, 9, 17, tzinfo=UTC),
     )
     scope = ResearchScope(
         conversation_id=str(uuid4()), user_id=str(uuid4()), logical_turn_id=str(uuid4())

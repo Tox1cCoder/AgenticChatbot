@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.observability.model_usage import ModelUsageHealthService, ModelUsageMetrics
 from app.observability.model_usage_failure_store import (
@@ -27,7 +27,7 @@ class SharedFailureStore:
 
 class SnapshotRepository:
     def get_model_usage_health_snapshot(self, *, now, lookback_minutes):
-        minute = datetime(2026, 7, 21, 12, 29, tzinfo=timezone.utc)
+        minute = datetime(2026, 7, 21, 12, 29, tzinfo=UTC)
         return {
             "raw_event_count": 1,
             "rollup_request_count": 1,
@@ -41,7 +41,7 @@ def health(metrics):
     return ModelUsageHealthService(
         SnapshotRepository(),
         metrics=metrics,
-        clock=lambda: datetime(2026, 7, 21, 12, 31, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 7, 21, 12, 31, tzinfo=UTC),
     ).get_health()
 
 
@@ -97,7 +97,7 @@ def test_redis_store_uses_content_free_minute_bucket_and_ttl():
         def mget(self, keys):
             return [values.get(key) for key in keys]
 
-    now = datetime(2026, 7, 21, 12, 34, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 21, 12, 34, tzinfo=UTC)
     store = RedisModelUsageFailureStore(Redis(), ttl_seconds=900, clock=lambda: now)
 
     assert store.record_failure() is True
@@ -121,7 +121,7 @@ def test_redis_store_caps_direct_large_window_reads_and_marks_them_incomplete():
     store = RedisModelUsageFailureStore(
         Redis(),
         ttl_seconds=86_400,
-        clock=lambda: datetime(2026, 7, 21, 12, 34, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 7, 21, 12, 34, tzinfo=UTC),
     )
 
     result = store.recent_failure_count(window_seconds=10_000_000)

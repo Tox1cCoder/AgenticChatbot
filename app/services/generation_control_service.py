@@ -28,7 +28,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.core.producer_identity import current_producer_token
@@ -134,7 +134,7 @@ class ContinuationUnavailable(GenerationControlError):
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)

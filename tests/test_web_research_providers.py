@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -47,7 +47,7 @@ def _json(name: str) -> dict:
 def _normalized():
     return normalize_web_search(
         WebSearchRequest(query="release notes", objective="find current release"),
-        now=datetime(2026, 9, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 9, 15, tzinfo=UTC),
         configured_max_results=5,
     )
 

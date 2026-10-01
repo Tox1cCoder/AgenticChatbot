@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.ai.agents.base_agent import BaseAgent
 from app.ai.schemas import AgentType
@@ -26,7 +26,7 @@ class _DummyAgent(BaseAgent):
 def test_runtime_time_context_block_anchors_utc_and_configured_timezone():
     from app.ai.time_context import build_runtime_time_context_block
 
-    now = datetime(2026, 5, 14, 1, 30, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 14, 1, 30, tzinfo=UTC)
 
     block = build_runtime_time_context_block(
         now=now,
@@ -44,7 +44,7 @@ def test_runtime_time_context_block_anchors_utc_and_configured_timezone():
 def test_runtime_time_context_block_falls_back_to_utc_for_invalid_timezone():
     from app.ai.time_context import build_runtime_time_context_block
 
-    now = datetime(2026, 5, 14, 1, 30, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 14, 1, 30, tzinfo=UTC)
 
     block = build_runtime_time_context_block(
         now=now,

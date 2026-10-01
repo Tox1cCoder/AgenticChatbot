@@ -91,7 +91,7 @@ def _internal_event_stream_response(
 
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL_SECONDS)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
                     continue
 

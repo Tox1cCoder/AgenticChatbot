@@ -10,7 +10,7 @@ the first token, where a sync engine checkout would block the event loop.
 """
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import desc, or_, select
@@ -158,6 +158,6 @@ class UserMemoryRepository(RepositorySessionMixin):
             record = db.execute(statement).scalars().first()
             if record is None:
                 return False
-            record.deleted_at = datetime.now(timezone.utc)
+            record.deleted_at = datetime.now(UTC)
             db.commit()
             return True

@@ -101,7 +101,7 @@ async def profile_lock(
     process_lock = _process_lock_for(path)
     try:
         await asyncio.wait_for(process_lock.acquire(), timeout=deadline)
-    except (TimeoutError, asyncio.TimeoutError) as exc:
+    except TimeoutError as exc:
         raise SkillLockTimeoutError(scope) from exc
 
     # thread_local=False is required, not a preference. filelock's default keys

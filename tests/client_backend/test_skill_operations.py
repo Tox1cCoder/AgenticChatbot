@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -62,7 +62,7 @@ def _request(**overrides) -> SkillInstallationRequest:
 
 class _FrozenClock:
     def __init__(self) -> None:
-        self._now = datetime(2026, 7, 31, 10, 0, 0, tzinfo=timezone.utc)
+        self._now = datetime(2026, 7, 31, 10, 0, 0, tzinfo=UTC)
 
     def __call__(self) -> datetime:
         return self._now
@@ -87,8 +87,8 @@ class _UploadServiceStub:
         record = SkillUploadRecord(
             upload_id=upload_id,
             owner=owner,
-            created_at=datetime(2026, 7, 31, 10, 0, tzinfo=timezone.utc),
-            expires_at=datetime(2026, 7, 31, 10, 30, tzinfo=timezone.utc),
+            created_at=datetime(2026, 7, 31, 10, 0, tzinfo=UTC),
+            expires_at=datetime(2026, 7, 31, 10, 30, tzinfo=UTC),
             archive=SkillArchiveSummary(
                 filename="demo.zip",
                 compressed_bytes=100,

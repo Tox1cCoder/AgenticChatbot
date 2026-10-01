@@ -6,7 +6,7 @@ import logging
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NoReturn
 from urllib.parse import urlsplit
@@ -1746,8 +1746,8 @@ class MessageService(IMessageService):
         key = f"interrupt:{conversation_id}:{interrupt_id}"
         timeout_seconds = settings.hitl_approval_timeout_minutes * 60
         try:
-            self.redis_client.setex(key, timeout_seconds, datetime.now(timezone.utc).isoformat())
-            deadline = datetime.now(timezone.utc) + timedelta(
+            self.redis_client.setex(key, timeout_seconds, datetime.now(UTC).isoformat())
+            deadline = datetime.now(UTC) + timedelta(
                 minutes=settings.hitl_approval_timeout_minutes
             )
             if not interrupt_response.get("metadata"):
@@ -1854,7 +1854,7 @@ class MessageService(IMessageService):
             conversation_id=conversation_id,
             user_id=context.user_id,
             thread_id=context.thread_id or str(conversation_id),
-            expires_at=datetime.now(timezone.utc)
+            expires_at=datetime.now(UTC)
             + timedelta(minutes=settings.hitl_approval_timeout_minutes),
             action_requests_json=interrupt_dict.get("action_requests") or [],
             assistant_message_id=assistant_message_id,
@@ -2600,7 +2600,7 @@ class MessageService(IMessageService):
         return record
 
     def _require_interrupt_status_resumable(self, record: Any, interrupt_id: str) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if record.status == HITLInterruptStatus.EXPIRED or (
             record.status == HITLInterruptStatus.PENDING and record.expires_at <= now
         ):
@@ -2808,7 +2808,7 @@ class MessageService(IMessageService):
             if not stored_timestamp:
                 return
             stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
-            elapsed_minutes = (datetime.now(timezone.utc) - stored_time).total_seconds() / 60
+            elapsed_minutes = (datetime.now(UTC) - stored_time).total_seconds() / 60
             if elapsed_minutes > settings.hitl_approval_timeout_minutes:
                 self.redis_client.delete(key)
                 raise CustomHTTPException(
@@ -3864,7 +3864,7 @@ class MessageService(IMessageService):
 
         try:
             result = await asyncio.wait_for(asyncio.shield(entry.done), timeout=wait_seconds)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             return {"status": "stop_requested", "message": None}
 
         registry.remove(user_message_id)

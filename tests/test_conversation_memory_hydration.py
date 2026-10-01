@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -31,7 +31,7 @@ def _row(conversation_id, sequence, sender, content):
         sequence=sequence,
         sender=sender,
         content=content,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         message_metadata={},
     )
 

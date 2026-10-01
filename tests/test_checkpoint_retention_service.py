@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -19,7 +19,7 @@ def _make_conversation(conversation_id: str) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_expired_pending_interrupts_are_marked_expired():
-    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 8, tzinfo=UTC)
     expired = [
         _make_hitl_record("interrupt-1", "thread-1"),
         _make_hitl_record("interrupt-2", "thread-2"),
@@ -47,7 +47,7 @@ async def test_expired_pending_interrupts_are_marked_expired():
 
 @pytest.mark.asyncio
 async def test_expired_interrupt_thread_ids_are_passed_to_delete_thread():
-    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 8, tzinfo=UTC)
     expired = [
         _make_hitl_record("interrupt-1", "thread-1"),
         _make_hitl_record("interrupt-2", "thread-2"),
@@ -77,7 +77,7 @@ async def test_unexpired_pending_interrupts_are_not_deleted():
     """get_expired_pending is the sole source of expired records; unexpired
     (not-yet-due) interrupts are never returned by the repository query, so
     the service must not touch or delete anything for them."""
-    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 8, tzinfo=UTC)
 
     hitl_repo = Mock()
     hitl_repo.get_expired_pending = Mock(return_value=[])
@@ -101,7 +101,7 @@ async def test_unexpired_pending_interrupts_are_not_deleted():
 
 @pytest.mark.asyncio
 async def test_cleanup_swallows_per_thread_checkpoint_error_and_continues():
-    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 8, tzinfo=UTC)
     expired = [
         _make_hitl_record("interrupt-1", "thread-bad"),
         _make_hitl_record("interrupt-2", "thread-good"),
@@ -139,7 +139,7 @@ async def test_cleanup_swallows_per_thread_checkpoint_error_and_continues():
 
 @pytest.mark.asyncio
 async def test_soft_deleted_conversation_threads_are_deleted():
-    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 8, tzinfo=UTC)
 
     hitl_repo = Mock()
     hitl_repo.get_expired_pending = Mock(return_value=[])
@@ -208,7 +208,7 @@ async def test_schema_qualified_fallback_sql_used_when_adelete_thread_unavailabl
 async def test_cleanup_never_issues_ddl_against_checkpoint_tables():
     """Guard against regressions that would let retention cleanup drop or
     truncate the LangGraph checkpoint tables themselves."""
-    now = datetime(2026, 7, 8, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 8, tzinfo=UTC)
 
     hitl_repo = Mock()
     hitl_repo.get_expired_pending = Mock(

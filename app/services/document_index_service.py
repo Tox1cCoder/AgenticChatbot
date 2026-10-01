@@ -22,7 +22,7 @@ import logging
 import time as _time
 import uuid
 from collections.abc import Iterable, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -996,7 +996,7 @@ class DocumentIndexService:
         return purged
 
     def purge_retired_after_hours(self, document_id: UUID, hours: int) -> list[UUID]:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max(0, int(hours)))
+        cutoff = datetime.now(UTC) - timedelta(hours=max(0, int(hours)))
         return self.purge_retired_generations(document_id, cutoff)
 
     @staticmethod

@@ -20,7 +20,7 @@ architecture findings" #1 and commit ``b55d83a``):
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -193,7 +193,7 @@ class _FakeLocalManager:
 
 
 def _session() -> LocalSessionPayload:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return LocalSessionPayload(
         user_id="user-1",
         server_user_id="user-1",

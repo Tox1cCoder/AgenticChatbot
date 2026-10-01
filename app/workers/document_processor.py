@@ -3,7 +3,7 @@ import logging
 import os
 import shutil
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -459,7 +459,7 @@ def cleanup_failed_documents() -> dict[str, Any]:
     document_repo = DocumentRepository(SessionLocal)
 
     try:
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        cutoff_time = datetime.now(UTC) - timedelta(hours=1)
 
         stuck_documents = (
             db.query(Document)

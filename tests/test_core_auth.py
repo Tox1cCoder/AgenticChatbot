@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -23,7 +23,7 @@ def test_current_user_lookup_does_not_block_the_event_loop(monkeypatch):
             lookups.append(True)
         except RuntimeError:
             lookups.append(False)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return SimpleNamespace(
             id=requested_id,
             username="u",

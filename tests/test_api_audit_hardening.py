@@ -12,7 +12,7 @@ Each test here failed before its fix:
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -137,7 +137,7 @@ class _Messages:
 
 class _Feedback:
     def __init__(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.record = FeedbackRead(
             id=uuid4(),
             created_at=now,
@@ -247,7 +247,7 @@ def _devices_client(owner: UUID) -> TestClient:
         runtime_version="1",
         status=SimpleNamespace(value="online"),
         last_seen_at=None,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     service = SimpleNamespace(
         repository=SimpleNamespace(get_by_id=lambda _id: device if _id == device_id else None)
@@ -348,7 +348,7 @@ class _ThreadRecordingServices:
 
     @staticmethod
     def _conversation(owner_id: UUID) -> ConversationRead:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return ConversationRead(
             id=uuid4(),
             created_at=now,

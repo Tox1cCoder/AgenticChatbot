@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -100,7 +100,7 @@ def test_get_prompt_history_excludes_current_deleted_and_empty_paused():
     by ``before_message_id``."""
     conversation_id = uuid4()
 
-    base = datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
     old_user = _make_message(
         conversation_id=conversation_id,
         sender=MessageRole.user.value,
@@ -171,7 +171,7 @@ def test_get_prompt_history_keeps_partial_assistant_with_content():
     """Partial assistant rows with non-empty content remain in history; only
     empty paused/interrupt placeholders are excluded."""
     conversation_id = uuid4()
-    base = datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
 
     partial_with_content = _make_message(
         conversation_id=conversation_id,
@@ -207,7 +207,7 @@ def test_get_prompt_history_uses_after_cursor_when_provided():
     """When ``after_message_id`` is supplied, only messages strictly after
     its (created_at, id) are returned."""
     conversation_id = uuid4()
-    base = datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
     cursor_msg = _make_message(
         conversation_id=conversation_id,
         sender=MessageRole.assistant.value,
@@ -285,7 +285,7 @@ def test_history_provider_returns_summary_plus_recent_without_overlap():
     after_assistant_id = uuid4()
     current_message_id = uuid4()
 
-    base = datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
     after_user = _make_message(
         conversation_id=conversation_id,
         sender=MessageRole.user.value,
@@ -355,7 +355,7 @@ def test_history_provider_trims_by_agent_budget():
     conversation_id = uuid4()
     user_id = uuid4()
 
-    base = datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
     rows = [
         _make_message(
             conversation_id=conversation_id,
@@ -400,7 +400,7 @@ def test_history_provider_invalidate_clears_cached_entries():
     conversation_id = uuid4()
     user_id = uuid4()
 
-    base = datetime(2026, 4, 29, 10, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
     msg = _make_message(
         conversation_id=conversation_id,
         sender=MessageRole.user.value,
@@ -459,7 +459,7 @@ def test_history_provider_returns_latest_valid_canvas_artifact():
 
     conversation_id = uuid4()
     user_id = uuid4()
-    base = datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
 
     legacy = _make_message(
         conversation_id=conversation_id,
@@ -517,7 +517,7 @@ def test_history_provider_keeps_canvas_sticky_after_unchanged_update():
 
     conversation_id = uuid4()
     user_id = uuid4()
-    base = datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
     artifact_message = _make_message(
         conversation_id=conversation_id,
         sender=MessageRole.assistant.value,
@@ -638,7 +638,7 @@ def _assistant_with_agent(agent_id: str | None, *, content: str = "final answer"
         conversation_id=uuid4(),
         sender=MessageRole.assistant.value,
         content=content,
-        created_at=datetime(2026, 8, 26, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 26, 10, 0, tzinfo=UTC),
         metadata=metadata,
     )
 
@@ -669,7 +669,7 @@ def test_previous_final_agent_id_reads_durable_message_metadata():
 
 def test_previous_final_agent_id_ignores_deleted_and_empty_placeholders():
     deleted = _assistant_with_agent("search_agent")
-    deleted.deleted_at = datetime(2026, 8, 26, 11, 0, tzinfo=timezone.utc)
+    deleted.deleted_at = datetime(2026, 8, 26, 11, 0, tzinfo=UTC)
     assert (
         asyncio.run(
             _provider_for_latest_assistant(deleted).get_previous_final_agent_id(

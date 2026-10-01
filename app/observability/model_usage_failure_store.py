@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 
@@ -42,7 +42,7 @@ class RedisModelUsageFailureStore:
         client: Any,
         *,
         ttl_seconds: int,
-        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if ttl_seconds < 60:
             raise ValueError("ttl_seconds must be at least 60")
@@ -51,7 +51,7 @@ class RedisModelUsageFailureStore:
         self._clock = clock
 
     def _minute_number(self) -> int:
-        return int(self._clock().astimezone(timezone.utc).timestamp() // 60)
+        return int(self._clock().astimezone(UTC).timestamp() // 60)
 
     @classmethod
     def _key(cls, minute_number: int) -> str:

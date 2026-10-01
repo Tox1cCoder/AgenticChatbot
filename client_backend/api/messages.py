@@ -79,7 +79,7 @@ def _build_sse_response(
                     event = await asyncio.wait_for(
                         queue.get(), timeout=_SSE_KEEPALIVE_INTERVAL_SECONDS
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # SSE comment line keeps the connection alive without
                     # appearing as a data event to the client.
                     yield ": keepalive\n\n"

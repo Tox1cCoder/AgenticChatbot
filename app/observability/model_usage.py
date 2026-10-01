@@ -22,7 +22,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from threading import Lock
 from typing import Any
 
@@ -234,7 +234,7 @@ class ModelUsageHealthService:
         rollup_lag_degraded_minutes: int = 2,
         rollup_lag_unhealthy_minutes: int = 5,
         persistence_failure_window_seconds: float = 300.0,
-        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.repository = repository
         self.metrics = metrics
@@ -251,7 +251,7 @@ class ModelUsageHealthService:
         self.clock = clock
 
     def get_health(self) -> dict[str, Any]:
-        now = self.clock().astimezone(timezone.utc)
+        now = self.clock().astimezone(UTC)
         raw = self.repository.get_model_usage_health_snapshot(
             now=now,
             lookback_minutes=self.lookback_minutes,
@@ -275,8 +275,8 @@ class ModelUsageHealthService:
                 0,
                 int(
                     (
-                        latest_event.astimezone(timezone.utc)
-                        - latest_rollup.astimezone(timezone.utc)
+                        latest_event.astimezone(UTC)
+                        - latest_rollup.astimezone(UTC)
                     ).total_seconds()
                     // 60
                 ),

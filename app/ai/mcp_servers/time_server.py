@@ -1,6 +1,5 @@
 import json
-from datetime import datetime
-from datetime import timezone as dt_timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import FastMCP
@@ -32,7 +31,7 @@ def get_current_time(
         tzinfo = ZoneInfo(timezone)
     except Exception:
         # ZoneInfoNotFoundError, or ValueError/TypeError for a malformed key.
-        tzinfo = dt_timezone.utc
+        tzinfo = UTC
         resolved_timezone = "UTC"
 
     now = datetime.now(tzinfo)

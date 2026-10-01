@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -23,7 +23,7 @@ from app.repositories.conversation import ConversationRepository
 from app.repositories.message import MessageRepository
 from app.repositories.user import UserRepository
 
-T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @compiles(JSONB, "sqlite")
@@ -231,7 +231,7 @@ def test_document_upload_time_is_stamped_at_insert(session_factory):
         session.flush()
         session.add(Conversation(id=conversation_id, owner_id=owner.id, title="docs"))
         session.flush()
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         document = Document(
             conversation_id=conversation_id,
             filename="a.txt",

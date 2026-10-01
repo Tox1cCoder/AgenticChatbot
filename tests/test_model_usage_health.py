@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -43,8 +43,8 @@ def snapshot(**overrides):
         "raw_event_count": 100,
         "rollup_request_count": 100,
         "unattributed_event_count": 2,
-        "latest_event_minute": datetime(2026, 7, 21, 12, 29, tzinfo=timezone.utc),
-        "latest_rollup_minute": datetime(2026, 7, 21, 12, 29, tzinfo=timezone.utc),
+        "latest_event_minute": datetime(2026, 7, 21, 12, 29, tzinfo=UTC),
+        "latest_rollup_minute": datetime(2026, 7, 21, 12, 29, tzinfo=UTC),
     }
     value.update(overrides)
     return value
@@ -59,7 +59,7 @@ def service(repository, metrics=None):
         unattributed_degraded_ratio=0.10,
         rollup_lag_degraded_minutes=2,
         rollup_lag_unhealthy_minutes=5,
-        clock=lambda: datetime(2026, 7, 21, 12, 31, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 7, 21, 12, 31, tzinfo=UTC),
     )
 
 
@@ -70,7 +70,7 @@ def test_health_classifies_durable_gap_unattributed_ratio_and_rollup_lag():
     assert unattributed["unattributed_rate"] == 0.11
     lagged = service(
         SnapshotRepository(
-            snapshot(latest_rollup_minute=datetime(2026, 7, 21, 12, 23, tzinfo=timezone.utc))
+            snapshot(latest_rollup_minute=datetime(2026, 7, 21, 12, 23, tzinfo=UTC))
         )
     ).get_health()
     assert lagged["status"] == "unhealthy"
@@ -80,7 +80,7 @@ def test_health_classifies_durable_gap_unattributed_ratio_and_rollup_lag():
 
 
 def test_old_matching_event_and_rollup_are_healthy_not_stale():
-    old_minute = datetime(2026, 7, 21, 11, 40, tzinfo=timezone.utc)
+    old_minute = datetime(2026, 7, 21, 11, 40, tzinfo=UTC)
     result = service(
         SnapshotRepository(
             snapshot(latest_event_minute=old_minute, latest_rollup_minute=old_minute)

@@ -1,11 +1,7 @@
 """Dependency floors required by the model-usage analytics implementation."""
 
+import tomllib
 from pathlib import Path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    import tomli as tomllib
 
 from packaging.requirements import Requirement
 from packaging.version import Version

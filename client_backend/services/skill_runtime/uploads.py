@@ -31,7 +31,7 @@ import os
 import shutil
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -173,7 +173,7 @@ class SkillUploadService:
     ) -> None:
         self._environment = environment_manager
         self._registry = registry
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._audit = audit
         self._recovered: set[str] = set()
 

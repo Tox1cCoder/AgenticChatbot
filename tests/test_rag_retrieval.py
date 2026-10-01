@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
@@ -501,7 +501,7 @@ def test_lexical_sql_excludes_other_tenants_and_retired_generations():
                         filename_key="owned.pdf",
                         file_type="application/pdf",
                         status=2,
-                        upload_time=datetime.now(timezone.utc),
+                        upload_time=datetime.now(UTC),
                     ),
                     Document(
                         id=other_document_id,
@@ -510,7 +510,7 @@ def test_lexical_sql_excludes_other_tenants_and_retired_generations():
                         filename_key="other.pdf",
                         file_type="application/pdf",
                         status=2,
-                        upload_time=datetime.now(timezone.utc),
+                        upload_time=datetime.now(UTC),
                     ),
                 ]
             )

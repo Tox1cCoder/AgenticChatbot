@@ -18,7 +18,7 @@ import hashlib
 import json
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar
 from uuid import UUID
 
@@ -76,7 +76,7 @@ def _require_aware(value: datetime, field_name: str) -> datetime:
 
 def _require_minute_aligned_utc(value: datetime, field_name: str) -> datetime:
     """Return ``value`` normalized to UTC, rejecting non-minute-aligned instants."""
-    utc_value = _require_aware(value, field_name).astimezone(timezone.utc)
+    utc_value = _require_aware(value, field_name).astimezone(UTC)
     if utc_value.second != 0 or utc_value.microsecond != 0:
         raise ValueError(f"{field_name} must be minute-aligned (second=microsecond=0 UTC)")
     return utc_value
@@ -170,7 +170,7 @@ class RecordEventCommand:
     @property
     def bucket_start_utc(self) -> datetime:
         """The UTC minute whose rollup this attempt folds into."""
-        return self.started_at.astimezone(timezone.utc).replace(second=0, microsecond=0)
+        return self.started_at.astimezone(UTC).replace(second=0, microsecond=0)
 
     def event_values(self) -> dict[str, Any]:
         """Column values for this attempt's immutable ``model_usage_events`` row."""
@@ -855,7 +855,7 @@ class ModelUsageRepository:
         if lookback_minutes < 1:
             raise ValueError("lookback_minutes must be >= 1")
         complete_minute = (
-            _require_aware(now, "now").astimezone(timezone.utc).replace(second=0, microsecond=0)
+            _require_aware(now, "now").astimezone(UTC).replace(second=0, microsecond=0)
         )
         start = complete_minute - timedelta(minutes=lookback_minutes)
         raw_statement = select(

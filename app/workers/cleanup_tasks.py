@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import redis
 from celery.schedules import crontab
@@ -120,7 +120,7 @@ def cleanup_abandoned_interrupts():
        then cleans up their checkpoint threads too.
     """
     try:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # ── Redis cleanup (supplementary) ────────────────────────────────────────
         redis_expired_threads, redis_expired_count, active_count = (
@@ -251,7 +251,7 @@ def _scan_and_expire_redis_interrupts(now: datetime) -> tuple[list[str], int, in
                 stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
                 # Ensure comparison is between two tz-aware datetimes
                 if stored_time.tzinfo is None:
-                    stored_time = stored_time.replace(tzinfo=timezone.utc)
+                    stored_time = stored_time.replace(tzinfo=UTC)
 
                 elapsed_minutes = (now - stored_time).total_seconds() / 60
 

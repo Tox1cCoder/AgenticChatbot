@@ -7,7 +7,7 @@ data layer.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -109,7 +109,7 @@ class DocumentChunkRepository:
             return 0
 
         with self.session_factory() as db:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             mappings = [
                 {
                     "id": chunk_id,
