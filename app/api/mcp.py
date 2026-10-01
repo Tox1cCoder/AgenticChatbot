@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, status
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_admin_user, get_current_user
 from app.core.dependency_injection import AppAutoInjector
 from app.schemas.mcp import (
     MCPOperationResponse,
@@ -62,7 +62,11 @@ async def get_server_details(
     )
 
 
-@router.post("/servers", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/servers",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(get_current_admin_user)],
+)
 @AppAutoInjector.auto_inject()
 async def add_server(
     server_config: MCPServerConfig,
@@ -75,7 +79,11 @@ async def add_server(
     return ApiResponse(success=True, message=result["message"], data=response_data)
 
 
-@router.post("/servers/from-url", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/servers/from-url",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(get_current_admin_user)],
+)
 @AppAutoInjector.auto_inject()
 async def add_server_from_url(
     url_config: MCPServerURLConfig,
@@ -88,7 +96,7 @@ async def add_server_from_url(
     return ApiResponse(success=True, message=result["message"], data=response_data)
 
 
-@router.delete("/servers/{server_name}")
+@router.delete("/servers/{server_name}", dependencies=[Depends(get_current_admin_user)])
 @AppAutoInjector.auto_inject()
 async def remove_server(
     server_name: str,
@@ -100,7 +108,7 @@ async def remove_server(
     return ApiResponse(success=True, message=result["message"], data=response_data)
 
 
-@router.patch("/servers/{server_name}/toggle")
+@router.patch("/servers/{server_name}/toggle", dependencies=[Depends(get_current_admin_user)])
 @AppAutoInjector.auto_inject()
 async def toggle_server(
     server_name: str,
@@ -171,7 +179,7 @@ async def get_tool_details(
     )
 
 
-@router.post("/tools/{tool_name}/execute")
+@router.post("/tools/{tool_name}/execute", dependencies=[Depends(get_current_admin_user)])
 @AppAutoInjector.auto_inject()
 async def execute_tool(
     tool_name: str,

@@ -818,6 +818,7 @@ class Container(containers.DeclarativeContainer):
     mcp_service = providers.Factory(
         MCPService,
         mcp_manager=mcp_manager,
+        allow_api_stdio=providers.Object(settings.mcp_allow_api_stdio),
     )
 
 

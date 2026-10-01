@@ -5,10 +5,12 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from app.ai.mcp_integration import MCPManager, compute_catalog_version
+from app.core.exceptions import AuthorizationException
 from app.core.exceptions.mcp import (
     ServerConfigurationError,
     ToolNotFoundError,
 )
+from app.core.mcp_adapter_utils import normalize_mcp_transport
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +60,16 @@ def redact_server_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 class MCPService:
-    def __init__(self, mcp_manager: MCPManager):
+    def __init__(self, mcp_manager: MCPManager, allow_api_stdio: bool = False):
         self.mcp_manager = mcp_manager
+        self.allow_api_stdio = allow_api_stdio
+
+    def _require_api_transport(self, transport: str | None) -> None:
+        if normalize_mcp_transport(transport) == "stdio" and not self.allow_api_stdio:
+            raise AuthorizationException(
+                detail="Configuring or enabling stdio MCP servers through the API is disabled",
+                error_code="API_STDIO_DISABLED",
+            )
 
     async def list_servers(self) -> dict[str, Any]:
         servers_status = self.mcp_manager.get_servers_status()
@@ -103,6 +113,7 @@ class MCPService:
             raise ServerConfigurationError("Server name is required")
 
         transport = server_config.get("transport")
+        self._require_api_transport(transport)
         if transport not in ["stdio", "http", "sse", "streamable_http"]:
             raise ServerConfigurationError(f"Invalid transport type: {transport}")
 
@@ -162,8 +173,8 @@ class MCPService:
             logger.info("Added server from URL as %s", server_name)
             return {"message": f"Server '{server_name}' added successfully from URL"}
 
-        except ServerConfigurationError:
-            # Re-raise configuration errors as-is
+        except (ServerConfigurationError, AuthorizationException):
+            # Preserve configuration and authorization responses from the shared add path.
             raise
         except Exception as e:
             # Wrap other exceptions
@@ -183,6 +194,8 @@ class MCPService:
 
     async def toggle_server(self, server_name: str, enabled: bool) -> dict[str, str]:
         if enabled:
+            config = self.mcp_manager.get_server_info(server_name)["config"]
+            self._require_api_transport(config.get("transport"))
             await self.mcp_manager.enable_server(server_name)
         else:
             await self.mcp_manager.disable_server(server_name)

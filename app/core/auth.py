@@ -7,6 +7,7 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.concurrency import run_in_threadpool
 
+from app.core.config import Settings, get_settings
 from app.core.exceptions import (
     AuthenticationException,
     AuthorizationException,
@@ -159,3 +160,16 @@ def get_current_user(
         avatar_url=user_read.avatar_url,
         password_hash="",
     )
+
+
+def get_current_admin_user(
+    user: User = Depends(get_current_user),  # noqa: B008
+    settings: Settings = Depends(get_settings),  # noqa: B008
+) -> User:
+    """Require a live authenticated user explicitly listed by the operator."""
+    if user.id not in settings.admin_user_ids:
+        raise AuthorizationException(
+            detail="Administrator access required",
+            error_code="ADMIN_REQUIRED",
+        )
+    return user

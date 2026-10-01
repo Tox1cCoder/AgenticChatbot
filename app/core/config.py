@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse, urlunparse
+from uuid import UUID
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -251,6 +252,14 @@ class Settings(BaseSettings):
         return str(value or "development").strip().lower() or "development"
 
     # Security
+    admin_user_ids: list[UUID] = Field(
+        default_factory=list,
+        description="Explicit user UUID allowlist for administrator operations; empty denies all",
+    )
+    mcp_allow_api_stdio: bool = Field(
+        default=False,
+        description="Allow administrators to configure or enable stdio MCP servers through the API",
+    )
     secret_key: str = Field(
         repr=False,
         default="",
