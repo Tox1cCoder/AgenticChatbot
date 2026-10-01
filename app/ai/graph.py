@@ -1096,8 +1096,13 @@ class MultiAgentWorkflow(
         if not pause_reason and signal_scope == "planning" and isinstance(signal_reason, str):
             pause_reason = signal_reason
 
+        outcome = (state_values or {}).get("agent_outcome")
+        metadata = getattr(getattr(outcome, "response", None), "metadata", None)
         planning_budget_reached = (
-            signal_scope == "planning" and signal_reason == "max_iterations_reached"
+            metadata["planning_budget_reached"]
+            if isinstance(metadata, dict)
+            and isinstance(metadata.get("planning_budget_reached"), bool)
+            else state_view.planning_budget_reached()
         )
         return pause_reason, planning_budget_reached
 
@@ -1147,8 +1152,7 @@ class MultiAgentWorkflow(
             response.metadata["planning_rubric"] = make_json_safe(planning_rubric)
 
         pause_reason, planning_budget_reached = cls._get_planning_pause_details(state_values)
-        if planning_budget_reached:
-            response.metadata["planning_budget_reached"] = True
+        response.metadata["planning_budget_reached"] = planning_budget_reached
         if pause_reason:
             response.metadata["pause_reason"] = pause_reason
 

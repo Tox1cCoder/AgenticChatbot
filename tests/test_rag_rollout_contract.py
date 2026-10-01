@@ -75,7 +75,6 @@ def test_env_example_documents_default_off_rag_flags():
 
     expected = {
         "RAG_HYBRID_RETRIEVAL_ENABLED": "false",
-        "RAG_GROUNDED_ANSWER_GATE_ENABLED": "false",
         "RAG_EXACT_CACHE_ENABLED": "false",
         "RAG_SEMANTIC_CHUNKING_ENABLED": "false",
         "RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED": "false",
@@ -83,6 +82,8 @@ def test_env_example_documents_default_off_rag_flags():
     assert {key: assignments.get(key) for key in expected} == {
         key: [value] for key, value in expected.items()
     }
+    # Grounding is mandatory; documenting a removed opt-out flag is misleading.
+    assert "RAG_GROUNDED_ANSWER_GATE_ENABLED" not in assignments
 
 
 def test_min_citation_coverage_is_pinned_pending_reselection(settings):

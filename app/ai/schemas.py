@@ -284,8 +284,17 @@ class GraphStateView:
         return value if isinstance(value, dict) else {}
 
     def planning_call_count(self, default: int = 0) -> int:
+        budget = self._state.get("execution_budget")
+        if isinstance(budget, dict):
+            value = budget.get("turn_planning_model_calls")
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
         value = self._state.get("planning_call_count")
         return int(value) if isinstance(value, int) else default
+
+    def planning_budget_reached(self) -> bool:
+        budget = self._state.get("execution_budget")
+        return isinstance(budget, dict) and budget.get("forced_synthesis") is True
 
     def context(self) -> GraphContext:
         context = self._state.get("context", {})

@@ -462,6 +462,15 @@ async def test_rag_worker_uses_the_shared_compiled_graph():
     assert result.images == ({"image_id": "img-1"},)
 
 
+async def test_rag_worker_forwards_bounded_parent_context_to_its_model_request():
+    rag_graph = FakeRagGraph()
+    task = _task("t1", "rag_agent", parent_context={"todos": [{"content": "Review widget docs"}]})
+
+    await _runtime(rag_graph=rag_graph).run(task, _parent_state())
+
+    assert rag_graph.requests[0].parent_context == {"todos": [{"content": "Review widget docs"}]}
+
+
 async def test_rag_worker_is_graded_only_against_its_own_scope():
     rag_graph = FakeRagGraph()
     task = _task("t1", "rag_agent", allowed_tool_ids=("search_documents",))

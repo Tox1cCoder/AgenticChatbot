@@ -144,6 +144,7 @@ class RagExecutionRequest(BaseModel):
     mode: RagMode = "public"
     dispatch_id: str | None = None
     task_id: str | None = None
+    parent_context: dict[str, Any] = Field(default_factory=dict)
     # Carried in rather than read from process memory: a Continue may be served
     # by a worker that never ran the previous epoch, and an absent budget there
     # would look exactly like a fresh turn with a full quota.
@@ -712,13 +713,18 @@ class ProductionRagRuntime:
                 task_id=request.task_id,
             )
 
+        question = request.objective
+        if request.mode == "worker" and request.parent_context:
+            from app.ai.workflow.specialists import render_parent_context
+
+            question = f"{render_parent_context(request.parent_context)}\n\n{question}"
         agent_message = AgentMessage(
             role=MessageRole.USER,
             content=request.objective,
             metadata={
                 "persona": request.persona,
                 "history": list(request.history),
-                "original_query": request.objective,
+                "original_query": question,
                 "rag_tool_messages": list(messages),
                 "model_request": request.model_request,
                 "user_id": request.user_id,

@@ -81,6 +81,9 @@ class ExecutionBudgetState(BaseModel):
     exhausted_by: ExhaustionReason | None = None
 
     turn_model_calls: int = Field(default=0, ge=0)
+    # A projection for Planning metadata, not a separate execution limit.
+    # Specialists and workers may share turn totals but are not Planning calls.
+    turn_planning_model_calls: int = Field(default=0, ge=0)
     turn_tool_calls: int = Field(default=0, ge=0)
     epochs_used: int = Field(default=1, ge=1)
 
@@ -177,7 +180,7 @@ class ExecutionBudgetAccountant:
         self._state.turn_tool_calls += 1
         return BudgetDecision(allowed=True)
 
-    def note_model_call(self) -> BudgetDecision:
+    def note_model_call(self, *, planning: bool = False) -> BudgetDecision:
         """Ask how one model call must be made. Always allowed.
 
         Refusing a model call would leave the turn with no answer at all, which
@@ -190,6 +193,8 @@ class ExecutionBudgetAccountant:
             self._force("model_calls")
         self._state.model_calls += 1
         self._state.turn_model_calls += 1
+        if planning:
+            self._state.turn_planning_model_calls += 1
         suppressed = self._state.forced_synthesis
         return BudgetDecision(
             allowed=True,

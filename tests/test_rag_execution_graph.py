@@ -182,6 +182,60 @@ async def test_production_rag_worker_tags_its_model_run_for_stream_attribution()
     }
 
 
+async def test_rag_parent_context_reaches_model_question_as_untrusted_input():
+    from langchain_core.messages import HumanMessage
+
+    from app.ai.agents.rag_agent import RAGAgent
+    from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+
+    captured = {}
+    agent = object.__new__(RAGAgent)
+    agent.tools = []
+    agent._build_skills_suffix = lambda **_kwargs: ""
+    agent._get_tools_for_binding = lambda **_kwargs: []
+
+    async def init_tools():
+        pass
+
+    agent._init_tools = init_tools
+    agent._resolve_runtime_model_config = lambda *_args, **_kwargs: SimpleNamespace(
+        provider="gemini", capabilities={"supports_vision": True},
+        fallback_config=None, warnings=[],
+    )
+
+    async def model_boundary(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return AgentResponse(
+            agent_type=AgentType.RAG, agent_id="rag_agent",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT, content="", tool_calls=[_search_call()],
+            ),
+            metadata={},
+        )
+
+    agent._invoke_agentic_rag_model = model_boundary
+
+    runtime = ProductionRagRuntime(
+        rag_agent=agent, agent_lookup=lambda _name: None, settings=SimpleNamespace(),
+    )
+    prior_result = ToolMessage(content="Found the handbook", tool_call_id="earlier-call")
+    await runtime.model_turn(
+        _request(mode="worker", parent_context={"todos": [{"content": "Review widget docs"}]}),
+        messages=(prior_result,), evidence=None,
+    )
+
+    model_inputs = captured["messages"]
+    context_inputs = [
+        message for message in model_inputs if "Review widget docs" in message.content
+    ]
+    assert len(context_inputs) == 1
+    assert isinstance(context_inputs[0], HumanMessage)
+    assert "BEGIN UNTRUSTED PARENT CONTEXT" in context_inputs[0].content
+    assert "END UNTRUSTED PARENT CONTEXT" in context_inputs[0].content
+    assert "what does the manual say?" in context_inputs[0].content
+    assert model_inputs[-1] == prior_result
+
+
 # ----------------------------------------------------------------------
 # one compiled graph
 # ----------------------------------------------------------------------

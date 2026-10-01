@@ -10,7 +10,7 @@ guaranteed is now asserted where the behaviour lives:
   in ``test_planning_execution_graph.py`` and ``test_custom_agents_planning.py``.
 
 What remains here is the handoff/tool plumbing that is still live: control
-message stripping, sequential tool execution, the tool-error limit, planning
+message stripping, sequential tool execution, planning
 state metadata, and the finalized-response accessor.
 """
 
@@ -28,7 +28,6 @@ from app.ai.schemas import (
     AgentType,
     MessageRole,
 )
-from app.core.config import settings
 
 
 def _ok(content: str = "ok") -> AgentResponse:
@@ -265,8 +264,3 @@ def test_delegated_agent_messages_passthrough_when_no_active_handoff():
     delegated = workflow._messages_for_active_agent(state, "search_agent", messages)
 
     assert delegated == messages[2:]
-
-
-def test_worker_loop_uses_tool_error_limit_from_settings(monkeypatch):
-    monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 4, raising=False)
-    assert settings.tool_execution_consecutive_errors_limit == 4

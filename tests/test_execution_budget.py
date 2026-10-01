@@ -141,6 +141,17 @@ def test_model_calls_below_the_soft_limit_keep_their_tools():
     assert second.tools_suppressed is False
 
 
+def test_planning_metadata_counts_only_planning_calls_and_preserves_them_across_epochs():
+    accountant = _accountant()
+    accountant.note_model_call()  # a specialist, not Planning
+    accountant.note_model_call(planning=True)
+    accountant.begin_epoch(1)
+    accountant.note_model_call(planning=True)
+
+    assert accountant.state.turn_model_calls == 3
+    assert accountant.state.turn_planning_model_calls == 2
+
+
 def test_the_last_model_call_in_the_budget_is_the_reserved_synthesis():
     """Reaching the soft limit does not fail the turn; it answers it."""
     accountant = _accountant(soft_model_calls=3)

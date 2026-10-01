@@ -155,6 +155,8 @@ async def test_a_runaway_planning_loop_pauses_instead_of_raising_a_recursion_err
     assert model.forced[-1] is True
     assert not any(model.forced[:-1])
     assert len(model.forced) > 3
+    assert final["agent_outcome"].response.metadata["planning_budget_reached"] is True
+    assert final["agent_outcome"].response.metadata["planning_call_count"] == len(model.forced)
 
 
 async def test_stopping_the_paused_runaway_turn_publishes_the_partial(monkeypatch):
@@ -189,6 +191,66 @@ async def test_planning_model_calls_count_against_the_epoch_budget(monkeypatch):
     assert isinstance(final["agent_outcome"], ResponseOutcome)
 
 
+async def test_budget_pause_publishes_actual_planning_call_count_and_reached_metadata(monkeypatch):
+    from app.ai.graph import MultiAgentWorkflow
+
+    monkeypatch.setattr(settings, "generation_auto_continue", False)
+    final, _ = await _run(
+        PlanningWorkflow(StubbornPlanningModel(), _limits(3)), recursion_limit=100,
+    )
+
+    response = final["agent_outcome"].response
+    assert response.metadata["planning_call_count"] == 3
+    assert response.metadata["planning_budget_reached"] is True
+    assert final["planning_call_count"] == 3
+    # The same values must reach stream completion from the checkpoint.
+    enriched = MultiAgentWorkflow._attach_planning_state_metadata(response, final)
+    assert enriched.metadata["planning_call_count"] == 3
+    assert enriched.metadata["planning_budget_reached"] is True
+    # Finalization must not erase why this already-packaged partial was produced.
+    final["execution_budget"]["forced_synthesis"] = False
+    enriched = MultiAgentWorkflow._attach_planning_state_metadata(response, final)
+    assert enriched.metadata["planning_budget_reached"] is True
+
+
+async def test_continued_planning_keeps_turn_count_but_clears_previous_epoch_reached(monkeypatch):
+    from app.ai.graph import MultiAgentWorkflow
+
+    monkeypatch.setattr(settings, "generation_auto_continue", False)
+    _, saver = await _run(
+        PlanningWorkflow(StubbornPlanningModel(), _limits(3)), recursion_limit=100,
+    )
+
+    async def answer(_state):
+        return SimpleNamespace(message=SimpleNamespace(content="Finished the plan", tool_calls=[]))
+
+    final, _ = await _run(
+        PlanningWorkflow(answer, _limits(3)), recursion_limit=100, saver=saver,
+        resume={"action": "continue", "continuation_id": "c-1", "expected_epoch": 0},
+    )
+    response = final["response"]
+    assert response.metadata["planning_call_count"] == 4
+    assert response.metadata["planning_budget_reached"] is False
+    assert final["planning_call_count"] == 4
+    response.metadata["planning_budget_reached"] = True  # stale prior-epoch metadata
+    enriched = MultiAgentWorkflow._attach_planning_state_metadata(response, final)
+    assert enriched.metadata["planning_call_count"] == 4
+    assert enriched.metadata["planning_budget_reached"] is False
+
+
+async def test_old_planning_checkpoint_preserves_recorded_call_count_on_resume():
+    async def answer(_state):
+        return SimpleNamespace(message=SimpleNamespace(content="Finished", tool_calls=[]))
+
+    factory = PlanningWorkflow(answer, _limits(20)).planning_node_factory
+    command = await factory.planning_model({
+        "planning_call_count": 7,
+        "execution_budget": {"model_calls": 10, "turn_model_calls": 12},
+    })
+    assert command.update["planning_call_count"] == 8
+    assert command.update["execution_budget"]["turn_model_calls"] == 13
+
+
 async def test_auto_continued_planning_epochs_still_end_at_the_step_ceiling(monkeypatch):
     """Rolling epochs in one run must not walk the turn into the recursion limit."""
     monkeypatch.setattr(settings, "generation_auto_continue", True)
@@ -202,6 +264,8 @@ async def test_auto_continued_planning_epochs_still_end_at_the_step_ceiling(monk
     # itself before the step ceiling stopped the run.
     assert model.forced.count(True) >= 2
     assert model.forced[:3] == [False, False, True]
+    assert final["agent_outcome"].response.metadata["planning_call_count"] == len(model.forced)
+    assert final["agent_outcome"].response.metadata["planning_budget_reached"] is True
 
 
 def test_the_reserved_call_reaches_the_production_model_call_tool_free():

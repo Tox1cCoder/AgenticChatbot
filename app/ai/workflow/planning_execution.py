@@ -512,6 +512,7 @@ class PlanningWorkerRuntime:
                 mode="worker",
                 dispatch_id=task.dispatch_id,
                 task_id=task.task_id,
+                parent_context=task.parent_context,
                 # A delegated worker shares the turn's accounting: two workers
                 # searching the same thing is the duplication this bounds.
                 logical_turn_id=GraphStateView(dict(state)).logical_turn_id(),
@@ -802,7 +803,7 @@ class PlanningNodeFactory:
         before, only the recursion limit did, and the turn died as an error.
         """
         accountant = self._accountant(state)
-        accountant.note_model_call()
+        accountant.note_model_call(planning=True)
         if _out_of_steps(state) and accountant.state.exhausted_by != "hard_limit":
             accountant.note_hard_limit()
         forced = accountant.state.forced_synthesis
@@ -815,12 +816,18 @@ class PlanningNodeFactory:
         ]
         budget = accountant.state.model_dump(mode="json")
 
-        if forced:
-            return _reserved_answer(content, tool_calls, budget)
-        command = await self._decide(state, content, tool_calls, response)
+        command = (
+            _reserved_answer(content, tool_calls, budget)
+            if forced
+            else await self._decide(state, content, tool_calls, response)
+        )
         return Command(
             graph=command.graph,
-            update={**dict(command.update or {}), "execution_budget": budget},
+            update={
+                **dict(command.update or {}),
+                "execution_budget": budget,
+                "planning_call_count": accountant.state.turn_planning_model_calls,
+            },
             goto=command.goto,
         )
 
@@ -837,7 +844,14 @@ class PlanningNodeFactory:
                 budget_state = ExecutionBudgetState.model_validate(dict(carried))
             except ValidationError:
                 logger.warning("Ignored an unreadable carried execution budget in Planning")
-        return ExecutionBudgetAccountant(limits=self._budget_limits, state=budget_state)
+        accountant = ExecutionBudgetAccountant(limits=self._budget_limits, state=budget_state)
+        if not isinstance(carried, Mapping) or "turn_planning_model_calls" not in carried:
+            # Older checkpoints stored only the public Planning count. Carry
+            # it into the accountant once; never infer it from specialist totals.
+            accountant.state.turn_planning_model_calls = max(
+                0, GraphStateView(dict(state)).planning_call_count()
+            )
+        return accountant
 
     async def _decide(
         self,
@@ -1238,6 +1252,11 @@ class PlanningNodeFactory:
         """
         results = list(state.get("worker_results") or [])
         outcome = build_planning_outcome(content=_last_ai_text(state), results=results)
+        state_view = GraphStateView(dict(state))
+        outcome.response.metadata.update(
+            planning_call_count=state_view.planning_call_count(),
+            planning_budget_reached=state_view.planning_budget_reached(),
+        )
         return Command(
             update={
                 "agent_outcome": outcome,

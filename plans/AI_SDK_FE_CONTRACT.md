@@ -451,7 +451,7 @@ Interrupt kinds:
 | Kind | Detection | FE behavior |
 |---|---|---|
 | `tool_approval` | `data-interrupt` with `data.interrupt.action_requests[]` | Render approval UI; resume via `POST /ai/resume-interrupt`. |
-| `planning_pause` | Final metadata has `planning_budget_reached: true`, `execution_paused: true`, or `execution_pause_reason` | No decision UI. Show the message; the user continues with a normal chat message. |
+| `planning_pause` | Final metadata has `execution_paused: true` or `execution_pause_reason` | Show the partial answer. Offer Continue only when `data-generation` reports `continuation_available`; send its generation/continuation IDs and version to `POST /ai/continue`. |
 | `subagent_requires_approval` | Live `data-subagent` `status === "requires_approval"`, or `metadata.subagent_results[].status === "requires_approval"` | Show the worker as blocked. Nested workers are not resumable via `/ai/resume-interrupt`. |
 
 Pause reasons on persisted messages (`metadata.pause_reason` /
@@ -798,9 +798,9 @@ Planning/UX fields:
 | `paused` / `pause_reason` | boolean/string | Paused-message markers (see HITL). |
 | `thread_id` / `next` | string / string[] | Resume identifiers for paused messages. |
 | `todos` | array | Task-plan state for planning UI. |
-| `planning_call_count` | number | Planning loop calls this turn. |
+| `planning_call_count` | number | Cumulative Planning parent-model calls in this turn, including continued epochs; excludes router and worker calls. |
 | `all_tasks_completed` | boolean | Planning finished all tasks. |
-| `planning_budget_reached` | boolean | Planning paused at its budget. |
+| `planning_budget_reached` | boolean | Planning reached an execution limit in the epoch that produced this answer. A completed answer may also have this flag; use execution pause metadata to identify a pause. |
 | `todos_synced` | boolean | Task-plan state was synced at persistence. |
 | `next_task` | object | Active/next task summary. |
 | `planning_rubric` | object | Plan-quality grading metadata. |
@@ -1272,7 +1272,7 @@ function getInterruptKind(event: any, backendMeta: any = {}) {
   if (event?.type === "data-subagent" && event?.data?.subagent?.status === "requires_approval") {
     return "subagent_requires_approval";
   }
-  if (backendMeta?.planning_budget_reached || backendMeta?.execution_paused || backendMeta?.execution_pause_reason) {
+  if (backendMeta?.execution_paused || backendMeta?.execution_pause_reason) {
     return "planning_pause";
   }
   if (Array.isArray(backendMeta?.subagent_results) &&
