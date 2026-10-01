@@ -17,9 +17,36 @@ LangGraph, Streamlit (`demo.py`), local sidecar `client_backend/` on :8100.
 **Spec:** the audit reports, summarised in the Appendix. The session note is at
 `~/claude-assistant/state/sessions/2026-09-25-codebase-audit.md`.
 
-## Status (2026-09-30)
+## Status (2026-10-01)
 
-Full suite after this round: 5975 passed, 314 skipped, 0 failed. `ruff check .` is clean.
+Full suite after round 3 (with another session's uncommitted preview-stream work in the
+tree): 6062 passed, 312 skipped, 1 failed. The failure, a stale call-site manifest entry
+left by the Task 26 deletions, is fixed in `280801dc`. `ruff check .` is clean.
+
+Rounds 2–3 (2026-09-30 → 10-01), decided by Thai: SECRET_KEY / MODEL_ENCRYPTION_KEY
+auto-generated into the DB, `api_host` → 127.0.0.1, sidecar logout requires a session,
+Python floor 3.11 everywhere (do last), skill-file passwords handled by Thai.
+
+| Item | State | Commit / note |
+|---|---|---|
+| 12 leftovers | done | `39aba1df` (`rag_agent.get_status`), `95e47436` (forwarded-path guard in `ServerAPIClient`, cmd.exe second hop removed, demo token moved from URL to a SameSite=Strict cookie) |
+| 13 SpecialistFactory leak | done | `39aba1df`: definitions resolved per request |
+| 14 gap | done | `1bbebdc0` |
+| 17 receipts owner-scoped | done | `ce1d95f5` |
+| 18 device-bound results | done | `1bbebdc0` |
+| 19 leftovers | done | `1bbebdc0`, `39aba1df`, `95e47436`, `d43bbb93`. Still open: `documents.py` handlers await async `DocumentService` methods that do sync repository calls, and `get_processing_status` makes a sync Celery result call in an async def |
+| 20, 21, 23 migrations | done | `ce1d95f5`: revisions `c0033ee1e8cd`, `371ffaf3a087` |
+| 24 dead modules | open | the classifier refuses the `git rm`; Thai runs it |
+| 25 dead settings | done | `e7c22a39` (Thai removes the `.env.example` lines) |
+| 26 test-only code | done | `280801dc` |
+| 27 unused dependencies | done | `e7c22a39` |
+| 28 Python 3.11 + ruff py311 | open | run last, as one mechanical commit |
+| Secrets in the DB | done | `38c10b16`: `server_secrets`, revisions `e983df693ada` and `9b132832d676` (partial `model_providers` unique index) |
+| api_host / sidecar logout | done | `29a14b11`, `95e47436` |
+| Second Continue refused; epoch limit never enforced; evidence counter never released | in progress | found in round 2 |
+| Phase 5 | in progress | non-orchestration splits first; the orchestration ones come after the epoch fix |
+
+Round 1 table (2026-09-30):
 
 | Task | State | Commit / note |
 |---|---|---|
