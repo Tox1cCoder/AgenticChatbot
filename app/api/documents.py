@@ -120,6 +120,22 @@ async def _stage_create_and_enqueue_document(
         raise
 
 
+async def _require_conversation_access(
+    document_service: IDocumentService, user_id: UUID, conversation_id: UUID
+) -> None:
+    """The ownership check, a sync query, run in the threadpool rather than on the loop."""
+    access = ConversationValidationUtils(document_service.repository.session_factory)
+    await run_in_threadpool(access.validate_conversation_access, user_id, conversation_id)
+
+
+async def _require_document_access(
+    document_service: IDocumentService, user_id: UUID, document_id: UUID
+) -> None:
+    """The ownership check, a sync query, run in the threadpool rather than on the loop."""
+    access = DocumentValidationUtils(document_service.repository.session_factory)
+    await run_in_threadpool(access.validate_document_access, user_id, document_id)
+
+
 def _rejection_from_duplicate(
     filename: str, exc: DuplicateDocumentFilenameError
 ) -> DocumentUploadFileResult:
@@ -264,9 +280,7 @@ async def upload_document(
     paths share staging, duplicate detection, and enqueue behavior.
     """
 
-    ConversationValidationUtils(
-        document_service.repository.session_factory
-    ).validate_conversation_access(current_user_id, conversation_id)
+    await _require_conversation_access(document_service, current_user_id, conversation_id)
 
     upload_result = await _upload_documents_batch(
         document_service=document_service,
@@ -330,9 +344,7 @@ async def upload_documents(
             data={"error_code": "EMPTY_BATCH"},
         )
 
-    ConversationValidationUtils(
-        document_service.repository.session_factory
-    ).validate_conversation_access(current_user_id, conversation_id)
+    await _require_conversation_access(document_service, current_user_id, conversation_id)
 
     upload_result = await _upload_documents_batch(
         document_service=document_service,
@@ -396,10 +408,7 @@ async def get_document(
 ) -> ApiResponse[dict[str, Any]]:
     """Get document by ID"""
 
-    # Validate document access
-    DocumentValidationUtils(document_service.repository.session_factory).validate_document_access(
-        current_user_id, document_id
-    )
+    await _require_document_access(document_service, current_user_id, document_id)
 
     document = await document_service.get_document(document_id)
 
@@ -425,10 +434,7 @@ async def get_conversation_documents(
     page_size: int = Query(20, ge=1, le=100),
 ) -> ApiResponse[dict[str, Any]]:
     """Get documents for a conversation with pagination"""
-    # Validate conversation access
-    ConversationValidationUtils(
-        document_service.repository.session_factory
-    ).validate_conversation_access(current_user_id, conversation_id)
+    await _require_conversation_access(document_service, current_user_id, conversation_id)
     document_list = await document_service.get_documents_by_conversation(
         conversation_id, page, page_size
     )
@@ -450,9 +456,7 @@ async def update_document(
 ) -> ApiResponse[dict[str, Any]]:
     """Update document"""
 
-    DocumentValidationUtils(document_service.repository.session_factory).validate_document_access(
-        current_user_id, document_id
-    )
+    await _require_document_access(document_service, current_user_id, document_id)
 
     document = await document_service.update_document(document_id, update_data)
 
@@ -471,9 +475,7 @@ async def delete_document(
     document_id: UUID,
 ) -> ApiResponse[dict[str, Any]]:
     """Delete document"""
-    DocumentValidationUtils(document_service.repository.session_factory).validate_document_access(
-        current_user_id, document_id
-    )
+    await _require_document_access(document_service, current_user_id, document_id)
     success = await document_service.delete_document(document_id)
 
     if not success:

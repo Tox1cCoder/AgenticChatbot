@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import unicodedata
 from uuid import UUID
@@ -41,6 +42,10 @@ class DocumentService(IDocumentService):
 
     Vector/chunk cleanup is delegated to ``DocumentIndexService`` — deletion
     must not instantiate the agent runtime.
+
+    The methods are coroutines and the repository is synchronous, so every
+    repository and index call runs in a worker thread. Run on the loop, each
+    one blocked every other request and in-flight stream for its round trip.
     """
 
     def __init__(
@@ -56,11 +61,11 @@ class DocumentService(IDocumentService):
         self.index_service = document_index_service
 
     async def create_document(self, document_data: DocumentCreate) -> DocumentResponse:
-        document = self.repository.create(document_data)
+        document = await asyncio.to_thread(self.repository.create, document_data)
         return DocumentResponse.model_validate(document)
 
     async def get_document(self, document_id: UUID) -> DocumentResponse | None:
-        document = self.repository.get_by_id(document_id)
+        document = await asyncio.to_thread(self.repository.get_by_id, document_id)
         if document:
             return DocumentResponse.model_validate(document)
         return None
@@ -68,7 +73,7 @@ class DocumentService(IDocumentService):
     async def update_document(
         self, document_id: UUID, document_data: DocumentUpdate
     ) -> DocumentResponse | None:
-        document = self.repository.update(document_id, document_data)
+        document = await asyncio.to_thread(self.repository.update, document_id, document_data)
         if document:
             return DocumentResponse.model_validate(document)
         return None
@@ -76,13 +81,18 @@ class DocumentService(IDocumentService):
     async def set_processing_task_id(
         self, document_id: UUID, task_id: str
     ) -> DocumentResponse | None:
-        document = self.repository.set_processing_task_id(document_id, task_id)
+        document = await asyncio.to_thread(
+            self.repository.set_processing_task_id, document_id, task_id
+        )
         if document:
             return DocumentResponse.model_validate(document)
         return None
 
     async def delete_document(self, document_id: UUID) -> bool:
         """Delete document and its vectors / chunks via the index service."""
+        return await asyncio.to_thread(self._delete_document, document_id)
+
+    def _delete_document(self, document_id: UUID) -> bool:
         existing = self.repository.get_by_id(document_id)
         if not existing:
             return False
@@ -102,7 +112,9 @@ class DocumentService(IDocumentService):
     async def get_documents_by_conversation(
         self, conversation_id: UUID, page: int = 1, page_size: int = 20
     ) -> DocumentListResponse:
-        documents, total = self.repository.get_by_conversation_id(conversation_id, page, page_size)
+        documents, total = await asyncio.to_thread(
+            self.repository.get_by_conversation_id, conversation_id, page, page_size
+        )
         document_responses = [DocumentResponse.model_validate(doc) for doc in documents]
         total_pages = (total + page_size - 1) // page_size
         return DocumentListResponse(
@@ -132,8 +144,8 @@ class DocumentService(IDocumentService):
         await self.processing_service.validate_upload_file(filename, file_size)
 
         filename_key = normalize_document_filename(filename)
-        existing = self.repository.get_by_conversation_and_filename_key(
-            conversation_id, filename_key
+        existing = await asyncio.to_thread(
+            self.repository.get_by_conversation_and_filename_key, conversation_id, filename_key
         )
         if existing is not None:
             if existing.status == DocumentStatus.FAILED.value:

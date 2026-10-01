@@ -27,9 +27,11 @@ import asyncio
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.producer_identity import current_producer_token
 from app.models.generation import (
     TERMINAL_STATUSES,
     GenerationCommandAction,
@@ -50,13 +52,23 @@ from app.schemas.generation import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "APPROVAL_PAUSE_REASON",
     "ContinuationUnavailable",
     "GenerationControlError",
     "GenerationControlService",
     "GenerationNotFound",
     "IllegalTransition",
+    "LeasedContinuation",
     "StaleCommand",
 ]
+
+#: The block reason an approval pause is recorded with. The turn holds no
+#: worker while a human decides, so it must leave the active statuses or the
+#: conversation refuses every other message; ``continuable`` is the one paused
+#: status outside them. The block reason is what keeps it from being mistaken
+#: for a budget pause: Continue is refused, and only the approval resume
+#: (:meth:`GenerationControlService.mark_resumed_after_approval`) moves it on.
+APPROVAL_PAUSE_REASON = "tool_approval_required"
 
 #: Statuses a worker may report a stop from. Broad on purpose: a stop can land
 #: while the turn is still starting, and refusing it there would leave the row
@@ -123,6 +135,21 @@ class ContinuationUnavailable(GenerationControlError):
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@dataclass(frozen=True)
+class LeasedContinuation:
+    """A Continue's lease, and whether this call claimed it or replayed it.
+
+    A replay answers with the first attempt's recorded lease, which is right
+    for the ledger and wrong for the caller that would run it: the first
+    attempt already resumed the graph, so the lease names an epoch the
+    checkpoint has left, and the pause node answers a stale epoch by
+    finalizing whatever pause is live now.
+    """
+
+    lease: ContinuationLease
+    replayed: bool
 
 
 class GenerationControlService:
@@ -247,6 +274,46 @@ class GenerationControlService:
             },
         )
 
+    async def mark_resumed_after_approval(
+        self,
+        *,
+        generation_id: uuid.UUID,
+        user_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+    ) -> GenerationSnapshot:
+        """Take an approval-paused turn back to ``running`` for its resume.
+
+        Legal only from an approval pause: a budget pause is moved on by
+        Continue, and a turn a Stop already settled has no resume to run. The
+        resuming worker stamps itself as the producer, because it may not be
+        the one that paused, and the reaper attributes an active row to the
+        process named on it.
+
+        Raises ``IntegrityError`` when another turn in the conversation is
+        active, from the same partial unique index a new turn meets.
+        """
+        snapshot = await self._require_owned(generation_id, user_id, conversation_id)
+        if (
+            snapshot.status is not GenerationStatus.CONTINUABLE
+            or snapshot.continuation_block_reason != APPROVAL_PAUSE_REASON
+        ):
+            raise IllegalTransition(
+                "this generation is not waiting on a tool approval",
+                detail={"status": snapshot.status.value},
+            )
+        return await self._must_transition(
+            generation_id=generation_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            expected_statuses=(GenerationStatus.CONTINUABLE,),
+            expected_version=snapshot.version,
+            values={
+                "status": GenerationStatus.RUNNING,
+                "continuation_block_reason": None,
+                "producer_token": current_producer_token(),
+            },
+        )
+
     async def mark_completed(self, command: MarkCompleted) -> GenerationSnapshot:
         status = (
             GenerationStatus.COMPLETED_PARTIAL if command.partial else GenerationStatus.COMPLETED
@@ -309,6 +376,14 @@ class GenerationControlService:
 
     async def prepare_continue(self, command: ContinueGenerationCommand) -> ContinuationLease:
         """Lease the next epoch, or refuse with a reason the client can act on."""
+        return (await self.lease_continuation(command)).lease
+
+    async def lease_continuation(self, command: ContinueGenerationCommand) -> LeasedContinuation:
+        """``prepare_continue``, saying whether the lease was claimed or replayed.
+
+        The worker that resumes the graph needs the difference; see
+        :class:`LeasedContinuation`.
+        """
         snapshot = await self._require_owned(
             command.generation_id, command.user_id, command.conversation_id
         )
@@ -319,7 +394,10 @@ class GenerationControlService:
             fence=command.expected_version,
         )
         if not claim.claimed:
-            return self._replay(claim, GenerationCommandAction.CONTINUE, ContinuationLease)
+            return LeasedContinuation(
+                lease=self._replay(claim, GenerationCommandAction.CONTINUE, ContinuationLease),
+                replayed=True,
+            )
 
         try:
             self._require_fresh(command.expected_version, snapshot)
@@ -363,7 +441,7 @@ class GenerationControlService:
             raise
 
         await self._record(command, lease.model_dump(mode="json"))
-        return lease
+        return LeasedContinuation(lease=lease, replayed=False)
 
     async def aget_snapshot(
         self,

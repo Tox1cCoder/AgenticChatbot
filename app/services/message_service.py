@@ -5,8 +5,10 @@ import contextlib
 import logging
 import time
 from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -308,6 +310,152 @@ class _DurableStopWatch:
         return False
 
 
+def _interrupt_payload_dict(interrupt_payload: Any) -> dict[str, Any]:
+    if isinstance(interrupt_payload, InterruptResponse):
+        return interrupt_payload.model_dump(mode="json")
+    if isinstance(interrupt_payload, dict):
+        return interrupt_payload
+    return {"raw": str(interrupt_payload)}
+
+
+def _interrupt_metadata_of(interrupt_dict: dict[str, Any]) -> dict[str, Any]:
+    metadata = interrupt_dict.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _interrupt_device_id(interrupt_metadata: dict[str, Any]) -> UUID | None:
+    raw_device_id = interrupt_metadata.get("device_id")
+    if not raw_device_id:
+        return None
+    try:
+        return UUID(str(raw_device_id))
+    except ValueError:
+        return None
+
+
+def _record_stream_tool_event(
+    event: V3StreamEvent,
+    tool_artifacts: list[dict[str, Any]],
+    tool_args_by_id: dict[str, Any],
+) -> None:
+    """Accumulate a tool call's arguments and its finished artifact.
+
+    The artifacts are what a paused turn's message derives ``live_widgets``
+    from, and what a finished one merges into its response.
+    """
+    if event.type == "tool_call_available":
+        if event.tool_call_id is not None:
+            tool_args_by_id[str(event.tool_call_id)] = event.data.get("args")
+        return
+    if event.type != "tool_execution_end" or not event.tool_name:
+        return
+
+    from app.ai.tool_execution import build_tool_artifact
+
+    output = event.data.get("output")
+    error = event.data.get("error")
+    tool_artifacts.append(
+        build_tool_artifact(
+            tool_call_id=event.tool_call_id,
+            tool_name=event.tool_name or "unknown",
+            tool_args=(
+                tool_args_by_id.get(str(event.tool_call_id))
+                if event.tool_call_id is not None
+                else None
+            ),
+            output_text=str(output) if output is not None else None,
+            error=str(error) if error else None,
+            render=event.data.get("render"),
+        )
+    )
+
+
+@dataclass(frozen=True)
+class _InterruptPersistContext:
+    """What an approval message records beside the interrupt payload itself."""
+
+    sanitized_persona: str | None = None
+    pending_tool_calls: Any | None = None
+    thread_id: str | None = None
+    next_nodes: Any | None = None
+    user_id: UUID | None = None
+    message_id: UUID | None = None
+    tool_artifacts: list[dict[str, Any]] | None = None
+    active_agent_id: str | None = None
+    custom_agents: dict[str, Any] | None = None
+    #: A claimed nested resume needs a failed durable record to propagate.
+    require_durable_interrupt: bool = False
+
+
+@dataclass
+class _UserTurn:
+    """One streamed user turn, shared by the handlers that each own a step of it."""
+
+    conversation_id: UUID
+    user_id: UUID
+    user_message_id: UUID
+    bot_message_id: UUID
+    generation: Any
+    registry: Any
+    registry_key: Any
+    inflight: Any
+    resolved_user_id: UUID | None = None
+    sanitized_persona: str | None = None
+    workflow_request: WorkflowExecutionRequest | None = None
+    title_task: asyncio.Task | None = None
+    bot_response: Any = None
+    bot_message_persisted: bool = False
+    tool_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    tool_args_by_id: dict[str, Any] = field(default_factory=dict)
+    sequence: int = 0
+
+    @property
+    def owner_id(self) -> UUID:
+        """Who lifecycle transitions are made as."""
+        return self.resolved_user_id or self.user_id
+
+    @property
+    def custom_agents(self) -> dict[str, Any] | None:
+        return getattr(self.workflow_request, "custom_agents", None)
+
+    def next_sequence(self) -> int:
+        self.sequence += 1
+        return self.sequence
+
+    def cancel_title_task(self) -> None:
+        """Cancel the title task if it is still running, so it cannot leak."""
+        if self.title_task and not self.title_task.done():
+            self.title_task.cancel()
+
+
+@dataclass
+class _ResumeTurn:
+    """One approval resume, shared by the handlers that each own a step of it."""
+
+    thread_id: str
+    conversation_id: UUID
+    user_id: UUID
+    interrupt_id: str | None
+    bot_message_id: UUID | None
+    sanitized_persona: str | None = None
+    custom_agents: dict[str, Any] = field(default_factory=dict)
+    active_agent_id: str | None = None
+    generation: Any = None
+    partial_text: str = ""
+    persisted: bool = False
+    tool_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    tool_args_by_id: dict[str, Any] = field(default_factory=dict)
+    sequence: int = 0
+
+    @property
+    def event_message_id(self) -> str | None:
+        return str(self.bot_message_id) if self.bot_message_id else None
+
+    def next_sequence(self) -> int:
+        self.sequence += 1
+        return self.sequence
+
+
 class MessageService(IMessageService):
     def __init__(
         self,
@@ -583,7 +731,10 @@ class MessageService(IMessageService):
             data={"message": bot_message.model_dump(mode="json")},
         )
 
-        if offered is None:
+        from app.models.generation import GenerationStatus
+
+        # A Stop that landed first is answered with `stopped`, not an offer.
+        if offered is None or offered.status is not GenerationStatus.CONTINUABLE:
             return
 
         yield make_event(
@@ -594,20 +745,92 @@ class MessageService(IMessageService):
             data=self._generation_status_data(offered),
         )
 
-    async def _amark_generation_failed(self, generation: Any, *, user_id: UUID):
+    async def _aworker_transition(
+        self,
+        generation: Any,
+        *,
+        user_id: UUID,
+        apply: Any,
+        on_stop_requested: Any = None,
+    ):
+        """Apply one worker-side transition, re-fencing once if a Stop moved the row.
+
+        The worker fences on the last version it saw, and a client's Stop
+        advances the version without the worker seeing it. Refused for a fence
+        it could not have known about, a terminal transition would leave the
+        row active, and an active row refuses every later turn in the
+        conversation. Re-reading once is safe: while the row is active, Stop is
+        the only command a client can issue against it.
+
+        ``on_stop_requested`` answers a row that now says ``stop_requested``
+        when ``apply`` is not legal from there (completing, pausing).
+        """
+        from app.models.generation import GenerationStatus
+        from app.services.generation_control_service import IllegalTransition
+
+        try:
+            return await apply(generation)
+        except IllegalTransition:
+            current = await self._generation_control().aget_snapshot(
+                generation_id=generation.generation_id,
+                user_id=user_id,
+                conversation_id=generation.conversation_id,
+            )
+            if current is None or current.version == generation.version:
+                raise
+            if current.status is GenerationStatus.STOP_REQUESTED and on_stop_requested:
+                return await on_stop_requested(current)
+            return await apply(current)
+
+    def _stop_transition(
+        self,
+        *,
+        user_id: UUID,
+        assistant_message_id: UUID | None,
+        terminal_reason: str,
+    ):
+        """A ``mark_stopped`` fenced on whichever snapshot it is handed."""
+        from app.schemas.generation import MarkStopped
+
+        control = self._generation_control()
+
+        async def apply(snapshot: Any):
+            return await control.mark_stopped(
+                MarkStopped(
+                    generation_id=snapshot.generation_id,
+                    conversation_id=snapshot.conversation_id,
+                    user_id=user_id,
+                    expected_version=snapshot.version,
+                    assistant_message_id=assistant_message_id,
+                    terminal_reason=terminal_reason,
+                )
+            )
+
+        return apply
+
+    async def _amark_generation_failed(
+        self,
+        generation: Any,
+        *,
+        user_id: UUID,
+        terminal_reason: str = "response_persistence_failed",
+    ):
         """Record a turn that could not produce a readable answer."""
         control = self._generation_control()
         if control is None or generation is None:
             return None
 
-        try:
+        async def apply(snapshot: Any):
             return await control.mark_failed(
-                generation_id=generation.generation_id,
+                generation_id=snapshot.generation_id,
                 user_id=user_id,
-                conversation_id=generation.conversation_id,
-                expected_version=generation.version,
-                terminal_reason="response_persistence_failed",
+                conversation_id=snapshot.conversation_id,
+                expected_version=snapshot.version,
+                terminal_reason=terminal_reason,
             )
+
+        try:
+            return await self._aworker_transition(generation, user_id=user_id, apply=apply)
         except Exception as exc:  # noqa: BLE001 - bookkeeping never fails a turn
             logging.warning(
                 "Could not mark generation %s failed: %s",
@@ -665,6 +888,10 @@ class MessageService(IMessageService):
         streamed by the time this runs, so failing the turn over a bookkeeping
         write would discard a good response; the row is left for the stuck-state
         reconciliation the rollout procedure documents.
+
+        A Stop that lost the race to the answer leaves the row at
+        ``stop_requested``, where completing is not legal; the worker answers
+        it with ``stopped``, keeping the finished answer on the row.
         """
         control = self._generation_control()
         if control is None or generation is None:
@@ -672,17 +899,29 @@ class MessageService(IMessageService):
 
         from app.schemas.generation import MarkCompleted
 
-        try:
+        async def apply(snapshot: Any):
             return await control.mark_completed(
                 MarkCompleted(
-                    generation_id=generation.generation_id,
-                    conversation_id=generation.conversation_id,
+                    generation_id=snapshot.generation_id,
+                    conversation_id=snapshot.conversation_id,
                     user_id=user_id,
-                    expected_version=generation.version,
+                    expected_version=snapshot.version,
                     assistant_message_id=assistant_message_id,
                     partial=partial,
                     terminal_reason=terminal_reason,
                 )
+            )
+
+        try:
+            return await self._aworker_transition(
+                generation,
+                user_id=user_id,
+                apply=apply,
+                on_stop_requested=self._stop_transition(
+                    user_id=user_id,
+                    assistant_message_id=assistant_message_id,
+                    terminal_reason=terminal_reason or "completed",
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - bookkeeping never fails a turn
             logging.warning(
@@ -765,6 +1004,9 @@ class MessageService(IMessageService):
         here means the offer was not recorded, so publishing
         ``continuation_available`` anyway would advertise a continuation id
         that no Continue could ever redeem.
+
+        A Stop that arrived first is answered with ``stopped`` instead, and the
+        snapshot returned says so: the caller offers nothing for it.
         """
         control = self._generation_control()
         if control is None or generation is None:
@@ -772,19 +1014,112 @@ class MessageService(IMessageService):
 
         from app.schemas.generation import MarkContinuable
 
-        return await control.mark_continuable(
-            MarkContinuable(
-                generation_id=generation.generation_id,
-                conversation_id=generation.conversation_id,
-                user_id=user_id,
-                expected_version=generation.version,
-                assistant_message_id=assistant_message_id,
-                execution_budget=execution_budget,
-                research_accounting=research_accounting,
-                execution_epoch=execution_epoch,
-                continuation_block_reason=block_reason,
+        async def apply(snapshot: Any):
+            return await control.mark_continuable(
+                MarkContinuable(
+                    generation_id=snapshot.generation_id,
+                    conversation_id=snapshot.conversation_id,
+                    user_id=user_id,
+                    expected_version=snapshot.version,
+                    assistant_message_id=assistant_message_id,
+                    execution_budget=execution_budget,
+                    research_accounting=research_accounting,
+                    execution_epoch=execution_epoch,
+                    continuation_block_reason=block_reason,
+                )
             )
+
+        return await self._aworker_transition(
+            generation,
+            user_id=user_id,
+            apply=apply,
+            on_stop_requested=self._stop_transition(
+                user_id=user_id,
+                assistant_message_id=assistant_message_id,
+                terminal_reason="user_requested",
+            ),
         )
+
+    async def _amark_generation_awaiting_approval(
+        self,
+        generation: Any,
+        *,
+        user_id: UUID,
+        assistant_message_id: UUID,
+    ):
+        """Release the conversation while a tool call waits on a human.
+
+        The approval message is already persisted, and nothing runs until a
+        decision arrives, possibly on another worker. Left ``running``, the row
+        would refuse every later message in the conversation until the startup
+        reaper failed it. Never raises: the interrupt is saved and is still
+        answerable, so bookkeeping must not turn it into an error.
+        """
+        from app.services.generation_control_service import APPROVAL_PAUSE_REASON
+
+        try:
+            return await self._amark_generation_continuable(
+                generation,
+                user_id=user_id,
+                assistant_message_id=assistant_message_id,
+                block_reason=APPROVAL_PAUSE_REASON,
+            )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never fails a turn
+            logging.warning(
+                "Could not record the approval pause of generation %s: %s",
+                generation.generation_id,
+                type(exc).__name__,
+            )
+            return None
+
+    async def _aresume_approved_generation(
+        self,
+        *,
+        thread_id: str,
+        conversation_id: UUID,
+        user_id: UUID,
+    ):
+        """The approval-paused generation this resume continues, running again.
+
+        Found from the checkpoint thread, whose turn segment is the logical
+        turn. ``None`` leaves the resume untracked, as it was before the row
+        existed: a legacy thread, a turn a Stop already settled, or another
+        turn active in the conversation. Bookkeeping never refuses a decision
+        the interrupt record has already accepted.
+        """
+        control = self._generation_control()
+        if control is None:
+            return None
+
+        from app.ai.workflow.state import parse_checkpoint_thread_id
+
+        try:
+            thread_conversation, logical_turn_id = parse_checkpoint_thread_id(thread_id)
+        except ValueError:
+            return None
+        if thread_conversation != str(conversation_id):
+            return None
+
+        try:
+            paused = await control.find_by_logical_turn(
+                logical_turn_id=logical_turn_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+            if paused is None:
+                return None
+            return await control.mark_resumed_after_approval(
+                generation_id=paused.generation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never refuses a resume
+            logging.warning(
+                "Approval resume of thread %s runs without its lifecycle row: %s",
+                thread_id,
+                type(exc).__name__,
+            )
+            return None
 
     async def _amark_generation_stopped(
         self,
@@ -804,19 +1139,13 @@ class MessageService(IMessageService):
         if control is None or generation is None:
             return None
 
-        from app.schemas.generation import MarkStopped
-
+        apply = self._stop_transition(
+            user_id=user_id,
+            assistant_message_id=assistant_message_id,
+            terminal_reason=terminal_reason,
+        )
         try:
-            return await control.mark_stopped(
-                MarkStopped(
-                    generation_id=generation.generation_id,
-                    conversation_id=generation.conversation_id,
-                    user_id=user_id,
-                    expected_version=generation.version,
-                    assistant_message_id=assistant_message_id,
-                    terminal_reason=terminal_reason,
-                )
-            )
+            return await self._aworker_transition(generation, user_id=user_id, apply=apply)
         except Exception as exc:  # noqa: BLE001 - bookkeeping never fails a turn
             logging.warning(
                 "Could not record the stop of generation %s: %s",
@@ -942,54 +1271,63 @@ class MessageService(IMessageService):
         provenance_map = cls._normalize_tool_provenance_map(
             getattr(record, "interrupt_metadata_json", None)
         )
-
         if decisions is not None:
-            actionable_decisions = [
-                decision
-                for decision in decisions
-                if decision.type
-                in (
-                    InterruptDecisionType.APPROVE,
-                    InterruptDecisionType.EDIT,
-                )
-            ]
-            if not actionable_decisions:
-                return []
-
-            matched_entries: list[tuple[str, dict[str, Any]]] = []
-            for decision in actionable_decisions:
-                lookup_keys = []
-                decision_id = resolve_interrupt_decision_id(decision)
-                if decision_id:
-                    lookup_keys.append(decision_id)
-                if decision.action:
-                    action_key = str(decision.action)
-                    if action_key not in lookup_keys:
-                        lookup_keys.append(action_key)
-
-                for key in lookup_keys:
-                    provenance = provenance_map.get(key)
-                    if cls._is_client_runtime_provenance_entry(provenance or {}):
-                        matched_entries.append((key, provenance))
-                        break
-
-            if matched_entries:
-                return matched_entries
-
-            if not provenance_map:
-                fallback = cls._record_execution_scope_provenance(record)
-                if cls._is_client_runtime_provenance_entry(fallback):
-                    return [("interrupt", fallback)]
-            return []
+            return cls._decision_runtime_provenance(record, provenance_map, decisions)
 
         client_entries = [
             (key, provenance)
             for key, provenance in provenance_map.items()
             if cls._is_client_runtime_provenance_entry(provenance)
         ]
-        if client_entries:
-            return client_entries
+        return client_entries or cls._record_runtime_provenance(record)
 
+    @classmethod
+    def _decision_runtime_provenance(
+        cls,
+        record: Any,
+        provenance_map: dict[str, dict[str, Any]],
+        decisions: list[InterruptDecision],
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """The client-runtime provenance of the calls these decisions would run.
+
+        Only an approve or an edit runs anything, so a set of rejections has
+        nothing to validate against the device.
+        """
+        actionable_decisions = [
+            decision
+            for decision in decisions
+            if decision.type in (InterruptDecisionType.APPROVE, InterruptDecisionType.EDIT)
+        ]
+        if not actionable_decisions:
+            return []
+
+        matched_entries = [
+            entry
+            for decision in actionable_decisions
+            if (entry := cls._decision_provenance_entry(provenance_map, decision)) is not None
+        ]
+        if matched_entries:
+            return matched_entries
+        if not provenance_map:
+            return cls._record_runtime_provenance(record)
+        return []
+
+    @classmethod
+    def _decision_provenance_entry(
+        cls,
+        provenance_map: dict[str, dict[str, Any]],
+        decision: InterruptDecision,
+    ) -> tuple[str, dict[str, Any]] | None:
+        """The first client-runtime entry this decision addresses, by id then action."""
+        for key in cls._decision_keys(decision):
+            provenance = provenance_map.get(key)
+            if cls._is_client_runtime_provenance_entry(provenance or {}):
+                return key, provenance
+        return None
+
+    @classmethod
+    def _record_runtime_provenance(cls, record: Any) -> list[tuple[str, dict[str, Any]]]:
+        """The record's own execution scope, for an interrupt with no per-call map."""
         fallback = cls._record_execution_scope_provenance(record)
         if cls._is_client_runtime_provenance_entry(fallback):
             return [("interrupt", fallback)]
@@ -1431,16 +1769,7 @@ class MessageService(IMessageService):
         self,
         conversation_id: UUID,
         interrupt_payload: Any,
-        sanitized_persona: str | None = None,
-        pending_tool_calls: Any | None = None,
-        thread_id: str | None = None,
-        next_nodes: Any | None = None,
-        user_id: UUID | None = None,
-        message_id: UUID | None = None,
-        tool_artifacts: list[dict[str, Any]] | None = None,
-        active_agent_id: str | None = None,
-        custom_agents: dict[str, Any] | None = None,
-        require_durable_interrupt: bool = False,
+        context: _InterruptPersistContext | None = None,
     ) -> MessageRead:
         """
         Persist an assistant message that represents a paused workflow awaiting HITL approval.
@@ -1450,94 +1779,91 @@ class MessageService(IMessageService):
         process restarts. Callers handling a claimed nested resume can require
         durable-record failures to propagate.
         """
-        if isinstance(interrupt_payload, InterruptResponse):
-            interrupt_dict = interrupt_payload.model_dump(mode="json")
-        elif isinstance(interrupt_payload, dict):
-            interrupt_dict = interrupt_payload
-        else:
-            interrupt_dict = {"raw": str(interrupt_payload)}
-
-        interrupt_metadata = (
-            interrupt_dict.get("metadata")
-            if isinstance(interrupt_dict.get("metadata"), dict)
-            else {}
+        context = context or _InterruptPersistContext()
+        interrupt_dict = _interrupt_payload_dict(interrupt_payload)
+        bot_message = self._create_bot_response_message(
+            conversation_id=conversation_id,
+            content="",
+            metadata=self._interrupt_message_metadata(interrupt_dict, context),
+            message_id=context.message_id,
         )
-        raw_device_id = interrupt_metadata.get("device_id")
-        interrupt_device_id: UUID | None = None
-        if raw_device_id:
-            with contextlib.suppress(Exception):
-                interrupt_device_id = UUID(str(raw_device_id))
 
+        interrupt_id = interrupt_dict.get("interrupt_id")
+        if not (self.hitl_interrupt_repository and context.user_id and interrupt_id):
+            return bot_message
+        try:
+            self._create_durable_interrupt_record(
+                conversation_id, interrupt_dict, context, assistant_message_id=bot_message.id
+            )
+        except Exception as exc:
+            logging.warning(
+                "Failed to create durable interrupt record for interrupt_id=%s: %s",
+                interrupt_id,
+                exc,
+                exc_info=True,
+            )
+            if context.require_durable_interrupt:
+                self.repository.delete(bot_message.id)
+                raise
+        return bot_message
+
+    def _interrupt_message_metadata(
+        self, interrupt_dict: dict[str, Any], context: _InterruptPersistContext
+    ) -> dict[str, Any]:
         metadata: dict[str, Any] = {
             "interrupt": interrupt_dict,
             "paused": True,
             "pause_reason": "tool_approval_required",
         }
-        if sanitized_persona:
-            metadata["persona_used"] = sanitized_persona
-        if thread_id:
-            metadata["thread_id"] = thread_id
-        if next_nodes is not None:
-            metadata["next"] = next_nodes
-        if pending_tool_calls is not None:
-            metadata["pending_tool_calls"] = pending_tool_calls
+        optional = {
+            "persona_used": context.sanitized_persona or None,
+            "thread_id": context.thread_id or None,
+            "next": context.next_nodes,
+            "pending_tool_calls": context.pending_tool_calls,
+        }
+        metadata.update({key: value for key, value in optional.items() if value is not None})
 
         # Preserve live_widgets from widget tools that already succeeded
         # before the interrupt paused the run.
-        if tool_artifacts:
-            metadata["tool_artifacts"] = tool_artifacts
+        if context.tool_artifacts:
+            metadata["tool_artifacts"] = context.tool_artifacts
             from app.core.response_constants import extract_live_widgets_from_artifacts
 
-            live_widgets = extract_live_widgets_from_artifacts(tool_artifacts)
+            live_widgets = extract_live_widgets_from_artifacts(context.tool_artifacts)
             if live_widgets:
                 metadata["live_widgets"] = live_widgets
 
-        self._attach_active_agent_metadata(metadata, active_agent_id, custom_agents)
-
-        bot_message = self._create_bot_response_message(
-            conversation_id=conversation_id,
-            content="",
-            metadata=metadata,
-            message_id=message_id,
+        self._attach_active_agent_metadata(
+            metadata, context.active_agent_id, context.custom_agents
         )
+        return metadata
 
-        # Create durable lifecycle record
-        if self.hitl_interrupt_repository and user_id:
-            interrupt_id = interrupt_dict.get("interrupt_id")
-            _thread_id = thread_id or str(conversation_id)
-            if interrupt_id:
-                try:
-                    expires_at = datetime.now(timezone.utc) + timedelta(
-                        minutes=settings.hitl_approval_timeout_minutes
-                    )
-                    action_requests = interrupt_dict.get("action_requests") or []
-                    execution_scope = self._derive_interrupt_execution_scope(interrupt_metadata)
-                    self.hitl_interrupt_repository.create(
-                        interrupt_id=interrupt_id,
-                        conversation_id=conversation_id,
-                        user_id=user_id,
-                        thread_id=_thread_id,
-                        expires_at=expires_at,
-                        action_requests_json=action_requests,
-                        assistant_message_id=bot_message.id,
-                        device_id=interrupt_device_id,
-                        interrupt_metadata_json=interrupt_metadata,
-                        session_id=execution_scope.get("session_id"),
-                        catalog_version=execution_scope.get("catalog_version"),
-                        tool_instance_id=execution_scope.get("tool_instance_id"),
-                    )
-                except Exception as exc:
-                    logging.warning(
-                        "Failed to create durable interrupt record for interrupt_id=%s: %s",
-                        interrupt_id,
-                        exc,
-                        exc_info=True,
-                    )
-                    if require_durable_interrupt:
-                        self.repository.delete(bot_message.id)
-                        raise
-
-        return bot_message
+    def _create_durable_interrupt_record(
+        self,
+        conversation_id: UUID,
+        interrupt_dict: dict[str, Any],
+        context: _InterruptPersistContext,
+        *,
+        assistant_message_id: UUID,
+    ) -> None:
+        """The HITL lifecycle record that makes a pending approval recoverable."""
+        interrupt_metadata = _interrupt_metadata_of(interrupt_dict)
+        execution_scope = self._derive_interrupt_execution_scope(interrupt_metadata)
+        self.hitl_interrupt_repository.create(
+            interrupt_id=interrupt_dict.get("interrupt_id"),
+            conversation_id=conversation_id,
+            user_id=context.user_id,
+            thread_id=context.thread_id or str(conversation_id),
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(minutes=settings.hitl_approval_timeout_minutes),
+            action_requests_json=interrupt_dict.get("action_requests") or [],
+            assistant_message_id=assistant_message_id,
+            device_id=_interrupt_device_id(interrupt_metadata),
+            interrupt_metadata_json=interrupt_metadata,
+            session_id=execution_scope.get("session_id"),
+            catalog_version=execution_scope.get("catalog_version"),
+            tool_instance_id=execution_scope.get("tool_instance_id"),
+        )
 
     async def create_message(
         self, message_create_data: MessageCreate, user_id: UUID
@@ -1609,19 +1935,21 @@ class MessageService(IMessageService):
                     self._persist_interrupt_bot_message(
                         conversation_id=message_create_data.conversation_id,
                         interrupt_payload=interrupt_payload,
-                        sanitized_persona=sanitized_persona,
-                        thread_id=getattr(interrupt_payload, "thread_id", None),
-                        pending_tool_calls=(
-                            [
-                                r.model_dump(mode="json")
-                                for r in getattr(interrupt_payload, "action_requests", [])
-                            ]
-                            if isinstance(interrupt_payload, InterruptResponse)
-                            else None
+                        context=_InterruptPersistContext(
+                            sanitized_persona=sanitized_persona,
+                            thread_id=getattr(interrupt_payload, "thread_id", None),
+                            pending_tool_calls=(
+                                [
+                                    r.model_dump(mode="json")
+                                    for r in getattr(interrupt_payload, "action_requests", [])
+                                ]
+                                if isinstance(interrupt_payload, InterruptResponse)
+                                else None
+                            ),
+                            user_id=resolved_user_id,
+                            active_agent_id=bot_response.agent_id if bot_response else None,
+                            custom_agents=workflow_request.custom_agents,
                         ),
-                        user_id=resolved_user_id,
-                        active_agent_id=bot_response.agent_id if bot_response else None,
-                        custom_agents=workflow_request.custom_agents,
                     )
 
                 return user_message_read
@@ -1663,12 +1991,19 @@ class MessageService(IMessageService):
             bot_message_id = uuid4()
 
         try:
-            async with self._hold_turn(
-                message_create_data.conversation_id, request_id=str(bot_message_id)
+            async with (
+                self._hold_turn(
+                    message_create_data.conversation_id, request_id=str(bot_message_id)
+                ),
+                # Closed here, under the lock, rather than whenever the
+                # collector gets to it: its cleanup settles the lifecycle row.
+                contextlib.aclosing(
+                    self._create_message_stream_holding_turn(
+                        message_create_data, user_id, bot_message_id
+                    )
+                ) as events,
             ):
-                async for event in self._create_message_stream_holding_turn(
-                    message_create_data, user_id, bot_message_id
-                ):
+                async for event in events:
                     yield event
         except WorkflowRoutingException as exc:
             yield make_event(
@@ -1691,6 +2026,11 @@ class MessageService(IMessageService):
         Integrates with GenerationRegistry so that in-flight streams can be
         cancelled via ``POST /messages/stop`` or HTTP disconnect without
         persisting cancellation/disconnect artifacts as error messages.
+
+        Every way out of the turn settles its lifecycle row. The partial
+        unique index admits one active generation per conversation, so an
+        ending that leaves the row active refuses every later message until
+        the startup reaper fails it.
         """
         # Everything before the first streamed event runs on the async
         # transport: a blocking query here delays not just this response's first
@@ -1704,18 +2044,60 @@ class MessageService(IMessageService):
             message_create_data, message_create_data.role
         )
         created_message = await self.repository.acreate(message_entity)
-        user_message_id = created_message.id  # stable key for registry
         # Drop any stale prompt-history cache before the workflow reads it.
         with contextlib.suppress(Exception):
             self.ai_service.invalidate_history_cache(str(message_create_data.conversation_id))
 
-        # The durable row comes before the first streamed event, so a Stop that
-        # arrives on the very first token already has something to transition.
+        turn = await self._abegin_user_turn(
+            message_create_data,
+            user_id=user_id,
+            user_message_id=created_message.id,
+            bot_message_id=bot_message_id,
+        )
+
+        # Caught here, in the generator the caller closes, rather than in a
+        # delegate: closing an async generator never reaches the one it is
+        # iterating, which would be finalized only when collected. A
+        # disconnect (or a Stop on this worker, which cancels the producer
+        # task) arrives as ``CancelledError`` or ``GeneratorExit``.
+        try:
+            async for event in self._astream_turn_events(
+                turn, message_create_data, created_message
+            ):
+                yield event
+        except (asyncio.CancelledError, GeneratorExit):
+            # Cancellation / disconnect: persist partial text if available,
+            # do NOT create an error message.
+            await self._apersist_interrupted_user_turn(turn)
+            return
+        except Exception as exc:
+            turn.cancel_title_task()
+            if not turn.bot_message_persisted:
+                yield await self._afail_user_turn(turn, exc)
+
+    async def _abegin_user_turn(
+        self,
+        message_create_data: MessageCreate,
+        *,
+        user_id: UUID,
+        user_message_id: UUID,
+        bot_message_id: UUID,
+    ) -> _UserTurn:
+        """Allocate the lifecycle row and the in-flight entry for one turn.
+
+        The durable row comes before the first streamed event, so a Stop that
+        arrives on the very first token already has something to transition.
+        It enters ``running`` before ``run_start`` is published: the version
+        that event carries is the fence a client's Stop is checked against,
+        and publishing the ``starting`` one made every fenced Stop stale.
+        ``continuable`` is also legal only from ``running``.
+        """
         generation = await self._astart_generation(
             conversation_id=message_create_data.conversation_id,
             user_id=user_id,
             logical_turn_id=user_message_id,
         )
+        generation = await self._amark_generation_running(generation, user_id=user_id)
 
         # Register in-flight entry, keyed by generation id when there is one.
         # The user message id remains the fallback so an unwired service keeps
@@ -1732,436 +2114,417 @@ class MessageService(IMessageService):
         # call; the task can. It does not exist until this coroutine runs, so
         # it is attached here rather than passed to ``register``.
         inflight.task = asyncio.current_task()
+        return _UserTurn(
+            conversation_id=message_create_data.conversation_id,
+            user_id=user_id,
+            user_message_id=user_message_id,
+            bot_message_id=bot_message_id,
+            generation=generation,
+            registry=registry,
+            registry_key=registry_key,
+            inflight=inflight,
+        )
 
-        sequence = 0
-
-        def _next_sequence() -> int:
-            nonlocal sequence
-            sequence += 1
-            return sequence
-
-        if generation is not None:
+    async def _astream_turn_events(
+        self,
+        turn: _UserTurn,
+        message_create_data: MessageCreate,
+        created_message: Any,
+    ):
+        """Open the turn, then answer it, or close it if nothing is to be answered."""
+        if turn.generation is not None:
             # The canonical opening event of a turn. Everything a client needs
             # to address a later Stop or Continue is here, including the version
             # that fences them (R5).
             yield make_event(
                 "run_start",
-                sequence=_next_sequence(),
-                conversation_id=str(message_create_data.conversation_id),
-                message_id=str(bot_message_id),
-                data=self._generation_status_data(generation),
+                sequence=turn.next_sequence(),
+                conversation_id=str(turn.conversation_id),
+                message_id=str(turn.bot_message_id),
+                data=self._generation_status_data(turn.generation),
             )
 
         # Yield user message creation event
         yield make_event(
             "user_message_created",
-            sequence=_next_sequence(),
-            conversation_id=str(message_create_data.conversation_id),
-            message_id=str(user_message_id),
+            sequence=turn.next_sequence(),
+            conversation_id=str(turn.conversation_id),
+            message_id=str(turn.user_message_id),
             data={"message": MessageRead.model_validate(created_message).model_dump(mode="json")},
         )
 
-        # Start async title generation only if this is a user message and the first one
-        title_task = None
-        if message_create_data.role == MessageRole.user:
-            # Load conversation once — reused for title check, context, and planning mode
-            conversation = (
-                await self.conversation_validation_utils.conversation_repository.aget_by_id(
-                    message_create_data.conversation_id
-                )
-            )
-            default_titles = {"New Conversation", "Untitled", ""}
-            needs_title = conversation is not None and (
-                conversation.title in default_titles or conversation.title is None
-            )
-            if needs_title:
-                title_task = asyncio.create_task(
-                    self._generate_title_async(
-                        message_create_data.conversation_id,
-                        message_create_data.content,
-                        user_id=user_id,
-                    )
-                )
+        if message_create_data.role != MessageRole.user:
+            await self._aclose_turn_without_reply(turn)
+            return
 
-        def _cancel_title_task():
-            """Cancel title task if running to prevent resource leaks."""
-            if title_task and not title_task.done():
-                title_task.cancel()
+        async for event in self._astream_user_turn(turn, message_create_data):
+            yield event
 
-        if message_create_data.role == MessageRole.user:
-            # Extract context from the already-loaded conversation
-            (
-                resolved_user_id,
-                sanitized_persona,
-                workflow_request,
-            ) = await self._build_user_message_workflow_request(
-                message_create_data=message_create_data,
-                user_id=user_id,
-                conversation=conversation,
-                user_message_id=user_message_id,
-                assistant_message_id=bot_message_id,
-            )
+    async def _aclose_turn_without_reply(self, turn: _UserTurn) -> None:
+        """A message nobody answers still started a lifecycle row; finish it."""
+        turn.inflight.resolve(None)
+        turn.registry.remove(turn.registry_key)
+        await self._amark_generation_completed(
+            turn.generation,
+            user_id=turn.user_id,
+            assistant_message_id=None,
+            terminal_reason="no_reply_requested",
+        )
 
-            # `starting` to `running` before the graph is entered. A turn that
-            # paused at its budget while still `starting` could not be offered
-            # a Continue, because `continuable` is not legal from there.
-            generation = await self._amark_generation_running(
-                generation, user_id=resolved_user_id or user_id
-            )
+    async def _astream_user_turn(self, turn: _UserTurn, message_create_data: MessageCreate):
+        """Prepare the request, run the graph, and end the turn the way it ended."""
+        await self._aprepare_user_turn(turn, message_create_data)
+        stop_watch = _DurableStopWatch(
+            control=self._generation_control(),
+            generation=turn.generation,
+            user_id=turn.owner_id,
+        )
 
-            # Stream bot response generation
-            bot_response = None
-            bot_message_persisted = False
-            stream_tool_artifacts: list[dict[str, Any]] = []
-            stream_tool_args_by_id: dict[str, Any] = {}
-
-            stop_watch = _DurableStopWatch(
-                control=self._generation_control(),
-                generation=generation,
-                user_id=resolved_user_id or user_id,
-            )
-
-            try:
-                async for raw_event in self.ai_service.execute_request_stream(workflow_request):
-                    # ---- Check cancellation before processing each event ----
-                    if inflight.is_cancelled:
-                        logging.info(
-                            "Stream cancelled for user_message_id=%s",
-                            user_message_id,
-                        )
-                        break
-
-                    event = _service_event_from_ai_event(raw_event, sequence=_next_sequence())
-                    event_type = event.type
-
-                    # The row is the authority on whether this turn was asked
-                    # to stop, and it is the only thing a Stop that landed on
-                    # another worker could have changed. Polled at coarse
-                    # boundaries rather than per token — see _DurableStopWatch.
-                    if await stop_watch.stop_requested(event_type):
-                        logging.info(
-                            "Stream stopping on durable status for generation=%s",
-                            registry_key,
-                        )
-                        # `mark_cancelled`, not `request_cancel`: this producer
-                        # is stopping itself and is already at a check point.
-                        # Cancelling its own task would raise out of the very
-                        # code below that persists the partial.
-                        inflight.mark_cancelled()
-                        break
-
-                    if event_type == "agent_selected":
-                        active_agent_id = event.agent or event.data.get("agent")
-                        inflight.active_agent_id = active_agent_id
-                        inflight.touch()
-                        yield self._agent_selected_event(
-                            active_agent_id,
-                            workflow_request.custom_agents,
-                            sequence=event.sequence,
-                        )
-
-                    elif event_type == "message_delta":
-                        inflight.partial_text += event.data.get("text", "")
-                        inflight.touch()
-                        yield event
-
-                    elif event_type == "reasoning_delta":
-                        inflight.partial_thinking += event.data.get("text", "")
-                        inflight.touch()
-                        yield event
-
-                    elif event_type == "tool_call_available":
-                        inflight.touch()
-                        if event.tool_call_id is not None:
-                            stream_tool_args_by_id[str(event.tool_call_id)] = event.data.get("args")
-                        yield event
-
-                    elif event_type == "tool_execution_end":
-                        inflight.touch()
-                        # Accumulate artifacts from completed tool calls so we
-                        # can derive live_widgets on interrupt messages.
-                        if event.tool_name:
-                            from app.ai.tool_execution import build_tool_artifact
-
-                            output = event.data.get("output")
-                            error = event.data.get("error")
-                            stream_tool_artifacts.append(
-                                build_tool_artifact(
-                                    tool_call_id=event.tool_call_id,
-                                    tool_name=event.tool_name or "unknown",
-                                    tool_args=(
-                                        stream_tool_args_by_id.get(str(event.tool_call_id))
-                                        if event.tool_call_id is not None
-                                        else None
-                                    ),
-                                    output_text=str(output) if output is not None else None,
-                                    error=str(error) if error else None,
-                                    render=event.data.get("render"),
-                                )
-                            )
-                        yield event
-
-                    elif event_type == "rich_items":
-                        # Preserve safe progressive rich-item upserts for
-                        # clients that render marker-positioned output live.
-                        inflight.touch()
-                        yield event
-
-                    elif event_type == "interrupt":
-                        # Yield interrupt event - workflow paused for human approval
-                        interrupt_response = event.data.get("interrupt")
-                        interrupt_id = (
-                            interrupt_response.get("interrupt_id") if interrupt_response else None
-                        )
-                        self._handle_redis_interrupt_storage(
-                            message_create_data.conversation_id,
-                            interrupt_id,
-                            interrupt_response,
-                        )
-                        self._set_plan_lifecycle(
-                            message_create_data.conversation_id,
-                            resolved_user_id,
-                            PlanLifecycle.paused,
-                        )
-
-                        interrupt_thread_id = event.data.get("thread_id") or str(
-                            message_create_data.conversation_id
-                        )
-                        yield make_event(
-                            "interrupt",
-                            sequence=event.sequence,
-                            conversation_id=str(message_create_data.conversation_id),
-                            message_id=str(bot_message_id),
-                            data={
-                                "thread_id": interrupt_thread_id,
-                                "next": event.data.get("next"),
-                                "pending_tool_calls": event.data.get("pending_tool_calls"),
-                                "interrupt": interrupt_response,
-                                "message": self._persist_interrupt_bot_message(
-                                    conversation_id=message_create_data.conversation_id,
-                                    interrupt_payload=interrupt_response,
-                                    sanitized_persona=sanitized_persona,
-                                    pending_tool_calls=event.data.get("pending_tool_calls"),
-                                    thread_id=interrupt_thread_id,
-                                    next_nodes=event.data.get("next"),
-                                    user_id=resolved_user_id,
-                                    message_id=bot_message_id,
-                                    tool_artifacts=stream_tool_artifacts or None,
-                                    active_agent_id=inflight.active_agent_id,
-                                    custom_agents=workflow_request.custom_agents,
-                                ).model_dump(mode="json"),
-                            },
-                        )
-                        # Workflow is paused - don't create a bot message yet.
-                        # Keep the entry as a paused lock token (carrying the
-                        # resolved active_agent_id) so a custom agent cannot be
-                        # edited/deleted/detached while this run can still resume.
-                        _cancel_title_task()
-                        inflight.resolve()
-                        registry.mark_paused(registry_key)
-                        return
-
-                    elif event_type == "continuation_available":
-                        # The turn paused at its execution budget with a
-                        # validated partial answer. Persist first, offer second:
-                        # the continuation id a client redeems must point at an
-                        # answer that is already saved, or Continue would resume
-                        # work whose first half was never written down.
-                        _cancel_title_task()
-                        async for paused_event in self._apublish_continuation_pause(
-                            event,
-                            generation=generation,
-                            conversation_id=message_create_data.conversation_id,
-                            user_id=resolved_user_id or user_id,
-                            bot_message_id=bot_message_id,
-                            sanitized_persona=sanitized_persona,
-                            workflow_request=workflow_request,
-                            inflight=inflight,
-                            tool_artifacts=stream_tool_artifacts or None,
-                            next_sequence=_next_sequence,
-                        ):
-                            yield paused_event
-                        inflight.resolve()
-                        registry.mark_paused(registry_key)
-                        return
-
-                    elif event_type == "complete":
-                        # Store final response
-                        bot_response = event.data.get("response")
-                        break
-
-                    elif event_type == "error":
-                        # Handle error
-                        bot_response = event.data.get("response")
-                        break
-
-                    else:
-                        # state_snapshot (legacy node_complete / continuation
-                        # markers), subagent lifecycle, and other canonical
-                        # events pass through without breaking.
-                        inflight.touch()
-                        yield event
-
-                # ---- Handle cancellation after the loop exits ----
-                if inflight.is_cancelled:
-                    _cancel_title_task()
-                    partial = inflight.partial_text.strip()
-                    if partial:
-                        partial = fix_markdown_code_blocks(partial)
-                        metadata = {
-                            "stopped": True,
-                            "partial": True,
-                            "stop_reason": "user_requested",
-                            "persona_used": sanitized_persona,
-                            "reply_to_user_message_id": str(user_message_id),
-                        }
-                        self._attach_active_agent_metadata(
-                            metadata,
-                            inflight.active_agent_id,
-                            workflow_request.custom_agents,
-                        )
-                        bot_message = await self._acreate_bot_response_message(
-                            conversation_id=message_create_data.conversation_id,
-                            content=partial,
-                            metadata=metadata,
-                            message_id=bot_message_id,
-                        )
-                        inflight.resolve(bot_message.model_dump(mode="json"))
-                        # The worker confirming it let go. Only this side can
-                        # make the transition, which is what turns a client's
-                        # `stop_requested` into an authoritative `stopped`.
-                        await self._amark_generation_stopped(
-                            generation,
-                            user_id=resolved_user_id or user_id,
-                            assistant_message_id=bot_message_id,
-                            terminal_reason="user_requested",
-                        )
-                    else:
-                        inflight.resolve(None)
-                        await self._amark_generation_stopped(
-                            generation,
-                            user_id=resolved_user_id or user_id,
-                            assistant_message_id=None,
-                            terminal_reason="user_requested",
-                        )
-                    registry.remove(registry_key)
-                    return
-
-                _merge_stream_tool_artifacts_into_response(bot_response, stream_tool_artifacts)
-
-                bot_message = await self._persist_completed_workflow_response(
-                    conversation_id=message_create_data.conversation_id,
-                    user_id=resolved_user_id,
-                    bot_response=bot_response,
-                    sanitized_persona=sanitized_persona,
-                    workflow_request=workflow_request,
-                    message_id=bot_message_id,
-                    reply_to_user_message_id=user_message_id,
-                    suggestion_source_message=message_create_data.content,
-                )
-                bot_message_persisted = True
-                await self._compact_checkpoint_after_persist(
-                    conversation_id=message_create_data.conversation_id,
-                    workflow_request=workflow_request,
-                )
-
-                # Resolve the inflight future with the final message
-                inflight.resolve(bot_message.model_dump(mode="json"))
-                await self._amark_generation_completed(
-                    generation,
-                    user_id=resolved_user_id or user_id,
-                    assistant_message_id=bot_message_id,
-                    terminal_reason="completed",
-                )
-                registry.remove(registry_key)
-
-                # Emit the title update BEFORE the terminal completion so the
-                # Streamlit SSE client (which stops reading after `complete`)
-                # still receives it.
-                title_event = None
-                if title_task:
-                    generated_title = await title_task
-                    if generated_title:
-                        title_event = make_event(
-                            "title_updated",
-                            sequence=_next_sequence(),
-                            conversation_id=str(message_create_data.conversation_id),
-                            data={
-                                "title": generated_title,
-                                "conversation_id": str(message_create_data.conversation_id),
-                            },
-                        )
-
-                if title_event:
-                    yield title_event
-
-                # Yield final completion event with full message
-                yield make_event(
-                    "complete",
-                    sequence=_next_sequence(),
-                    conversation_id=str(message_create_data.conversation_id),
-                    message_id=str(bot_message.id),
-                    data={"message": bot_message.model_dump(mode="json")},
-                )
-
-            except (asyncio.CancelledError, GeneratorExit):
-                # Cancellation / disconnect: persist partial text if available,
-                # do NOT create an error message.
-                _cancel_title_task()
-                if not bot_message_persisted:
-                    partial = inflight.partial_text.strip()
-                    if partial:
-                        partial = fix_markdown_code_blocks(partial)
-                        metadata = {
-                            "stopped": True,
-                            "partial": True,
-                            "stop_reason": "disconnect",
-                            "persona_used": sanitized_persona,
-                            "reply_to_user_message_id": str(user_message_id),
-                        }
-                        self._attach_active_agent_metadata(
-                            metadata,
-                            inflight.active_agent_id,
-                            workflow_request.custom_agents,
-                        )
-                        bot_msg = self._create_bot_response_message(
-                            conversation_id=message_create_data.conversation_id,
-                            content=partial,
-                            metadata=metadata,
-                            message_id=bot_message_id,
-                        )
-                        inflight.resolve(bot_msg.model_dump(mode="json"))
-                    else:
-                        inflight.resolve(None)
-                    registry.remove(registry_key)
+        async for raw_event in self.ai_service.execute_request_stream(turn.workflow_request):
+            event = await self._anext_user_turn_event(turn, stop_watch, raw_event)
+            if event is None:
+                break
+            if event.type in ("interrupt", "continuation_available"):
+                async for paused_event in self._apause_user_turn(turn, event):
+                    yield paused_event
                 return
+            for projected in self._project_user_turn_event(turn, event):
+                yield projected
 
-            except Exception as exc:
-                _cancel_title_task()
-                if bot_message_persisted:
-                    return
-                error_text = _client_error_text(exc)
-                error_message = self._create_bot_response_message(
-                    conversation_id=message_create_data.conversation_id,
-                    content=f"Error generating response: {error_text}",
-                    metadata={"error": error_text},
-                    message_id=bot_message_id,
+        # ---- Handle cancellation after the loop exits ----
+        if turn.inflight.is_cancelled:
+            await self._astop_user_turn(turn)
+            return
+
+        async for event in self._afinish_user_turn(turn, message_create_data):
+            yield event
+
+    async def _anext_user_turn_event(
+        self, turn: _UserTurn, stop_watch: _DurableStopWatch, raw_event: V3StreamEvent
+    ) -> V3StreamEvent | None:
+        """The next event to handle, or ``None`` once the loop must end.
+
+        It ends on a Stop (either signal) and on the terminal ``complete`` or
+        ``error``, whose response is kept for persistence.
+        """
+        # ---- Check cancellation before processing each event ----
+        if turn.inflight.is_cancelled:
+            logging.info("Stream cancelled for user_message_id=%s", turn.user_message_id)
+            return None
+
+        event = _service_event_from_ai_event(raw_event, sequence=turn.next_sequence())
+        if await self._stop_requested_durably(turn, stop_watch, event.type):
+            return None
+        if event.type in ("complete", "error"):
+            turn.bot_response = event.data.get("response")
+            return None
+        return event
+
+    async def _aprepare_user_turn(
+        self, turn: _UserTurn, message_create_data: MessageCreate
+    ) -> None:
+        """Load the conversation, start the title, and build the workflow request."""
+        # Load conversation once — reused for title check, context, and planning mode
+        conversation = await self.conversation_validation_utils.conversation_repository.aget_by_id(
+            message_create_data.conversation_id
+        )
+        default_titles = {"New Conversation", "Untitled", ""}
+        needs_title = conversation is not None and (
+            conversation.title in default_titles or conversation.title is None
+        )
+        if needs_title:
+            turn.title_task = asyncio.create_task(
+                self._generate_title_async(
+                    message_create_data.conversation_id,
+                    message_create_data.content,
+                    user_id=turn.user_id,
                 )
+            )
 
-                inflight.resolve(error_message.model_dump(mode="json"))
-                registry.remove(registry_key)
+        (
+            turn.resolved_user_id,
+            turn.sanitized_persona,
+            turn.workflow_request,
+        ) = await self._build_user_message_workflow_request(
+            message_create_data=message_create_data,
+            user_id=turn.user_id,
+            conversation=conversation,
+            user_message_id=turn.user_message_id,
+            assistant_message_id=turn.bot_message_id,
+        )
 
+    @staticmethod
+    async def _stop_requested_durably(
+        turn: _UserTurn, stop_watch: _DurableStopWatch, event_type: str
+    ) -> bool:
+        """Whether the row says stop: the only signal a Stop on another worker sends."""
+        # Polled at coarse boundaries rather than per token — see _DurableStopWatch.
+        if not await stop_watch.stop_requested(event_type):
+            return False
+        logging.info("Stream stopping on durable status for generation=%s", turn.registry_key)
+        # `mark_cancelled`, not `request_cancel`: this producer is stopping
+        # itself and is already at a check point. Cancelling its own task would
+        # raise out of the very code below that persists the partial.
+        turn.inflight.mark_cancelled()
+        return True
+
+    def _project_user_turn_event(self, turn: _UserTurn, event: V3StreamEvent) -> list:
+        """Record what one streamed event contributes, and what to forward."""
+        turn.inflight.touch()
+        if event.type == "agent_selected":
+            active_agent_id = event.agent or event.data.get("agent")
+            turn.inflight.active_agent_id = active_agent_id
+            return [
+                self._agent_selected_event(
+                    active_agent_id, turn.custom_agents, sequence=event.sequence
+                )
+            ]
+        if event.type == "message_delta":
+            turn.inflight.partial_text += event.data.get("text", "")
+        elif event.type == "reasoning_delta":
+            turn.inflight.partial_thinking += event.data.get("text", "")
+        else:
+            _record_stream_tool_event(event, turn.tool_artifacts, turn.tool_args_by_id)
+        # rich_items, state_snapshot, subagent lifecycle and other canonical
+        # events pass through unchanged.
+        return [event]
+
+    async def _apause_user_turn(self, turn: _UserTurn, event: V3StreamEvent):
+        """Persist a paused turn, release its row, and keep the entry as a lock token.
+
+        The entry stays (paused, carrying the resolved active agent) so a
+        custom agent cannot be edited, deleted or detached while this run can
+        still resume.
+        """
+        turn.cancel_title_task()
+        if event.type == "interrupt":
+            yield await self._ainterrupt_user_turn(turn, event)
+        else:
+            # The turn paused at its execution budget with a validated partial
+            # answer. Persist first, offer second: the continuation id a client
+            # redeems must point at an answer that is already saved.
+            async for paused_event in self._apublish_continuation_pause(
+                event,
+                generation=turn.generation,
+                conversation_id=turn.conversation_id,
+                user_id=turn.owner_id,
+                bot_message_id=turn.bot_message_id,
+                sanitized_persona=turn.sanitized_persona,
+                workflow_request=turn.workflow_request,
+                inflight=turn.inflight,
+                tool_artifacts=turn.tool_artifacts or None,
+                next_sequence=turn.next_sequence,
+            ):
+                yield paused_event
+        turn.inflight.resolve()
+        turn.registry.mark_paused(turn.registry_key)
+
+    async def _ainterrupt_user_turn(self, turn: _UserTurn, event: V3StreamEvent):
+        """Workflow paused for human approval: persist it, then release the row.
+
+        The approval message is persisted and the row released *before* the
+        interrupt is published. The SSE consumer stops reading at an interrupt
+        and cancels the producer, so anything after the yield may never run.
+        """
+        interrupt_response = event.data.get("interrupt")
+        interrupt_id = interrupt_response.get("interrupt_id") if interrupt_response else None
+        self._handle_redis_interrupt_storage(
+            turn.conversation_id, interrupt_id, interrupt_response
+        )
+        self._set_plan_lifecycle(
+            turn.conversation_id, turn.resolved_user_id, PlanLifecycle.paused
+        )
+
+        interrupt_thread_id = event.data.get("thread_id") or str(turn.conversation_id)
+        persisted = self._persist_interrupt_bot_message(
+            conversation_id=turn.conversation_id,
+            interrupt_payload=interrupt_response,
+            context=_InterruptPersistContext(
+                sanitized_persona=turn.sanitized_persona,
+                pending_tool_calls=event.data.get("pending_tool_calls"),
+                thread_id=interrupt_thread_id,
+                next_nodes=event.data.get("next"),
+                user_id=turn.resolved_user_id,
+                message_id=turn.bot_message_id,
+                tool_artifacts=turn.tool_artifacts or None,
+                active_agent_id=turn.inflight.active_agent_id,
+                custom_agents=turn.custom_agents,
+            ),
+        )
+        await self._amark_generation_awaiting_approval(
+            turn.generation, user_id=turn.owner_id, assistant_message_id=turn.bot_message_id
+        )
+        return make_event(
+            "interrupt",
+            sequence=event.sequence,
+            conversation_id=str(turn.conversation_id),
+            message_id=str(turn.bot_message_id),
+            data={
+                "thread_id": interrupt_thread_id,
+                "next": event.data.get("next"),
+                "pending_tool_calls": event.data.get("pending_tool_calls"),
+                "interrupt": interrupt_response,
+                "message": persisted.model_dump(mode="json"),
+            },
+        )
+
+    async def _astop_user_turn(self, turn: _UserTurn) -> None:
+        """A cooperative Stop: keep the partial, then confirm the stop on the row."""
+        turn.cancel_title_task()
+        partial = turn.inflight.partial_text.strip()
+        assistant_message_id = None
+        if partial:
+            bot_message = await self._acreate_bot_response_message(
+                conversation_id=turn.conversation_id,
+                content=fix_markdown_code_blocks(partial),
+                metadata=self._stopped_partial_metadata(turn, "user_requested"),
+                message_id=turn.bot_message_id,
+            )
+            turn.inflight.resolve(bot_message.model_dump(mode="json"))
+            assistant_message_id = turn.bot_message_id
+        else:
+            turn.inflight.resolve(None)
+        # The worker confirming it let go. Only this side can make the
+        # transition, which is what turns a client's `stop_requested` into an
+        # authoritative `stopped`.
+        await self._amark_generation_stopped(
+            turn.generation,
+            user_id=turn.owner_id,
+            assistant_message_id=assistant_message_id,
+            terminal_reason="user_requested",
+        )
+        turn.registry.remove(turn.registry_key)
+
+    def _stopped_partial_metadata(self, turn: _UserTurn, stop_reason: str) -> dict[str, Any]:
+        metadata = {
+            "stopped": True,
+            "partial": True,
+            "stop_reason": stop_reason,
+            "persona_used": turn.sanitized_persona,
+            "reply_to_user_message_id": str(turn.user_message_id),
+        }
+        self._attach_active_agent_metadata(
+            metadata, turn.inflight.active_agent_id, turn.custom_agents
+        )
+        return metadata
+
+    async def _afinish_user_turn(self, turn: _UserTurn, message_create_data: MessageCreate):
+        """Persist the answer, close the row, then publish the title and ``complete``."""
+        _merge_stream_tool_artifacts_into_response(turn.bot_response, turn.tool_artifacts)
+
+        bot_message = await self._persist_completed_workflow_response(
+            conversation_id=turn.conversation_id,
+            user_id=turn.resolved_user_id,
+            bot_response=turn.bot_response,
+            sanitized_persona=turn.sanitized_persona,
+            workflow_request=turn.workflow_request,
+            message_id=turn.bot_message_id,
+            reply_to_user_message_id=turn.user_message_id,
+            suggestion_source_message=message_create_data.content,
+        )
+        turn.bot_message_persisted = True
+        await self._compact_checkpoint_after_persist(
+            conversation_id=turn.conversation_id,
+            workflow_request=turn.workflow_request,
+        )
+
+        # Resolve the inflight future with the final message
+        turn.inflight.resolve(bot_message.model_dump(mode="json"))
+        await self._amark_generation_completed(
+            turn.generation,
+            user_id=turn.owner_id,
+            assistant_message_id=turn.bot_message_id,
+            terminal_reason="completed",
+        )
+        turn.registry.remove(turn.registry_key)
+
+        # Emit the title update BEFORE the terminal completion so the
+        # Streamlit SSE client (which stops reading after `complete`) still
+        # receives it.
+        if turn.title_task:
+            generated_title = await turn.title_task
+            if generated_title:
                 yield make_event(
-                    "error",
-                    sequence=_next_sequence(),
-                    conversation_id=str(message_create_data.conversation_id),
-                    message_id=str(bot_message_id),
+                    "title_updated",
+                    sequence=turn.next_sequence(),
+                    conversation_id=str(turn.conversation_id),
                     data={
-                        "error": error_text,
-                        "message": error_message.model_dump(mode="json"),
+                        "title": generated_title,
+                        "conversation_id": str(turn.conversation_id),
                     },
                 )
-                _cancel_title_task()
+
+        # Yield final completion event with full message
+        yield make_event(
+            "complete",
+            sequence=turn.next_sequence(),
+            conversation_id=str(turn.conversation_id),
+            message_id=str(bot_message.id),
+            data={"message": bot_message.model_dump(mode="json")},
+        )
+
+    async def _apersist_interrupted_user_turn(self, turn: _UserTurn) -> None:
+        """A disconnect, or a Stop that cancelled this task: keep the partial, settle.
+
+        Writes here are synchronous or shielded on purpose: the task is being
+        cancelled, and a second cancellation must not skip what the user is
+        waiting for (see :meth:`_create_bot_response_message`).
+        """
+        turn.cancel_title_task()
+        if turn.bot_message_persisted:
+            return
+        partial = turn.inflight.partial_text.strip()
+        assistant_message_id = None
+        if partial:
+            bot_msg = self._create_bot_response_message(
+                conversation_id=turn.conversation_id,
+                content=fix_markdown_code_blocks(partial),
+                metadata=self._stopped_partial_metadata(turn, "disconnect"),
+                message_id=turn.bot_message_id,
+            )
+            turn.inflight.resolve(bot_msg.model_dump(mode="json"))
+            assistant_message_id = turn.bot_message_id
+        else:
+            turn.inflight.resolve(None)
+        turn.registry.remove(turn.registry_key)
+        await asyncio.shield(
+            self._amark_generation_stopped(
+                turn.generation,
+                user_id=turn.owner_id,
+                assistant_message_id=assistant_message_id,
+                # A Stop on this worker cancels the task too; the flag is
+                # what tells it from a client that simply went away.
+                terminal_reason=(
+                    "user_requested" if turn.inflight.is_cancelled else "disconnect"
+                ),
+            )
+        )
+
+    async def _afail_user_turn(self, turn: _UserTurn, exc: Exception) -> V3StreamEvent:
+        """Persist the failure as the answer, fail the row, and build the error event."""
+        error_text = _client_error_text(exc)
+        error_message = self._create_bot_response_message(
+            conversation_id=turn.conversation_id,
+            content=f"Error generating response: {error_text}",
+            metadata={"error": error_text},
+            message_id=turn.bot_message_id,
+        )
+
+        turn.inflight.resolve(error_message.model_dump(mode="json"))
+        turn.registry.remove(turn.registry_key)
+        await self._amark_generation_failed(
+            turn.generation, user_id=turn.owner_id, terminal_reason="stream_exception"
+        )
+        return make_event(
+            "error",
+            sequence=turn.next_sequence(),
+            conversation_id=str(turn.conversation_id),
+            message_id=str(turn.bot_message_id),
+            data={
+                "error": error_text,
+                "message": error_message.model_dump(mode="json"),
+            },
+        )
 
     def _validate_and_claim_interrupt_resume(
         self,
@@ -2183,250 +2546,285 @@ class MessageService(IMessageService):
                 error_code="INTERRUPT_ID_REQUIRED",
             )
 
-        fetched_interrupt_record = None
-        if self.hitl_interrupt_repository and interrupt_id:
-            record = self.hitl_interrupt_repository.get_by_id(interrupt_id)
-            fetched_interrupt_record = record
-            if record is None:
-                raise CustomHTTPException(
-                    status_code=http_status.HTTP_404_NOT_FOUND,
-                    detail=f"Interrupt '{interrupt_id}' not found.",
-                    error_code="INTERRUPT_NOT_FOUND",
-                )
-            if record.conversation_id != conversation_id:
-                raise CustomHTTPException(
-                    status_code=http_status.HTTP_404_NOT_FOUND,
-                    detail="Interrupt does not belong to this conversation.",
-                    error_code="INTERRUPT_NOT_FOUND",
-                )
-            if record.thread_id != thread_id:
-                raise CustomHTTPException(
-                    status_code=http_status.HTTP_409_CONFLICT,
-                    detail="Thread ID does not match the pending interrupt state.",
-                    error_code="INTERRUPT_THREAD_MISMATCH",
-                )
-            if (
-                device_id is not None
-                and record.device_id is not None
-                and record.device_id != device_id
-            ):
-                raise CustomHTTPException(
-                    status_code=http_status.HTTP_409_CONFLICT,
-                    detail="Device ID does not match the pending interrupt state.",
-                    error_code="INTERRUPT_DEVICE_MISMATCH",
-                )
-            now = datetime.now(timezone.utc)
-            if record.status == HITLInterruptStatus.EXPIRED or (
-                record.status == HITLInterruptStatus.PENDING and record.expires_at <= now
-            ):
-                if record.status == HITLInterruptStatus.PENDING:
-                    with contextlib.suppress(Exception):
-                        self.hitl_interrupt_repository.mark_expired(interrupt_id)
+        if self.hitl_interrupt_repository:
+            record = self._require_resumable_interrupt_record(
+                interrupt_id=interrupt_id,
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                device_id=device_id,
+            )
+            self._validate_complete_interrupt_decisions(record=record, decisions=decisions)
+            self._validate_interrupt_runtime_scope(record, interrupt_id, decisions)
+            self._claim_interrupt_resume(interrupt_id, conversation_id, user_id)
+            return record
+
+        if self.redis_client:
+            self._check_legacy_interrupt_expiry(conversation_id, interrupt_id)
+        return None
+
+    def _require_resumable_interrupt_record(
+        self,
+        *,
+        interrupt_id: str,
+        conversation_id: UUID,
+        thread_id: str,
+        device_id: UUID | None,
+    ) -> Any:
+        """The durable record, provided it belongs to this resume and can still take one."""
+        record = self.hitl_interrupt_repository.get_by_id(interrupt_id)
+        if record is None:
+            raise CustomHTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail=f"Interrupt '{interrupt_id}' not found.",
+                error_code="INTERRUPT_NOT_FOUND",
+            )
+        if record.conversation_id != conversation_id:
+            raise CustomHTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail="Interrupt does not belong to this conversation.",
+                error_code="INTERRUPT_NOT_FOUND",
+            )
+        if record.thread_id != thread_id:
+            raise CustomHTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="Thread ID does not match the pending interrupt state.",
+                error_code="INTERRUPT_THREAD_MISMATCH",
+            )
+        if device_id is not None and record.device_id is not None and record.device_id != device_id:
+            raise CustomHTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="Device ID does not match the pending interrupt state.",
+                error_code="INTERRUPT_DEVICE_MISMATCH",
+            )
+        self._require_interrupt_status_resumable(record, interrupt_id)
+        return record
+
+    def _require_interrupt_status_resumable(self, record: Any, interrupt_id: str) -> None:
+        now = datetime.now(timezone.utc)
+        if record.status == HITLInterruptStatus.EXPIRED or (
+            record.status == HITLInterruptStatus.PENDING and record.expires_at <= now
+        ):
+            if record.status == HITLInterruptStatus.PENDING:
+                with contextlib.suppress(Exception):
+                    self.hitl_interrupt_repository.mark_expired(interrupt_id)
+            raise CustomHTTPException(
+                status_code=http_status.HTTP_410_GONE,
+                detail=(
+                    "This approval request has expired. Please send a new message to try again."
+                ),
+                error_code="INTERRUPT_EXPIRED",
+            )
+        if record.status == HITLInterruptStatus.FAILED:
+            raise CustomHTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=(
+                    "This approval cannot be resumed after a failed continuation. "
+                    "Please send a new message."
+                ),
+                error_code="INTERRUPT_FAILED",
+            )
+        if record.status in (
+            HITLInterruptStatus.RESOLVED,
+            HITLInterruptStatus.RESOLVING,
+        ):
+            raise CustomHTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="This interrupt has already been resolved.",
+                error_code="INTERRUPT_ALREADY_RESOLVED",
+            )
+
+    def _validate_interrupt_runtime_scope(
+        self,
+        record: Any,
+        interrupt_id: str,
+        decisions: list[InterruptDecision] | None,
+    ) -> None:
+        """The device session and tool catalog a client-local approval was made against.
+
+        Any drift expires the interrupt: approving a call against a session or
+        tool instance that no longer exists would run something nobody saw.
+        """
+        runtime_provenance = self._get_runtime_validation_provenance(record, decisions=decisions)
+        if not runtime_provenance:
+            return
+
+        active_session = None
+        if record.device_id is not None:
+            active_session = ClientDeviceService.lookup_active_session(record.device_id)
+        if active_session is None or active_session.user_id != record.user_id:
+            self._refuse_for_scope_change(
+                interrupt_id,
+                resolution_source="runtime_unavailable",
+                detail=(
+                    "The client device session for this approval is no longer available. "
+                    "Please send a new message from the active device."
+                ),
+                error_code="INTERRUPT_RUNTIME_UNAVAILABLE",
+            )
+
+        catalog_tools = (
+            active_session.tool_catalog.get("tools", [])
+            if isinstance(active_session.tool_catalog, dict)
+            else []
+        )
+        catalog_by_qid = {
+            str(entry.get("qualified_id")): entry
+            for entry in catalog_tools
+            if entry.get("qualified_id")
+        }
+        catalog_instance_ids = {
+            str(entry.get("tool_instance_id"))
+            for entry in catalog_tools
+            if entry.get("tool_instance_id")
+        }
+        for _provenance_key, provenance in runtime_provenance:
+            self._validate_provenance_session(provenance, active_session, interrupt_id)
+            self._validate_provenance_tool(
+                provenance, catalog_by_qid, catalog_instance_ids, interrupt_id
+            )
+
+    def _validate_provenance_session(
+        self, provenance: dict[str, Any], active_session: Any, interrupt_id: str
+    ) -> None:
+        expected_session_id = provenance.get("session_id")
+        if expected_session_id not in (None, "") and active_session.session_id != str(
+            expected_session_id
+        ):
+            self._refuse_for_scope_change(
+                interrupt_id,
+                resolution_source="session_changed",
+                detail=(
+                    "The client device session changed after this approval "
+                    "was created. Please send a new message from the active device."
+                ),
+                error_code="INTERRUPT_SESSION_MISMATCH",
+            )
+
+        expected_catalog_version = provenance.get("catalog_version")
+        if expected_catalog_version is not None and active_session.tool_catalog_version != int(
+            expected_catalog_version
+        ):
+            self._refuse_for_scope_change(
+                interrupt_id,
+                resolution_source="catalog_changed",
+                detail=(
+                    "The client device tool catalog changed after this approval "
+                    "was created. Please search for the tool again and retry."
+                ),
+                error_code="INTERRUPT_CATALOG_MISMATCH",
+            )
+
+    def _validate_provenance_tool(
+        self,
+        provenance: dict[str, Any],
+        catalog_by_qid: dict[str, dict[str, Any]],
+        catalog_instance_ids: set[str],
+        interrupt_id: str,
+    ) -> None:
+        expected_qualified_id = str(provenance.get("qualified_tool_id") or "").strip()
+        expected_tool_instance_id = str(provenance.get("tool_instance_id") or "").strip()
+        if not expected_qualified_id:
+            if expected_tool_instance_id and expected_tool_instance_id not in catalog_instance_ids:
+                self._refuse_tool_instance_changed(interrupt_id)
+            return
+
+        catalog_entry = catalog_by_qid.get(expected_qualified_id)
+        if catalog_entry is None:
+            self._refuse_for_scope_change(
+                interrupt_id,
+                resolution_source="tool_unavailable",
+                detail=(
+                    "A client-local tool in this approval is no longer "
+                    "available on the active device. Please search again "
+                    "and retry."
+                ),
+                error_code="INTERRUPT_TOOL_UNAVAILABLE",
+            )
+
+        current_tool_instance_id = str(catalog_entry.get("tool_instance_id") or "").strip()
+        if (
+            expected_tool_instance_id
+            and current_tool_instance_id
+            and expected_tool_instance_id != current_tool_instance_id
+        ):
+            self._refuse_tool_instance_changed(interrupt_id)
+
+    def _refuse_tool_instance_changed(self, interrupt_id: str) -> NoReturn:
+        self._refuse_for_scope_change(
+            interrupt_id,
+            resolution_source="tool_instance_changed",
+            detail=(
+                "A client-local tool capability changed after this "
+                "approval was created. Please search for the tool "
+                "again and retry."
+            ),
+            error_code="INTERRUPT_TOOL_INSTANCE_MISMATCH",
+        )
+
+    def _refuse_for_scope_change(
+        self,
+        interrupt_id: str,
+        *,
+        resolution_source: str,
+        detail: str,
+        error_code: str,
+    ) -> NoReturn:
+        """Expire an approval whose execution scope moved, and refuse the resume."""
+        self._expire_interrupt_for_scope_change(
+            interrupt_id=interrupt_id,
+            resolution_source=resolution_source,
+        )
+        raise CustomHTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=detail,
+            error_code=error_code,
+        )
+
+    def _claim_interrupt_resume(
+        self, interrupt_id: str, conversation_id: UUID, user_id: UUID
+    ) -> None:
+        won_race = self.hitl_interrupt_repository.try_transition_to_resolving(
+            interrupt_id=interrupt_id,
+            conversation_id=conversation_id,
+            resolved_by_user_id=user_id,
+        )
+        if not won_race:
+            raise CustomHTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="This interrupt was claimed by a concurrent request.",
+                error_code="INTERRUPT_CONFLICT",
+            )
+
+    def _check_legacy_interrupt_expiry(self, conversation_id: UUID, interrupt_id: str) -> None:
+        """The Redis timeout, for a deployment with no durable interrupt records.
+
+        A failed read resumes rather than refusing: the timeout is advisory
+        here, and the claim that actually serializes a resume is the durable
+        record this deployment does not have.
+        """
+        key = f"interrupt:{conversation_id}:{interrupt_id}"
+        try:
+            stored_timestamp = self.redis_client.get(key)
+            if not stored_timestamp:
+                return
+            stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
+            elapsed_minutes = (datetime.now(timezone.utc) - stored_time).total_seconds() / 60
+            if elapsed_minutes > settings.hitl_approval_timeout_minutes:
+                self.redis_client.delete(key)
                 raise CustomHTTPException(
                     status_code=http_status.HTTP_410_GONE,
                     detail=(
-                        "This approval request has expired. Please send a new message to try again."
+                        f"This approval request has expired "
+                        f"({elapsed_minutes:.0f} min elapsed, "
+                        f"limit is {settings.hitl_approval_timeout_minutes} min). "
+                        "Please send a new message to try again."
                     ),
                     error_code="INTERRUPT_EXPIRED",
                 )
-            if record.status == HITLInterruptStatus.FAILED:
-                raise CustomHTTPException(
-                    status_code=http_status.HTTP_409_CONFLICT,
-                    detail=(
-                        "This approval cannot be resumed after a failed continuation. "
-                        "Please send a new message."
-                    ),
-                    error_code="INTERRUPT_FAILED",
-                )
-            if record.status in (
-                HITLInterruptStatus.RESOLVED,
-                HITLInterruptStatus.RESOLVING,
-            ):
-                raise CustomHTTPException(
-                    status_code=http_status.HTTP_409_CONFLICT,
-                    detail="This interrupt has already been resolved.",
-                    error_code="INTERRUPT_ALREADY_RESOLVED",
-                )
-
-            self._validate_complete_interrupt_decisions(
-                record=record,
-                decisions=decisions,
-            )
-
-            runtime_provenance = self._get_runtime_validation_provenance(
-                record,
-                decisions=decisions,
-            )
-            if runtime_provenance:
-                active_session = None
-                if record.device_id is not None:
-                    active_session = ClientDeviceService.lookup_active_session(record.device_id)
-
-                if active_session is None or active_session.user_id != record.user_id:
-                    self._expire_interrupt_for_scope_change(
-                        interrupt_id=interrupt_id,
-                        resolution_source="runtime_unavailable",
-                    )
-                    raise CustomHTTPException(
-                        status_code=http_status.HTTP_409_CONFLICT,
-                        detail=(
-                            "The client device session for this approval is no longer available. "
-                            "Please send a new message from the active device."
-                        ),
-                        error_code="INTERRUPT_RUNTIME_UNAVAILABLE",
-                    )
-
-                catalog_tools = (
-                    active_session.tool_catalog.get("tools", [])
-                    if isinstance(active_session.tool_catalog, dict)
-                    else []
-                )
-                catalog_by_qid = {
-                    str(entry.get("qualified_id")): entry
-                    for entry in catalog_tools
-                    if entry.get("qualified_id")
-                }
-                catalog_instance_ids = {
-                    str(entry.get("tool_instance_id"))
-                    for entry in catalog_tools
-                    if entry.get("tool_instance_id")
-                }
-
-                for _provenance_key, provenance in runtime_provenance:
-                    expected_session_id = provenance.get("session_id")
-                    if expected_session_id not in (None, "") and active_session.session_id != str(
-                        expected_session_id
-                    ):
-                        self._expire_interrupt_for_scope_change(
-                            interrupt_id=interrupt_id,
-                            resolution_source="session_changed",
-                        )
-                        raise CustomHTTPException(
-                            status_code=http_status.HTTP_409_CONFLICT,
-                            detail=(
-                                "The client device session changed after this approval "
-                                "was created. Please send a new message from the active device."
-                            ),
-                            error_code="INTERRUPT_SESSION_MISMATCH",
-                        )
-
-                    expected_catalog_version = provenance.get("catalog_version")
-                    if (
-                        expected_catalog_version is not None
-                        and active_session.tool_catalog_version != int(expected_catalog_version)
-                    ):
-                        self._expire_interrupt_for_scope_change(
-                            interrupt_id=interrupt_id,
-                            resolution_source="catalog_changed",
-                        )
-                        raise CustomHTTPException(
-                            status_code=http_status.HTTP_409_CONFLICT,
-                            detail=(
-                                "The client device tool catalog changed after this approval "
-                                "was created. Please search for the tool again and retry."
-                            ),
-                            error_code="INTERRUPT_CATALOG_MISMATCH",
-                        )
-
-                    expected_qualified_id = str(provenance.get("qualified_tool_id") or "").strip()
-                    expected_tool_instance_id = str(
-                        provenance.get("tool_instance_id") or ""
-                    ).strip()
-                    if expected_qualified_id:
-                        catalog_entry = catalog_by_qid.get(expected_qualified_id)
-                        if catalog_entry is None:
-                            self._expire_interrupt_for_scope_change(
-                                interrupt_id=interrupt_id,
-                                resolution_source="tool_unavailable",
-                            )
-                            raise CustomHTTPException(
-                                status_code=http_status.HTTP_409_CONFLICT,
-                                detail=(
-                                    "A client-local tool in this approval is no longer "
-                                    "available on the active device. Please search again "
-                                    "and retry."
-                                ),
-                                error_code="INTERRUPT_TOOL_UNAVAILABLE",
-                            )
-
-                        current_tool_instance_id = str(
-                            catalog_entry.get("tool_instance_id") or ""
-                        ).strip()
-                        if (
-                            expected_tool_instance_id
-                            and current_tool_instance_id
-                            and expected_tool_instance_id != current_tool_instance_id
-                        ):
-                            self._expire_interrupt_for_scope_change(
-                                interrupt_id=interrupt_id,
-                                resolution_source="tool_instance_changed",
-                            )
-                            raise CustomHTTPException(
-                                status_code=http_status.HTTP_409_CONFLICT,
-                                detail=(
-                                    "A client-local tool capability changed after this "
-                                    "approval was created. Please search for the tool "
-                                    "again and retry."
-                                ),
-                                error_code="INTERRUPT_TOOL_INSTANCE_MISMATCH",
-                            )
-                    elif (
-                        expected_tool_instance_id
-                        and expected_tool_instance_id not in catalog_instance_ids
-                    ):
-                        self._expire_interrupt_for_scope_change(
-                            interrupt_id=interrupt_id,
-                            resolution_source="tool_instance_changed",
-                        )
-                        raise CustomHTTPException(
-                            status_code=http_status.HTTP_409_CONFLICT,
-                            detail=(
-                                "A client-local tool capability changed after this "
-                                "approval was created. Please search for the tool "
-                                "again and retry."
-                            ),
-                            error_code="INTERRUPT_TOOL_INSTANCE_MISMATCH",
-                        )
-
-            won_race = self.hitl_interrupt_repository.try_transition_to_resolving(
-                interrupt_id=interrupt_id,
-                conversation_id=conversation_id,
-                resolved_by_user_id=user_id,
-            )
-            if not won_race:
-                raise CustomHTTPException(
-                    status_code=http_status.HTTP_409_CONFLICT,
-                    detail="This interrupt was claimed by a concurrent request.",
-                    error_code="INTERRUPT_CONFLICT",
-                )
-
-        elif self.redis_client and interrupt_id:
-            key = f"interrupt:{conversation_id}:{interrupt_id}"
-            try:
-                stored_timestamp = self.redis_client.get(key)
-                if stored_timestamp:
-                    stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
-                    elapsed_minutes = (
-                        datetime.now(timezone.utc) - stored_time
-                    ).total_seconds() / 60
-                    if elapsed_minutes > settings.hitl_approval_timeout_minutes:
-                        self.redis_client.delete(key)
-                        raise CustomHTTPException(
-                            status_code=http_status.HTTP_410_GONE,
-                            detail=(
-                                f"This approval request has expired "
-                                f"({elapsed_minutes:.0f} min elapsed, "
-                                f"limit is {settings.hitl_approval_timeout_minutes} min). "
-                                "Please send a new message to try again."
-                            ),
-                            error_code="INTERRUPT_EXPIRED",
-                        )
-            except CustomHTTPException:
-                raise
-            except Exception:
-                logging.warning("Interrupt expiry check failed; resuming", exc_info=True)
-
-        return fetched_interrupt_record
+        except CustomHTTPException:
+            raise
+        except Exception:
+            logging.warning("Interrupt expiry check failed; resuming", exc_info=True)
 
     def _audit_interrupt_resume_decisions(
         self,
@@ -2540,6 +2938,12 @@ class MessageService(IMessageService):
         bot_message_id: UUID | None = None,
         inline_rich_response_v1: bool = False,
     ):
+        """Resume an approval-paused turn with the user's decisions.
+
+        The approval pause released the conversation; the resume takes the
+        turn's lifecycle row back to ``running`` and, like a first stream,
+        settles it on every way out.
+        """
         fetched_interrupt_record = self._validate_and_claim_interrupt_resume(
             thread_id=thread_id,
             conversation_id=conversation_id,
@@ -2548,326 +2952,368 @@ class MessageService(IMessageService):
             device_id=device_id,
             decisions=decisions,
         )
-
-        partial_text = ""
-        bot_message_persisted = False
-        resume_tool_artifacts: list[dict[str, Any]] = []
-        resume_tool_args_by_id: dict[str, Any] = {}
-        resume_active_agent_id: str | None = None
-
-        sequence = 0
-
-        def _next_sequence() -> int:
-            nonlocal sequence
-            sequence += 1
-            return sequence
+        resume = _ResumeTurn(
+            thread_id=thread_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            interrupt_id=interrupt_id,
+            bot_message_id=bot_message_id,
+        )
 
         try:
-            user_id, sanitized_persona = self._get_conversation_context(conversation_id, user_id)
-
-            # Reload/validate the custom-agent map before resuming.
-            self._revalidate_resume_custom_agent(user_id, conversation_id)
-
-            self._audit_interrupt_resume_decisions(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                decisions=decisions,
-                interrupt_id=interrupt_id,
-                fetched_interrupt_record=fetched_interrupt_record,
-            )
-            resume_custom_agents = self._resolve_custom_agents_state(user_id, conversation_id)
-
-            async for raw_event in self.ai_service.resume_interrupted_execution_stream(
-                thread_id=thread_id,
-                decisions=decisions,
-                inline_rich_response_v1=inline_rich_response_v1,
-                user_id=user_id,
-                conversation_id=conversation_id,
+            await self._aprepare_resume(resume, decisions, fetched_interrupt_record)
+            async for event in self._astream_resume(
+                resume, decisions, inline_rich_response_v1=inline_rich_response_v1
             ):
-                event = _service_event_from_ai_event(raw_event, sequence=_next_sequence())
-                event_type = event.type
-
-                if event_type == "agent_selected":
-                    resume_active_agent_id = event.agent or event.data.get("agent")
-                    yield self._agent_selected_event(
-                        resume_active_agent_id,
-                        resume_custom_agents,
-                        sequence=event.sequence,
-                    )
-
-                elif event_type == "message_delta":
-                    partial_text += event.data.get("text", "")
-                    yield event
-
-                elif event_type == "reasoning_delta":
-                    yield event
-
-                elif event_type == "tool_call_available":
-                    if event.tool_call_id is not None:
-                        resume_tool_args_by_id[str(event.tool_call_id)] = event.data.get("args")
-                    yield event
-
-                elif event_type == "tool_execution_end":
-                    if event.tool_name:
-                        from app.ai.tool_execution import build_tool_artifact
-
-                        output = event.data.get("output")
-                        error = event.data.get("error")
-                        resume_tool_artifacts.append(
-                            build_tool_artifact(
-                                tool_call_id=event.tool_call_id,
-                                tool_name=event.tool_name or "unknown",
-                                tool_args=(
-                                    resume_tool_args_by_id.get(str(event.tool_call_id))
-                                    if event.tool_call_id is not None
-                                    else None
-                                ),
-                                output_text=str(output) if output is not None else None,
-                                error=str(error) if error else None,
-                                render=event.data.get("render"),
-                            )
-                        )
-                    yield event
-
-                elif event_type == "rich_items":
-                    # Resume streams use the same progressive rich-response
-                    # contract as first-pass response generation.
-                    yield event
-
-                elif event_type == "interrupt":
-                    interrupt_response = event.data.get("interrupt")
-                    normalized_interrupt = self._normalize_nested_interrupt_payload(
-                        interrupt_response
-                    )
-                    next_interrupt_id = (
-                        interrupt_response.get("interrupt_id")
-                        if isinstance(interrupt_response, dict)
-                        else None
-                    )
-                    try:
-                        persisted = self._persist_interrupt_bot_message(
-                            conversation_id=conversation_id,
-                            interrupt_payload=normalized_interrupt,
-                            sanitized_persona=sanitized_persona,
-                            pending_tool_calls=event.data.get("pending_tool_calls"),
-                            thread_id=event.data.get("thread_id") or thread_id,
-                            next_nodes=event.data.get("next"),
-                            user_id=user_id,
-                            message_id=bot_message_id,
-                            tool_artifacts=resume_tool_artifacts or None,
-                            active_agent_id=resume_active_agent_id,
-                            custom_agents=resume_custom_agents,
-                            require_durable_interrupt=True,
-                        )
-                    except Exception as exc:
-                        self._clear_redis_interrupt(conversation_id, interrupt_id)
-                        get_generation_registry().clear_paused_for_conversation(
-                            user_id, conversation_id
-                        )
-                        self._mark_claimed_interrupt_failed(interrupt_id, "stream_exception")
-                        error_text = _client_error_text(exc)
-                        error_message = self._create_bot_response_message(
-                            conversation_id=conversation_id,
-                            content=f"Error generating response: {error_text}",
-                            metadata={"error": error_text},
-                            message_id=None,
-                        )
-                        bot_message_persisted = True
-                        yield make_event(
-                            "error",
-                            sequence=_next_sequence(),
-                            conversation_id=str(conversation_id),
-                            message_id=str(error_message.id),
-                            data={
-                                "error": error_text,
-                                "message": error_message.model_dump(mode="json"),
-                                "error_code": "INTERRUPT_FAILED",
-                                "status_code": 500,
-                            },
-                        )
-                        return
-
-                    self._clear_redis_interrupt(conversation_id, interrupt_id)
-                    if self.hitl_interrupt_repository and interrupt_id:
-                        with contextlib.suppress(Exception):
-                            self.hitl_interrupt_repository.mark_resolved(interrupt_id)
-                    self._handle_redis_interrupt_storage(
-                        conversation_id,
-                        next_interrupt_id,
-                        interrupt_response,
-                    )
-                    self._set_plan_lifecycle(
-                        conversation_id,
-                        user_id,
-                        PlanLifecycle.paused,
-                    )
-                    bot_message_persisted = True
-
-                    yield make_event(
-                        "interrupt",
-                        sequence=event.sequence,
-                        conversation_id=str(conversation_id),
-                        message_id=str(bot_message_id) if bot_message_id else None,
-                        data={
-                            "thread_id": event.data.get("thread_id") or thread_id,
-                            "next": event.data.get("next"),
-                            "pending_tool_calls": event.data.get("pending_tool_calls"),
-                            "interrupt": (
-                                normalized_interrupt.model_dump(mode="json")
-                                if isinstance(normalized_interrupt, InterruptResponse)
-                                else normalized_interrupt
-                            ),
-                            "message": persisted.model_dump(mode="json"),
-                        },
-                    )
-                    return
-
-                elif event_type == "complete":
-                    bot_response = event.data.get("response")
-                    _merge_stream_tool_artifacts_into_response(
-                        bot_response,
-                        resume_tool_artifacts,
-                    )
-
-                    bot_message = await self._persist_completed_workflow_response(
-                        conversation_id=conversation_id,
-                        user_id=user_id,
-                        bot_response=bot_response,
-                        sanitized_persona=sanitized_persona,
-                        workflow_request=None,
-                        message_id=bot_message_id,
-                        fallback_content=ERROR_RESPONSE_AFTER_RESUME,
-                    )
-                    bot_message_persisted = True
-                    self._clear_redis_interrupt(conversation_id, interrupt_id)
-                    if self.hitl_interrupt_repository and interrupt_id:
-                        with contextlib.suppress(Exception):
-                            self.hitl_interrupt_repository.mark_resolved(interrupt_id)
-                    await self._compact_checkpoint_after_persist(thread_id=thread_id)
-
-                    # Resume resolved the paused run — release its lock token.
-                    get_generation_registry().clear_paused_for_conversation(
-                        user_id, conversation_id
-                    )
-
-                    yield make_event(
-                        "complete",
-                        sequence=_next_sequence(),
-                        conversation_id=str(conversation_id),
-                        message_id=str(bot_message.id),
-                        data={"message": bot_message.model_dump(mode="json")},
-                    )
-                    return
-
-                elif event_type == "error":
-                    self._clear_redis_interrupt(conversation_id, interrupt_id)
-                    get_generation_registry().clear_paused_for_conversation(
-                        user_id, conversation_id
-                    )
-                    self._mark_claimed_interrupt_failed(interrupt_id, "stream_error")
-
-                    error_msg = event.data.get("error", UNKNOWN_ERROR)
-                    error_message = await self._acreate_bot_response_message(
-                        conversation_id=conversation_id,
-                        content=f"Error generating response: {error_msg}",
-                        metadata={"error": error_msg},
-                        message_id=bot_message_id,
-                    )
-                    bot_message_persisted = True
-
-                    yield make_event(
-                        "error",
-                        sequence=_next_sequence(),
-                        conversation_id=str(conversation_id),
-                        message_id=str(bot_message_id) if bot_message_id else None,
-                        data={
-                            "error": error_msg,
-                            "message": error_message.model_dump(mode="json"),
-                            "error_code": "INTERRUPT_FAILED",
-                            "status_code": 500,
-                        },
-                    )
-                    return
-
-                else:
-                    # state_snapshot (legacy node_complete / continuation
-                    # markers), subagent lifecycle, and other canonical
-                    # events pass through without breaking.
-                    yield event
-
-            self._clear_redis_interrupt(conversation_id, interrupt_id)
-
-            if not bot_message_persisted:
-                get_generation_registry().clear_paused_for_conversation(user_id, conversation_id)
-                self._mark_claimed_interrupt_failed(interrupt_id, "stream_incomplete")
-                fallback_message = await self._acreate_bot_response_message(
-                    conversation_id=conversation_id,
-                    content=ERROR_RESPONSE_AFTER_RESUME,
-                    metadata={"error": ERROR_RESPONSE_AFTER_RESUME},
-                    message_id=bot_message_id,
-                )
-                yield make_event(
-                    "error",
-                    sequence=_next_sequence(),
-                    conversation_id=str(conversation_id),
-                    message_id=str(bot_message_id) if bot_message_id else None,
-                    data={
-                        "error": ERROR_RESPONSE_AFTER_RESUME,
-                        "message": fallback_message.model_dump(mode="json"),
-                        "error_code": "INTERRUPT_FAILED",
-                        "status_code": 500,
-                    },
-                )
-
+                yield event
         except (asyncio.CancelledError, GeneratorExit):
-            get_generation_registry().clear_paused_for_conversation(user_id, conversation_id)
-            self._mark_claimed_interrupt_failed(interrupt_id, "client_disconnect")
-            if bot_message_persisted:
+            await self._apersist_disconnected_resume(resume)
+            return
+        except Exception as exc:
+            if resume.persisted:
+                self._release_resume_claim(resume, "stream_exception")
                 return
+            error_text = _client_error_text(exc)
+            yield await self._afail_resume(
+                resume,
+                error_text=error_text,
+                content=f"Error generating response: {error_text}",
+                source="stream_exception",
+                message_id=resume.bot_message_id,
+                blocking=True,
+            )
 
-            partial = partial_text.strip()
-            if partial:
-                partial = fix_markdown_code_blocks(partial)
-                self._create_bot_response_message(
-                    conversation_id=conversation_id,
-                    content=partial,
-                    metadata={
-                        "stopped": True,
-                        "partial": True,
-                        "stop_reason": "disconnect",
-                        "persona_used": sanitized_persona,
-                    },
-                    message_id=bot_message_id,
+    async def _aprepare_resume(
+        self,
+        resume: _ResumeTurn,
+        decisions: list[InterruptDecision],
+        fetched_interrupt_record: Any,
+    ) -> None:
+        """Reclaim the row, then load what the resumed run is answered with.
+
+        The row is reclaimed first so that a refusal below (a detached custom
+        agent) fails it together with the interrupt, rather than leaving it
+        offering an approval nothing can resume any more.
+        """
+        resume.generation = await self._aresume_approved_generation(
+            thread_id=resume.thread_id,
+            conversation_id=resume.conversation_id,
+            user_id=resume.user_id,
+        )
+        resume.user_id, resume.sanitized_persona = self._get_conversation_context(
+            resume.conversation_id, resume.user_id
+        )
+
+        # Reload/validate the custom-agent map before resuming.
+        self._revalidate_resume_custom_agent(resume.user_id, resume.conversation_id)
+
+        self._audit_interrupt_resume_decisions(
+            conversation_id=resume.conversation_id,
+            user_id=resume.user_id,
+            decisions=decisions,
+            interrupt_id=resume.interrupt_id,
+            fetched_interrupt_record=fetched_interrupt_record,
+        )
+        resume.custom_agents = self._resolve_custom_agents_state(
+            resume.user_id, resume.conversation_id
+        )
+
+    async def _astream_resume(
+        self,
+        resume: _ResumeTurn,
+        decisions: list[InterruptDecision],
+        *,
+        inline_rich_response_v1: bool,
+    ):
+        """Forward the resumed run, and end it the way the run ended."""
+        async for raw_event in self.ai_service.resume_interrupted_execution_stream(
+            thread_id=resume.thread_id,
+            decisions=decisions,
+            inline_rich_response_v1=inline_rich_response_v1,
+            user_id=resume.user_id,
+            conversation_id=resume.conversation_id,
+        ):
+            event = _service_event_from_ai_event(raw_event, sequence=resume.next_sequence())
+            if event.type == "interrupt":
+                yield await self._areinterrupt_resume(resume, event)
+                return
+            if event.type == "complete":
+                yield await self._acomplete_resume(resume, event)
+                return
+            if event.type == "error":
+                error_msg = event.data.get("error", UNKNOWN_ERROR)
+                yield await self._afail_resume(
+                    resume,
+                    error_text=error_msg,
+                    content=f"Error generating response: {error_msg}",
+                    source="stream_error",
+                    message_id=resume.bot_message_id,
                 )
+                return
+            if event.type == "continuation_available":
+                for paused_event in await self._apause_resume(resume, event):
+                    yield paused_event
+                return
+            for projected in self._project_resume_event(resume, event):
+                yield projected
+
+        yield await self._afail_resume(
+            resume,
+            error_text=ERROR_RESPONSE_AFTER_RESUME,
+            content=ERROR_RESPONSE_AFTER_RESUME,
+            source="stream_incomplete",
+            message_id=resume.bot_message_id,
+        )
+
+    def _project_resume_event(self, resume: _ResumeTurn, event: V3StreamEvent) -> list:
+        """Record what one resumed event contributes, and what to forward."""
+        if event.type == "agent_selected":
+            resume.active_agent_id = event.agent or event.data.get("agent")
+            return [
+                self._agent_selected_event(
+                    resume.active_agent_id, resume.custom_agents, sequence=event.sequence
+                )
+            ]
+        if event.type == "message_delta":
+            resume.partial_text += event.data.get("text", "")
+        else:
+            _record_stream_tool_event(event, resume.tool_artifacts, resume.tool_args_by_id)
+        # reasoning, rich_items (same progressive contract as a first pass),
+        # state_snapshot, subagent lifecycle and other canonical events pass
+        # through unchanged.
+        return [event]
+
+    async def _areinterrupt_resume(self, resume: _ResumeTurn, event: V3StreamEvent):
+        """The resumed run asked for another approval: persist it, pause the row again."""
+        interrupt_response = event.data.get("interrupt")
+        normalized_interrupt = self._normalize_nested_interrupt_payload(interrupt_response)
+        next_interrupt_id = (
+            interrupt_response.get("interrupt_id") if isinstance(interrupt_response, dict) else None
+        )
+        interrupt_thread_id = event.data.get("thread_id") or resume.thread_id
+        try:
+            persisted = self._persist_interrupt_bot_message(
+                conversation_id=resume.conversation_id,
+                interrupt_payload=normalized_interrupt,
+                context=_InterruptPersistContext(
+                    sanitized_persona=resume.sanitized_persona,
+                    pending_tool_calls=event.data.get("pending_tool_calls"),
+                    thread_id=interrupt_thread_id,
+                    next_nodes=event.data.get("next"),
+                    user_id=resume.user_id,
+                    message_id=resume.bot_message_id,
+                    tool_artifacts=resume.tool_artifacts or None,
+                    active_agent_id=resume.active_agent_id,
+                    custom_agents=resume.custom_agents,
+                    require_durable_interrupt=True,
+                ),
+            )
+        except Exception as exc:
+            error_text = _client_error_text(exc)
+            return await self._afail_resume(
+                resume,
+                error_text=error_text,
+                content=f"Error generating response: {error_text}",
+                source="stream_exception",
+                message_id=None,
+                blocking=True,
+                announce_created_message=True,
+            )
+
+        self._clear_redis_interrupt(resume.conversation_id, resume.interrupt_id)
+        self._mark_resume_interrupt_resolved(resume)
+        self._handle_redis_interrupt_storage(
+            resume.conversation_id, next_interrupt_id, interrupt_response
+        )
+        self._set_plan_lifecycle(resume.conversation_id, resume.user_id, PlanLifecycle.paused)
+        resume.persisted = True
+        await self._amark_generation_awaiting_approval(
+            resume.generation, user_id=resume.user_id, assistant_message_id=persisted.id
+        )
+
+        return make_event(
+            "interrupt",
+            sequence=event.sequence,
+            conversation_id=str(resume.conversation_id),
+            message_id=resume.event_message_id,
+            data={
+                "thread_id": interrupt_thread_id,
+                "next": event.data.get("next"),
+                "pending_tool_calls": event.data.get("pending_tool_calls"),
+                "interrupt": (
+                    normalized_interrupt.model_dump(mode="json")
+                    if isinstance(normalized_interrupt, InterruptResponse)
+                    else normalized_interrupt
+                ),
+                "message": persisted.model_dump(mode="json"),
+            },
+        )
+
+    async def _acomplete_resume(self, resume: _ResumeTurn, event: V3StreamEvent):
+        """Persist the resumed answer, resolve the approval, close the row."""
+        bot_response = event.data.get("response")
+        _merge_stream_tool_artifacts_into_response(bot_response, resume.tool_artifacts)
+
+        bot_message = await self._persist_completed_workflow_response(
+            conversation_id=resume.conversation_id,
+            user_id=resume.user_id,
+            bot_response=bot_response,
+            sanitized_persona=resume.sanitized_persona,
+            workflow_request=None,
+            message_id=resume.bot_message_id,
+            fallback_content=ERROR_RESPONSE_AFTER_RESUME,
+        )
+        resume.persisted = True
+        self._clear_redis_interrupt(resume.conversation_id, resume.interrupt_id)
+        self._mark_resume_interrupt_resolved(resume)
+        await self._compact_checkpoint_after_persist(thread_id=resume.thread_id)
+
+        # Resume resolved the paused run — release its lock token.
+        get_generation_registry().clear_paused_for_conversation(
+            resume.user_id, resume.conversation_id
+        )
+        await self._amark_generation_completed(
+            resume.generation,
+            user_id=resume.user_id,
+            assistant_message_id=bot_message.id,
+            terminal_reason="completed",
+        )
+
+        return make_event(
+            "complete",
+            sequence=resume.next_sequence(),
+            conversation_id=str(resume.conversation_id),
+            message_id=str(bot_message.id),
+            data={"message": bot_message.model_dump(mode="json")},
+        )
+
+    async def _apause_resume(self, resume: _ResumeTurn, event: V3StreamEvent) -> list:
+        """The approved work ran out of budget: persist the partial, offer Continue.
+
+        The same rule as a first pause, through the same publisher. Collected
+        before anything is yielded so the approval is settled however soon the
+        client stops reading: the decision was consumed either way.
+        """
+        paused_events = [
+            paused_event
+            async for paused_event in self._apublish_continuation_pause(
+                event,
+                generation=resume.generation,
+                conversation_id=resume.conversation_id,
+                user_id=resume.user_id,
+                bot_message_id=resume.bot_message_id or uuid4(),
+                sanitized_persona=resume.sanitized_persona,
+                workflow_request=None,
+                inflight=SimpleNamespace(active_agent_id=resume.active_agent_id),
+                tool_artifacts=resume.tool_artifacts or None,
+                next_sequence=resume.next_sequence,
+            )
+        ]
+        resume.persisted = True
+        self._clear_redis_interrupt(resume.conversation_id, resume.interrupt_id)
+        get_generation_registry().clear_paused_for_conversation(
+            resume.user_id, resume.conversation_id
+        )
+        if any(paused_event.type == "error" for paused_event in paused_events):
+            self._mark_claimed_interrupt_failed(resume.interrupt_id, "response_persistence_failed")
+        else:
+            self._mark_resume_interrupt_resolved(resume)
+        return paused_events
+
+    def _mark_resume_interrupt_resolved(self, resume: _ResumeTurn) -> None:
+        if self.hitl_interrupt_repository and resume.interrupt_id:
+            with contextlib.suppress(Exception):
+                self.hitl_interrupt_repository.mark_resolved(resume.interrupt_id)
+
+    def _release_resume_claim(self, resume: _ResumeTurn, source: str) -> None:
+        """Give up the claimed approval: its Redis timer, its lock token, its record."""
+        self._clear_redis_interrupt(resume.conversation_id, resume.interrupt_id)
+        get_generation_registry().clear_paused_for_conversation(
+            resume.user_id, resume.conversation_id
+        )
+        self._mark_claimed_interrupt_failed(resume.interrupt_id, source)
+
+    async def _afail_resume(
+        self,
+        resume: _ResumeTurn,
+        *,
+        error_text: str,
+        content: str,
+        source: str,
+        message_id: UUID | None,
+        blocking: bool = False,
+        announce_created_message: bool = False,
+    ) -> V3StreamEvent:
+        """Fail the resume: release the claim, persist the error, fail the row.
+
+        ``blocking`` persists synchronously, for the exception handlers where an
+        await could be cancelled out from under the write (see
+        :meth:`_create_bot_response_message`). ``announce_created_message``
+        names the persisted error message in the event instead of the reserved
+        id, for the one caller that persists without one.
+        """
+        self._release_resume_claim(resume, source)
+        message_kwargs = {
+            "conversation_id": resume.conversation_id,
+            "content": content,
+            "metadata": {"error": error_text},
+            "message_id": message_id,
+        }
+        if blocking:
+            error_message = self._create_bot_response_message(**message_kwargs)
+        else:
+            error_message = await self._acreate_bot_response_message(**message_kwargs)
+        resume.persisted = True
+        await self._amark_generation_failed(
+            resume.generation, user_id=resume.user_id, terminal_reason=source
+        )
+        return make_event(
+            "error",
+            sequence=resume.next_sequence(),
+            conversation_id=str(resume.conversation_id),
+            message_id=(
+                str(error_message.id) if announce_created_message else resume.event_message_id
+            ),
+            data={
+                "error": error_text,
+                "message": error_message.model_dump(mode="json"),
+                "error_code": "INTERRUPT_FAILED",
+                "status_code": 500,
+            },
+        )
+
+    async def _apersist_disconnected_resume(self, resume: _ResumeTurn) -> None:
+        """The client went away mid-resume: keep the partial, stop the row."""
+        get_generation_registry().clear_paused_for_conversation(
+            resume.user_id, resume.conversation_id
+        )
+        self._mark_claimed_interrupt_failed(resume.interrupt_id, "client_disconnect")
+        if resume.persisted:
             return
 
-        except Exception as exc:
-            self._clear_redis_interrupt(conversation_id, interrupt_id)
-            get_generation_registry().clear_paused_for_conversation(user_id, conversation_id)
-            self._mark_claimed_interrupt_failed(interrupt_id, "stream_exception")
-            if bot_message_persisted:
-                return
-
-            error_text = _client_error_text(exc)
-            error_message = self._create_bot_response_message(
-                conversation_id=conversation_id,
-                content=f"Error generating response: {error_text}",
-                metadata={"error": error_text},
-                message_id=bot_message_id,
-            )
-
-            yield make_event(
-                "error",
-                sequence=_next_sequence(),
-                conversation_id=str(conversation_id),
-                message_id=str(bot_message_id) if bot_message_id else None,
-                data={
-                    "error": error_text,
-                    "message": error_message.model_dump(mode="json"),
-                    "error_code": "INTERRUPT_FAILED",
-                    "status_code": 500,
+        partial = resume.partial_text.strip()
+        assistant_message_id = None
+        if partial:
+            self._create_bot_response_message(
+                conversation_id=resume.conversation_id,
+                content=fix_markdown_code_blocks(partial),
+                metadata={
+                    "stopped": True,
+                    "partial": True,
+                    "stop_reason": "disconnect",
+                    "persona_used": resume.sanitized_persona,
                 },
+                message_id=resume.bot_message_id,
             )
+            assistant_message_id = resume.bot_message_id
+        await asyncio.shield(
+            self._amark_generation_stopped(
+                resume.generation,
+                user_id=resume.user_id,
+                assistant_message_id=assistant_message_id,
+                terminal_reason="disconnect",
+            )
+        )
 
     async def continue_message_generation_stream(
         self,
@@ -2910,17 +3356,24 @@ class MessageService(IMessageService):
             bot_message_id = uuid4()
 
         try:
-            async with self._hold_turn(conversation_id, request_id=str(bot_message_id)):
-                async for event in self._acontinue_holding_turn(
-                    generation_id=generation_id,
-                    continuation_id=continuation_id,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    idempotency_key=idempotency_key,
-                    expected_version=expected_version,
-                    bot_message_id=bot_message_id,
-                    inline_rich_response_v1=inline_rich_response_v1,
-                ):
+            async with (
+                self._hold_turn(conversation_id, request_id=str(bot_message_id)),
+                # Closed here, under the lock, rather than whenever the
+                # collector gets to it: its cleanup settles the lifecycle row.
+                contextlib.aclosing(
+                    self._acontinue_holding_turn(
+                        generation_id=generation_id,
+                        continuation_id=continuation_id,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        idempotency_key=idempotency_key,
+                        expected_version=expected_version,
+                        bot_message_id=bot_message_id,
+                        inline_rich_response_v1=inline_rich_response_v1,
+                    )
+                ) as events,
+            ):
+                async for event in events:
                     yield event
         except WorkflowRoutingException as exc:
             yield make_event(
@@ -2944,11 +3397,14 @@ class MessageService(IMessageService):
     ):
         """Lease the epoch, then stream it. Refusals stay typed."""
         from app.schemas.generation import ContinueGenerationCommand
-        from app.services.generation_control_service import GenerationControlError
+        from app.services.generation_control_service import (
+            ContinuationUnavailable,
+            GenerationControlError,
+        )
 
         control = self._generation_control()
         try:
-            lease = await control.prepare_continue(
+            leased = await control.lease_continuation(
                 ContinueGenerationCommand(
                     generation_id=generation_id,
                     continuation_id=continuation_id,
@@ -2970,6 +3426,22 @@ class MessageService(IMessageService):
                 data={"error": str(exc), "error_code": exc.code, **exc.detail},
             )
             return
+        if leased.replayed:
+            # The first attempt with this key already resumed the graph. Its
+            # lease names an epoch the checkpoint has left, and the pause node
+            # answers a stale epoch by finalizing the pause that is live now.
+            yield make_event(
+                "error",
+                sequence=0,
+                conversation_id=str(conversation_id),
+                data={
+                    "error": "This Continue was already redeemed.",
+                    "error_code": ContinuationUnavailable.code,
+                    "replayed": True,
+                },
+            )
+            return
+        lease = leased.lease
 
         sequence = 0
 
@@ -3019,17 +3491,44 @@ class MessageService(IMessageService):
             data=self._generation_status_data(lease.snapshot),
         )
 
-        async for event in self._astream_continuation(
-            lease,
-            continuation_id=continuation_id,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            bot_message_id=bot_message_id,
-            inline_rich_response_v1=inline_rich_response_v1,
-            inflight=inflight,
-            next_sequence=_next_sequence,
-        ):
-            yield event
+        try:
+            async for event in self._astream_continuation(
+                lease,
+                continuation_id=continuation_id,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                bot_message_id=bot_message_id,
+                inline_rich_response_v1=inline_rich_response_v1,
+                inflight=inflight,
+                next_sequence=_next_sequence,
+            ):
+                yield event
+        except (asyncio.CancelledError, GeneratorExit):
+            registry.remove(generation_id)
+            await asyncio.shield(
+                self._amark_generation_stopped(
+                    lease.snapshot,
+                    user_id=user_id,
+                    assistant_message_id=None,
+                    terminal_reason=(
+                        "user_requested" if inflight.is_cancelled else "disconnect"
+                    ),
+                )
+            )
+            raise
+        except Exception as exc:
+            registry.remove(generation_id)
+            await self._amark_generation_failed(
+                lease.snapshot, user_id=user_id, terminal_reason="stream_exception"
+            )
+            yield make_event(
+                "error",
+                sequence=_next_sequence(),
+                conversation_id=str(conversation_id),
+                message_id=str(bot_message_id),
+                data={"error": _client_error_text(exc)},
+            )
+            return
 
         registry.remove(generation_id)
 
@@ -3077,6 +3576,11 @@ class MessageService(IMessageService):
                 bot_response = event.data.get("response")
                 break
             elif event.type == "error":
+                # Settled before it is published: the consumer stops reading
+                # at an error and cancels this producer.
+                await self._amark_generation_failed(
+                    lease.snapshot, user_id=user_id, terminal_reason="stream_error"
+                )
                 yield event
                 return
             elif event.type == "continuation_available":
@@ -3102,12 +3606,7 @@ class MessageService(IMessageService):
                 yield event
 
         if bot_response is None:
-            await self._amark_generation_stopped(
-                lease.snapshot,
-                user_id=user_id,
-                assistant_message_id=None,
-                terminal_reason="user_requested",
-            )
+            await self._asettle_unanswered_epoch(lease, inflight=inflight, user_id=user_id)
             return
 
         bot_response_content = fix_markdown_code_blocks(
@@ -3150,6 +3649,23 @@ class MessageService(IMessageService):
             conversation_id=str(conversation_id),
             message_id=str(bot_message_id),
             data={"message": bot_message.model_dump(mode="json")},
+        )
+
+    async def _asettle_unanswered_epoch(self, lease: Any, *, inflight: Any, user_id: UUID):
+        """Close the row for a continued epoch that ended without an answer.
+
+        Only a cancelled epoch is a stop. One that simply ended failed, and
+        calling it ``user_requested`` would blame the user for it.
+        """
+        if inflight.is_cancelled:
+            return await self._amark_generation_stopped(
+                lease.snapshot,
+                user_id=user_id,
+                assistant_message_id=None,
+                terminal_reason="user_requested",
+            )
+        return await self._amark_generation_failed(
+            lease.snapshot, user_id=user_id, terminal_reason="stream_incomplete"
         )
 
     @staticmethod

@@ -193,23 +193,10 @@ class DocumentProcessingService:
         )
 
         try:
-            from celery import chain as celery_chain
-
-            parse_sig = self.celery_app.signature(
-                "app.workers.document_processor.parse_document_task",
-                args=[document_id, str(staged_path), filename],
-            )
-            index_sig = self.celery_app.signature(
-                "app.workers.document_processor.index_document_task",
-            )
-            task = celery_chain(parse_sig, index_sig).apply_async(
-                retry=True,
-                retry_policy={
-                    "max_retries": 3,
-                    "interval_start": 0,
-                    "interval_step": 30,
-                    "interval_max": 180,
-                },
+            # A broker publish, retried for minutes when the broker is down,
+            # so it runs in a worker thread rather than stalling the loop.
+            task = await asyncio.to_thread(
+                self._enqueue_processing_chain, document_id, str(staged_path), filename
             )
         except Exception:
             try:
@@ -227,6 +214,27 @@ class DocumentProcessingService:
             "estimated_processing_time": self._estimate_processing_time(file_size),
             "message": f"Document '{filename}' queued for processing",
         }
+
+    def _enqueue_processing_chain(self, document_id: str, staged_path: str, filename: str):
+        """Publish the parse-then-index chain. Blocking: call it off the loop."""
+        from celery import chain as celery_chain
+
+        parse_sig = self.celery_app.signature(
+            "app.workers.document_processor.parse_document_task",
+            args=[document_id, staged_path, filename],
+        )
+        index_sig = self.celery_app.signature(
+            "app.workers.document_processor.index_document_task",
+        )
+        return celery_chain(parse_sig, index_sig).apply_async(
+            retry=True,
+            retry_policy={
+                "max_retries": 3,
+                "interval_start": 0,
+                "interval_step": 30,
+                "interval_max": 180,
+            },
+        )
 
     @staticmethod
     def _staged_temp_path(document_id: str, filename: str, temp_dir: Path) -> Path:
@@ -253,6 +261,14 @@ class DocumentProcessingService:
             return "5-10 minutes"
 
     async def get_processing_status(self, task_id: str) -> dict[str, Any]:
+        """The task's sanitized status, read from the result backend off the loop.
+
+        Every attribute read on an ``AsyncResult`` can be a blocking round trip
+        to the backend.
+        """
+        return await asyncio.to_thread(self._read_processing_status, task_id)
+
+    def _read_processing_status(self, task_id: str) -> dict[str, Any]:
         try:
             task_result = self.celery_app.AsyncResult(task_id)
             response: dict[str, Any] = {
