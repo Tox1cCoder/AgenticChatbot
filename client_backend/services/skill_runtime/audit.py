@@ -34,29 +34,6 @@ _LIFECYCLE_AUDIT_FILENAME = "lifecycle.jsonl"
 
 _UNAVAILABLE_ARGUMENTS = {"<unavailable>": True}
 
-# The complete set of keys a lifecycle record may contain. This is an allowlist
-# rather than a denylist on purpose: callers pass through archive-derived and
-# filesystem-derived values, so anything not named here -- a staging path, an
-# uploaded filename, setup output, a token -- is dropped instead of audited.
-LIFECYCLE_AUDIT_FIELDS = frozenset(
-    {
-        "timestamp",
-        "event",
-        "user_id",
-        "device_id",
-        "upload_id",
-        "operation_id",
-        "skill",
-        "source_hash",
-        "status",
-        "phase",
-        "error_code",
-        "duration_ms",
-        "sync_status",
-        "metrics",
-    }
-)
-
 
 def new_audit_id() -> str:
     """Return a fresh, sortable, unique audit id for one execution."""
@@ -165,8 +142,10 @@ class SkillLifecycleAuditWriter:
     questions from different inputs. Execution audit records what a skill command
     did; this records how a bundle arrived and was installed, and its inputs are
     attacker-influenced (archive member names, front-matter skill names, uploaded
-    filenames). Fields are therefore allowlisted by
-    :data:`LIFECYCLE_AUDIT_FIELDS` and anything else a caller passes is dropped.
+    filenames). Fields are therefore allowlisted by the keyword parameters of
+    :meth:`write` -- an allowlist rather than a denylist on purpose -- and
+    anything else a caller passes (a staging path, an uploaded filename, setup
+    output, a token) is dropped instead of audited.
     """
 
     def __init__(self, path: Path | None = None) -> None:

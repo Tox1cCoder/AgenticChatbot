@@ -50,15 +50,6 @@ class DocumentImageRepository:
         with self.session_factory() as db:
             return db.query(DocumentImage).filter(DocumentImage.id == image_id).first()
 
-    def get_by_document_id(self, document_id: UUID) -> list[DocumentImage]:
-        with self.session_factory() as db:
-            return (
-                db.query(DocumentImage)
-                .filter(DocumentImage.document_id == document_id)
-                .order_by(asc(DocumentImage.page_number))
-                .all()
-            )
-
     def get_by_document_for_scope(
         self,
         document_id: Any,

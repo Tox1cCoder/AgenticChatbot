@@ -9,17 +9,6 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 from app.observability.labels import bounded_label as _bounded
 
 _PROVIDERS = {"brave", "tavily"}
-_CANDIDATE_OUTCOMES = {
-    "eligible",
-    "rejected_malformed",
-    "rejected_scheme",
-    "rejected_duplicate",
-    "rejected_dimensions",
-    "rejected_aspect_ratio",
-    "rejected_junk_url",
-    "rejected_stale",
-}
-_ANCHOR_OUTCOMES = {"marker", "query_anchored", "fallback_anchored", "unplaced"}
 _REGISTRATION_OUTCOMES = {"registered", "reused", "skipped_scheme", "failed"}
 _FETCH_OUTCOMES = {
     "success",
@@ -36,13 +25,6 @@ _FETCH_OUTCOMES = {
     "private_address",
     "redirect_limit",
 }
-_DISCOVERY_OUTCOMES = {
-    "selected",
-    "no_match",
-    "skipped",
-    "unavailable",
-    "search_failure",
-}
 
 
 class RichImageMetrics:
@@ -50,12 +32,6 @@ class RichImageMetrics:
 
     def __init__(self, registry: CollectorRegistry | None = None) -> None:
         self.registry = registry or CollectorRegistry(auto_describe=True)
-        self.discovery_results = Histogram(
-            "rich_image_discovery_results",
-            "Normalized image results returned per provider call.",
-            ("provider",),
-            registry=self.registry,
-        )
         self.selector_duration = Histogram(
             "rich_image_selector_duration_seconds",
             "Time spent selecting canonical rich image candidates.",
@@ -73,22 +49,10 @@ class RichImageMetrics:
             ("provider", "outcome"),
             registry=self.registry,
         )
-        self.candidates = Counter(
-            "rich_image_candidates_total",
-            "Deterministic rich-image eligibility outcomes by reason.",
-            ("provider", "outcome"),
-            registry=self.registry,
-        )
         self.presented = Counter(
             "rich_image_presented_total",
             "Image items included in the model-facing inventory.",
             ("provider",),
-            registry=self.registry,
-        )
-        self.anchors = Counter(
-            "rich_image_anchor_outcomes_total",
-            "How each image item reached (or failed to reach) the answer body.",
-            ("provider", "outcome"),
             registry=self.registry,
         )
         self.final_selections = Counter(
@@ -103,42 +67,13 @@ class RichImageMetrics:
             ("provider", "outcome"),
             registry=self.registry,
         )
-        self.discovery_outcomes = Counter(
-            "rich_image_discovery_outcome_total",
-            "Terminal outcome of the native image discovery path.",
-            ("outcome",),
-            registry=self.registry,
-        )
-        self.discovery_duration = Histogram(
-            "rich_image_discovery_duration_seconds",
-            "Duration of the native image discovery path.",
-            ("outcome",),
-            registry=self.registry,
-        )
-
-    def record_discovery(self, *, provider: str, result_count: int) -> None:
-        self.discovery_results.labels(provider=_provider(provider)).observe(
-            max(0, int(result_count))
-        )
 
     def record_selection_duration(self, duration_seconds: float) -> None:
         self.selector_duration.observe(max(0.0, float(duration_seconds)))
 
-    def record_candidate(self, *, provider: str, outcome: str) -> None:
-        self.candidates.labels(
-            provider=_provider(provider),
-            outcome=_bounded(outcome, _CANDIDATE_OUTCOMES),
-        ).inc()
-
     def record_presentation(self, *, provider: str, count: int) -> None:
         if count > 0:
             self.presented.labels(provider=_provider(provider)).inc(int(count))
-
-    def record_anchor(self, *, provider: str, outcome: str) -> None:
-        self.anchors.labels(
-            provider=_provider(provider),
-            outcome=_bounded(outcome, _ANCHOR_OUTCOMES),
-        ).inc()
 
     def record_final_selection(self, *, provider: str, count: int) -> None:
         if count > 0:
@@ -163,11 +98,6 @@ class RichImageMetrics:
         }
         self.fetches.labels(**labels).inc()
         self.fetch_duration.labels(**labels).observe(max(0.0, float(duration_seconds)))
-
-    def record_discovery_outcome(self, *, outcome: str, duration_seconds: float) -> None:
-        label = _bounded(outcome, _DISCOVERY_OUTCOMES)
-        self.discovery_outcomes.labels(outcome=label).inc()
-        self.discovery_duration.labels(outcome=label).observe(max(0.0, float(duration_seconds)))
 
     def render(self) -> bytes:
         return generate_latest(self.registry)

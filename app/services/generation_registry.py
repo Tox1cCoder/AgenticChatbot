@@ -171,9 +171,6 @@ class GenerationRegistry:
     def _matches(left, right) -> bool:
         return left is not None and right is not None and str(left) == str(right)
 
-    def find_by_user(self, user_id) -> list[InflightEntry]:
-        return [e for e in list(self._store.values()) if self._matches(e.user_id, user_id)]
-
     def find_by_conversation(self, conversation_id) -> list[InflightEntry]:
         return [
             e

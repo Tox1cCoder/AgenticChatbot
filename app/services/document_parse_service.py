@@ -657,29 +657,6 @@ class DocumentParseService:
 
         return rows
 
-    @classmethod
-    def _excel_rows_to_markdown(cls, sheet_name: str, rows: list[list[str]]) -> str:
-        column_count = max((len(row) for row in rows), default=0)
-        if column_count == 0:
-            return f"# Sheet: {sheet_name}"
-
-        padded_rows = [row + [""] * (column_count - len(row)) for row in rows]
-        header = [
-            value if value else f"Column {index + 1}" for index, value in enumerate(padded_rows[0])
-        ]
-        data_rows = padded_rows[1:]
-
-        lines = [
-            f"# Sheet: {sheet_name}",
-            "",
-            "| " + " | ".join(cls._escape_markdown_table_cell(v) for v in header) + " |",
-            "| " + " | ".join("---" for _ in header) + " |",
-        ]
-        for row in data_rows:
-            lines.append("| " + " | ".join(cls._escape_markdown_table_cell(v) for v in row) + " |")
-
-        return "\n".join(lines).strip()
-
     @staticmethod
     def _stringify_excel_cell(value: Any) -> str:
         if value is None:
@@ -687,10 +664,6 @@ class DocumentParseService:
         if isinstance(value, datetime):
             return value.isoformat(sep=" ")
         return str(value)
-
-    @staticmethod
-    def _escape_markdown_table_cell(value: str) -> str:
-        return value.replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
     def _parse_content_list_json(self, content_list_path: Path) -> list[dict[str, Any]]:
         """Parse MinerU's content_list.json into structured content blocks."""

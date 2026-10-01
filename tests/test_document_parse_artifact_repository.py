@@ -132,22 +132,6 @@ def test_create_builds_artifact_row_and_commits():
     assert session.committed == 1
 
 
-def test_list_by_document_queries_by_document_id():
-    session = _FakeSession()
-    marker = DocumentParseArtifact(
-        id=uuid4(),
-        document_id=uuid4(),
-        artifact_type="mineru_markdown",
-        storage_path="/tmp/x.md",
-    )
-    session._query_results = [marker]
-
-    repo = DocumentParseArtifactRepository(session_factory=_fake_session_factory(session))
-
-    results = repo.list_by_document(document_id=marker.document_id)
-    assert results == [marker]
-
-
 def test_replace_for_document_deletes_then_adds():
     session = _FakeSession()
     existing = [

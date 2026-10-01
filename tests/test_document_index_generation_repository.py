@@ -66,11 +66,13 @@ def test_activation_retires_previous_generation_atomically(generation_db):
 
     activated = repository.activate(replacement.id)
 
-    generations = {row.id: row for row in repository.list_for_document(document_id)}
+    with generation_db() as db:
+        old_row = db.get(type(old), old.id)
+        new_row = db.get(type(old), replacement.id)
     assert activated.id == replacement.id
-    assert generations[replacement.id].status == "active"
-    assert generations[old.id].status == "retired"
-    assert generations[old.id].retired_at is not None
+    assert new_row.status == "active"
+    assert old_row.status == "retired"
+    assert old_row.retired_at is not None
     assert repository.get_active(document_id).id == replacement.id
 
 
@@ -90,7 +92,7 @@ def test_recently_retired_old_generation_keeps_full_rollback_window(generation_d
     repository.activate(replacement.id)
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=168)
-    assert repository.retired_before(document_id, cutoff) == []
+    assert repository.purgeable_before(document_id, cutoff) == []
 
 
 def test_activation_rebinds_images_to_replacement_chunk_before_retiring_old(
@@ -296,8 +298,8 @@ def test_failure_code_is_bounded_without_retiring_active_generation(generation_d
     repository.mark_failed(failed.id, "x" * 500)
 
     assert repository.get_active(document_id).id == active.id
-    latest_failed = repository.get_latest_failed(document_id)
-    assert latest_failed.id == failed.id
+    with generation_db() as db:
+        latest_failed = db.get(type(failed), failed.id)
     assert latest_failed.status == "failed"
     assert len(latest_failed.failure_code) <= 64
     assert latest_failed.failed_at is not None
@@ -453,7 +455,8 @@ class _GenerationRepositoryFake:
         self.events.append(("failed", generation_id))
         return row
 
-    def get_latest_failed(self, document_id):
+    def latest_failed(self, document_id):
+        """Test-side inspection of the fake's rows; the service never reads this."""
         return next(
             (
                 row
@@ -539,7 +542,7 @@ def test_failed_reindex_keeps_previous_generation_active():
         )
 
     assert generations.get_active(document_id).id == old_generation_id
-    assert generations.get_latest_failed(document_id) is not None
+    assert generations.latest_failed(document_id) is not None
 
 
 def test_activation_occurs_only_after_count_dimension_and_scope_verification():
@@ -593,7 +596,7 @@ def test_sql_chunk_build_failure_marks_new_generation_failed():
         )
 
     assert generations.get_active(document_id).id == old_generation_id
-    assert generations.get_latest_failed(document_id) is not None
+    assert generations.latest_failed(document_id) is not None
 
 
 def test_successful_activation_reconciles_all_document_payloads():
@@ -634,7 +637,7 @@ def test_ambiguous_commit_confirmed_active_keeps_new_payload_visible():
 
     assert generations.get_active(document_id).id == persisted[0].index_generation_id
     assert next(iter(qdrant.points.values())).payload["is_active"] is True
-    assert generations.get_latest_failed(document_id) is None
+    assert generations.latest_failed(document_id) is None
 
 
 def test_reconciliation_cleanup_failure_does_not_hide_active_generation():
@@ -694,7 +697,7 @@ def test_unknown_sql_activation_outcome_does_not_demote_generation_or_chunks():
             parse_artifact_id=None,
         )
 
-    assert generations.get_latest_failed(document_id) is None
+    assert generations.latest_failed(document_id) is None
     assert chunks.mark_index_failed.call_count == 0
     assert next(iter(qdrant.points.values())).payload["is_active"] is True
 

@@ -83,23 +83,6 @@ def _resolve_targets(db, args: argparse.Namespace) -> list[UUID]:
         return [UUID(str(r[0])) for r in rows]
 
 
-def _mark_needs_reindex(db, document_ids: list[UUID]) -> None:
-    if not document_ids:
-        return
-    with db.session() as session:
-        session.execute(
-            text(
-                "UPDATE document_chunks "
-                "SET index_status = 'needs_reindex', "
-                "    index_error = NULL, "
-                "    updated_at = NOW() "
-                "WHERE document_id = ANY(CAST(:ids AS uuid[]))"
-            ),
-            {"ids": [str(doc_id) for doc_id in document_ids]},
-        )
-        session.commit()
-
-
 def _run(args: argparse.Namespace) -> int:
     selector_count = sum(bool(x) for x in (args.document_id, args.conversation_id, args.all))
     if not args.dry_run and selector_count == 0:

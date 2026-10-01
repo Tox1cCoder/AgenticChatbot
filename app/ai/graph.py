@@ -552,33 +552,6 @@ class MultiAgentWorkflow(
         if subagent_results:
             response.metadata["subagent_results"] = subagent_results
 
-    def _finalize_agent_response(self, state: GraphState, response: AgentResponse) -> GraphState:
-        self._attach_final_agent_metadata(state, response)
-        state["response"] = response
-
-        ai_kwargs: dict[str, Any] = {"content": response.message.content}
-        assistant_message_id = state.get("assistant_message_id")
-        if response.message.tool_calls:
-            ai_kwargs["tool_calls"] = response.message.tool_calls
-            # Stamp intermediate tool-calling AIMessages with a deterministic,
-            # derived id so checkpoint compaction can remove them on terminal
-            # response. Without an id they survive across turns and pollute
-            # state["messages"] / LangSmith traces.
-            if assistant_message_id:
-                intermediate_idx = sum(
-                    1
-                    for m in state.get("messages", [])
-                    if isinstance(m, AIMessage)
-                    and getattr(m, "id", "")
-                    and str(m.id).startswith(f"{assistant_message_id}-tool-")
-                )
-                ai_kwargs["id"] = f"{assistant_message_id}-tool-{intermediate_idx}"
-        elif assistant_message_id:
-            ai_kwargs["id"] = assistant_message_id
-        state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
-
-        return state
-
     def _build_initial_state_from_request(self, request: WorkflowExecutionRequest) -> GraphState:
         tasks = list(request.planning.tasks)
         # Stamp the current-turn HumanMessage with the persisted DB id so
@@ -828,48 +801,6 @@ class MultiAgentWorkflow(
             filtered.append(message)
         return filtered
 
-    @staticmethod
-    def _interrupt_payload_from_pending_interrupts(snapshot: Any) -> dict[str, Any] | None:
-        """Recover the live interrupt payload from the checkpoint's pending interrupts.
-
-        A node suspends *before* its writes land in the checkpoint, so the
-        ``pending_action_requests`` that ``_prepare_interrupt_payload`` stashes in
-        ``state["context"]`` right before ``interrupt()`` is never committed at pause
-        time. Worse, once the first approval cycle resolves (the node returns normally)
-        a now-stale value gets committed and would be reused for every later interrupt
-        on the thread. Reading it back from ``snapshot.values`` therefore yields tool
-        calls whose ids no longer match the resumed node's ``last_message.tool_calls``.
-
-        The interrupt's own value, however, IS checkpointed and current. Prefer it so
-        the action_requests (and provenance metadata) presented to the human always
-        line up with the tool calls the graph will apply decisions to on resume.
-        """
-        interrupts = list(getattr(snapshot, "interrupts", None) or ())
-        if not interrupts:
-            for task in getattr(snapshot, "tasks", None) or ():
-                interrupts.extend(getattr(task, "interrupts", None) or ())
-
-        action_requests: list[Any] = []
-        metadata: dict[str, Any] = {}
-        for item in interrupts:
-            value = getattr(item, "value", None)
-            if not isinstance(value, dict):
-                continue
-            requests = value.get("action_requests")
-            if isinstance(requests, list):
-                action_requests.extend(requests)
-            value_metadata = value.get("metadata")
-            if isinstance(value_metadata, dict):
-                metadata.update(value_metadata)
-
-        if not action_requests:
-            return None
-
-        payload: dict[str, Any] = {"action_requests": action_requests}
-        if metadata:
-            payload["metadata"] = metadata
-        return payload
-
     def _build_interrupt_agent_response(
         self,
         state_snapshot: Any,
@@ -963,28 +894,6 @@ class MultiAgentWorkflow(
             active_canvas=active_canvas_descriptor,
             runtime_time=build_runtime_time_context_block().strip() or None,
         )
-
-    def _conversation_has_documents(self, conversation_id: str | None) -> bool:
-        if not conversation_id or not self.document_repository:
-            return False
-        try:
-            return self.document_repository.count_by_conversation(UUID(conversation_id)) > 0
-        except (ValueError, Exception):
-            return False
-
-    async def _aconversation_has_documents(self, conversation_id: str | None) -> bool:
-        """Async twin of :meth:`_conversation_has_documents`.
-
-        Routing runs before the first token, so this COUNT must not block the
-        event loop and stall other in-flight streams.
-        """
-        if not conversation_id or not self.document_repository:
-            return False
-        try:
-            count = await self.document_repository.acount_by_conversation(UUID(conversation_id))
-            return count > 0
-        except (ValueError, Exception):
-            return False
 
     async def _compact_checkpoint_after_terminal_response(
         self,
@@ -1977,17 +1886,6 @@ class MultiAgentWorkflow(
             if isinstance(message, HumanMessage):
                 return coerce_response_text(message.content)
         return ""
-
-    def _get_agent_type(self, active_agent_id: str | None) -> AgentType:
-        agent_type_map = {
-            "chat_agent": AgentType.CHAT,
-            "rag_agent": AgentType.RAG,
-            "search_agent": AgentType.SEARCH,
-            "image_generator_agent": AgentType.IMAGE_GENERATOR,
-            "planning_agent": AgentType.PLANNING,
-            "canvas_agent": AgentType.CANVAS,
-        }
-        return agent_type_map.get(active_agent_id, AgentType.CHAT)
 
     @staticmethod
     def _merge_unique_items(

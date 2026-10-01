@@ -207,10 +207,3 @@ class TestAsyncTwins:
         actual = await repo.alist_for_user(str(owner_id), project_id=None)
 
         assert _contents(actual) == _contents(expected) == ["global"]
-
-    async def test_aresolve_project_id_matches_sync(self, repo_env):
-        repo, _sf, owner_id, _other, _a, _b, conv_in_a, conv_no_project = repo_env
-
-        for conversation_id in (str(conv_in_a), str(conv_no_project), None):
-            expected = repo.resolve_project_id(str(owner_id), conversation_id)
-            assert await repo.aresolve_project_id(str(owner_id), conversation_id) == expected

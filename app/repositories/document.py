@@ -56,15 +56,6 @@ class DocumentRepository(RepositorySessionMixin):
             db.refresh(db_document)
             return db_document
 
-    def filename_exists_in_conversation(self, conversation_id: UUID, filename_key: str) -> bool:
-        """Return True if a document with this normalized filename already exists."""
-        with self.session_factory() as db:
-            query = db.query(Document).filter(
-                Document.conversation_id == conversation_id,
-                Document.filename_key == filename_key,
-            )
-            return bool(db.query(query.exists()).scalar())
-
     def get_by_conversation_and_filename_key(
         self, conversation_id: UUID, filename_key: str
     ) -> Document | None:
@@ -192,16 +183,10 @@ class DocumentRepository(RepositorySessionMixin):
             for row in rows
         ]
 
-    def get_routing_descriptors(self, conversation_id: UUID, limit: int = 20) -> list[dict]:
-        """Bounded metadata-only descriptors for the router context."""
-        return self._run(
-            lambda db: self._routing_descriptors_in_session(db, conversation_id, limit)
-        )
-
     async def aget_routing_descriptors(
         self, conversation_id: UUID | str, limit: int = 20
     ) -> list[dict]:
-        """Async twin of :meth:`get_routing_descriptors`.
+        """Bounded metadata-only descriptors for the router context.
 
         Routing runs before the first token, so this lookup must not block the
         event loop and stall other in-flight streams.

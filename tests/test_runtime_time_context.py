@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.ai.agents.base_agent import BaseAgent
-from app.ai.agents.router import Router
 from app.ai.schemas import AgentType
 
 
@@ -84,32 +83,25 @@ def test_base_agent_full_system_prompt_injects_runtime_time_context(monkeypatch)
     assert "RUNTIME TIME BLOCK" in prompt
 
 
-async def test_router_context_carries_runtime_time_as_data(monkeypatch):
+async def test_router_context_carries_runtime_time_as_data():
     """Clock context reaches the router as bounded context data, not an instruction."""
-    from app.ai.schemas import AgentMessage, MessageRole
-    from app.ai.workflow.contracts import RoutingDecision
+    from app.ai.workflow.inventory import build_routing_inventory
+    from app.ai.workflow.routing import RoutingContextBuilder, RoutingContextRequest
+    from app.core.config import settings
 
-    monkeypatch.setattr(
-        "app.ai.agents.router.build_runtime_time_context_block",
-        lambda: "RUNTIME TIME BLOCK",
-    )
-
-    captured = {}
-
-    class _Service:
-        async def route(self, context, inventory, *, user_id, model_request, request_id):
-            captured["context"] = context
-            return RoutingDecision(agent_id="chat_agent", confidence=0.5, reason="general")
-
-    router = Router(recorder=None, routing_service=_Service())
     message = "create an analysis about a pro team play this season"
-
-    await router.route_message(
-        AgentMessage(role=MessageRole.USER, content=message, metadata={}),
-        ["chat_agent", "search_agent"],
+    inventory = build_routing_inventory(
+        base_agent_ids=["chat_agent", "search_agent"], custom_agents={}
     )
 
-    context = captured["context"]
+    context = await RoutingContextBuilder(
+        history_provider=None, document_repository=None, settings=settings
+    ).build(
+        RoutingContextRequest(
+            message=message, inventory=inventory, runtime_time="RUNTIME TIME BLOCK"
+        )
+    )
+
     assert context.runtime_time == "RUNTIME TIME BLOCK"
     assert context.message == message
     # Both live in the untrusted JSON payload, never in the system instruction.

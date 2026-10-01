@@ -139,20 +139,3 @@ async def test_release_many_is_owned_and_marks_the_lifecycle_released():
     assert user_id.hex in compiled
     assert conversation_id.hex in compiled
     assert "lifecycle_state='released'" in compiled.replace(" ", "")
-
-
-@pytest.mark.asyncio
-async def test_pending_lookup_requires_owner_conversation_and_pending_state():
-    marker = object()
-    session = _SyncSession(rows=[marker])
-    repository = WebImageReferenceRepository(
-        _sync_factory_that_must_not_run(), _async_factory(session)
-    )
-
-    assert (
-        await repository.aget_pending_for_user(uuid4(), uuid4(), conversation_id=uuid4())
-        is marker
-    )
-
-    compiled = str(session.statements[0].compile(compile_kwargs={"literal_binds": True}))
-    assert "web_image_references.lifecycle_state = 'pending'" in compiled

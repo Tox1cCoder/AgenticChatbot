@@ -9,7 +9,6 @@ import asyncio
 import contextlib
 import json
 import logging
-from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
@@ -225,31 +224,6 @@ class DeviceRuntimeGateway:
                         execution_time_ms=0,
                     )
                 )
-
-    async def dispatch_tool_call(
-        self,
-        request_id: str,
-        tool_name: str,
-        qualified_tool_id: str,
-        arguments: dict[str, Any],
-        timeout_seconds: float = 30.0,
-    ) -> dict:
-        """Dispatch a tool call to the device and wait for the result.
-
-        ``timeout_seconds`` bounds both the execution and the response wait.
-        ``request_id`` is accepted for call-site compatibility; the service
-        mints its own.
-        """
-        return await ClientDeviceService.dispatch_tool_call(
-            user_id=str(self.session.user_id),
-            device_id=str(self.session.device_id),
-            tool_name=tool_name,
-            qualified_tool_id=qualified_tool_id,
-            arguments=arguments,
-            execution_timeout_seconds=timeout_seconds,
-            response_timeout_seconds=timeout_seconds,
-            bound_session_id=self.session.session_id,
-        )
 
 
 @router.websocket("/{device_id}/connect")

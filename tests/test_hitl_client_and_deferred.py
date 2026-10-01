@@ -1,11 +1,12 @@
 """HITL fires correctly for client (sidecar) tools and deferred (search-loaded) tools."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
-import pytest
-
-from app.ai.hitl_config import any_call_requires_approval, resolve_call_identity
+from app.ai.hitl_config import (
+    any_call_requires_approval,
+    build_tool_interrupt_payload,
+    resolve_call_identity,
+)
 
 
 class _FakeManager:
@@ -55,11 +56,7 @@ def test_deferred_server_tool_gated_by_read_only_global_policy_after_autoload():
     )
 
 
-@pytest.mark.asyncio
-async def test_prepare_interrupt_payload_carries_client_provenance():
-    from app.ai import graph as graph_module
-
-    wf = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
+def test_interrupt_payload_carries_client_provenance():
     client_tool = SimpleNamespace(
         name="client__excel__delete_sheet",
         metadata={
@@ -69,12 +66,10 @@ async def test_prepare_interrupt_payload_carries_client_provenance():
         },
     )
 
-    # agent=None + explicit tool_map => _prepare_interrupt_payload skips building a real map.
-    payload = await wf._prepare_interrupt_payload(
-        {"context": {}, "device_id": "dev-1"},
-        tool_calls=[{"name": "client__excel__delete_sheet", "args": {}, "id": "c1"}],
-        agent=None,
+    payload = build_tool_interrupt_payload(
+        [{"name": "client__excel__delete_sheet", "args": {}, "id": "c1"}],
         tool_map={client_tool.name: client_tool},
+        device_id="dev-1",
     )
     prov = payload["metadata"]["tool_provenance"]
     entry = next(iter(prov.values()))
@@ -83,14 +78,10 @@ async def test_prepare_interrupt_payload_carries_client_provenance():
     assert entry["tool_origin"] == "client_mcp"
 
 
-@pytest.mark.asyncio
-async def test_prepare_interrupt_payload_redacts_sensitive_args_in_prompt():
+def test_interrupt_payload_redacts_sensitive_args_in_prompt():
     # The approval prompt (action_requests) must not surface a sensitive-keyed
     # argument value, but must keep normal args visible for the approver — and
     # must NOT mutate the original tool call that executes on approval.
-    from app.ai import graph as graph_module
-
-    wf = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
     tool_call = {
         "name": "client__skill_demo__mutate",
         "args": {"calendar_id": "primary", "api_token": "SUPER-SECRET"},
@@ -98,12 +89,7 @@ async def test_prepare_interrupt_payload_redacts_sensitive_args_in_prompt():
     }
     original_args = tool_call["args"]
 
-    payload = await wf._prepare_interrupt_payload(
-        {"context": {}, "device_id": "dev-1"},
-        tool_calls=[tool_call],
-        agent=None,
-        tool_map={},
-    )
+    payload = build_tool_interrupt_payload([tool_call], tool_map={}, device_id="dev-1")
 
     prompt_args = payload["action_requests"][0]["args"]
     assert prompt_args["calendar_id"] == "primary"
@@ -130,50 +116,3 @@ def test_sensitive_argument_redaction_recurses_through_nested_objects_and_lists(
             "items": [{"password": "<redacted>"}, {"name": "safe"}],
         }
     }
-
-
-@pytest.mark.asyncio
-async def test_approval_helpers_rebuild_the_live_scoped_handoff_map(monkeypatch):
-    """HITL must inspect the same graph-scoped handoff tool that will execute."""
-    from app.ai import graph as graph_module
-    from app.ai.hand_off_tool import create_hand_off_tool
-
-    wf = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
-    handoff_tool = create_hand_off_tool(
-        source_agent_id="chat_agent", allowed_targets=["search_agent"]
-    )
-    observed_internal_tools: list[list[object] | None] = []
-
-    async def fake_ensure_agent_tool_map(agent, **kwargs):
-        observed_internal_tools.append(kwargs.get("internal_tools"))
-        return {"hand_off": handoff_tool}
-
-    monkeypatch.setattr(
-        "app.ai.workflow.tool_loop.ensure_agent_tool_map", fake_ensure_agent_tool_map
-    )
-    monkeypatch.setattr(
-        "app.ai.workflow.tool_loop.get_global_mcp_manager", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        "app.ai.workflow.tool_loop.any_call_requires_approval", lambda *args, **kwargs: False
-    )
-    state = {"context": {}, "device_id": "device-1"}
-    calls = [{"name": "hand_off", "args": {"target_agent": "search_agent"}, "id": "h1"}]
-
-    assert (
-        await wf._needs_approval(
-            state,
-            calls,
-            agent=object(),
-            internal_tools=[handoff_tool],
-        )
-        is False
-    )
-    await wf._prepare_interrupt_payload(
-        state,
-        tool_calls=calls,
-        agent=object(),
-        internal_tools=[handoff_tool],
-    )
-
-    assert observed_internal_tools == [[handoff_tool], [handoff_tool]]

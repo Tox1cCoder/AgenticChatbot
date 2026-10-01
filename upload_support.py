@@ -40,46 +40,6 @@ def _bump_api_cache_version() -> None:
     st.session_state.api_cache_version = int(st.session_state.get("api_cache_version", 0)) + 1
 
 
-def render_upload_section():
-    """Render file upload section - only when conversation is selected"""
-    if (
-        st.session_state.get("current_conversation_id")
-        and st.session_state.current_conversation_id != "pending_new"
-    ):
-        st.markdown("### :material/upload_file: Upload Documents")
-        st.caption("Upload to current conversation")
-
-        uploaded_files = st.file_uploader(
-            "Choose one or more files",
-            # Mirror app/api/documents.py::SUPPORTED_UPLOAD_EXTENSIONS.
-            type=["txt", "pdf", "docx", "pptx", "xlsx", "html", "md"],
-            accept_multiple_files=True,
-            help="Upload documents for this conversation",
-            key=f"uploader_{st.session_state.current_conversation_id}",
-        )
-
-        if uploaded_files:
-            st.caption(f"Selected {len(uploaded_files)} file(s):")
-            for uploaded_file in uploaded_files:
-                st.info(
-                    f"{uploaded_file.name} ({uploaded_file.size} bytes)",
-                    icon=":material/description:",
-                )
-
-            if st.button(
-                "Upload Files",
-                icon=":material/upload:",
-                width="stretch",
-                key=f"upload_btn_{st.session_state.current_conversation_id}",
-            ):
-                upload_result = upload_documents(uploaded_files)
-                if upload_result:
-                    _render_batch_upload_outcome(upload_result)
-                    st.cache_data.clear()
-                else:
-                    st.error("Upload failed", icon=":material/cancel:")
-
-
 def upload_documents(uploaded_files: list[Any]) -> dict[str, Any] | None:
     """Upload one or more files via the canonical batch endpoint."""
     if not uploaded_files:
@@ -122,34 +82,6 @@ def upload_documents(uploaded_files: list[Any]) -> dict[str, Any] | None:
     except Exception as e:
         st.error(f"Upload error: {str(e)}")
         return None
-
-
-def upload_document(uploaded_file) -> dict[str, Any] | None:
-    """Compatibility wrapper — uploads a single file through the batch path."""
-    if uploaded_file is None:
-        return None
-    return upload_documents([uploaded_file])
-
-
-def _render_batch_upload_outcome(upload_result: dict[str, Any]) -> None:
-    """Render per-file accepted/rejected results in the sidebar."""
-    data = upload_result.get("data") or {}
-    accepted = int(data.get("accepted_count") or 0)
-    rejected = int(data.get("rejected_count") or 0)
-
-    if accepted:
-        st.success(
-            f"{accepted} file(s) uploaded and processing.",
-            icon=":material/check_circle:",
-        )
-    if rejected:
-        st.warning(f"{rejected} file(s) rejected.", icon=":material/error:")
-        for item in data.get("files") or []:
-            if (item.get("status") or "").lower() != "rejected":
-                continue
-            error_code = item.get("error_code") or "REJECTED"
-            label = "Duplicate" if error_code == "DUPLICATE_FILENAME" else error_code
-            st.caption(f"- {item.get('filename')} — {label}: {item.get('message') or ''}")
 
 
 @st.cache_data(show_spinner=False, ttl=10, max_entries=200)

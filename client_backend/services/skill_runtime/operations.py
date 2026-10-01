@@ -775,12 +775,6 @@ class SkillInstallationService:
             return
         self._audit.write(event=event, **fields)
 
-    # ------------------------------------------------------------- test seams
-
-    def persist_for_test(self, operation: SkillInstallationOperationModel) -> None:
-        """Write a receipt directly so tests can arrange stored state."""
-        self._persist(operation)
-
 
 _installation_service: SkillInstallationService | None = None
 

@@ -10,7 +10,6 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, TypeVar
 from urllib.parse import unquote, urlencode, urlparse, urlunparse
-from uuid import UUID
 
 import httpx
 from pydantic import BaseModel
@@ -506,31 +505,6 @@ class ServerAPIClient:
     async def get_message(self, message_id: str) -> dict[str, Any]:
         return await self.get(f"/messages/{message_id}")
 
-    async def stream_message(
-        self,
-        conversation_id: str,
-        content: str,
-        device_id: str | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
-        # The AI SDK route expects the canonical ``{"messages": [...]}``
-        # payload; the server picks the latest user message and relies on
-        # server-side memory for prior turns. Sending the raw ``{"content":
-        # ...}`` shape produced 422s.
-        payload: dict[str, Any] = {
-            "messages": [{"role": "user", "content": content}],
-        }
-        if device_id:
-            canonical_device_id = str(UUID(str(device_id)))
-            if str(device_id).strip().lower() != canonical_device_id:
-                raise ValueError("device_id must be a canonical hyphenated UUID")
-            payload["device_id"] = canonical_device_id
-
-        async for event in self.stream_sse(
-            f"/api/chat/{conversation_id}",
-            json=payload,
-        ):
-            yield event
-
     async def stream_internal_message(
         self,
         payload: dict[str, Any],
@@ -690,19 +664,6 @@ class ServerAPIClient:
         )
         payload = await self._handle_batch_upload_response(response)
         return UploadProxyResponse(status_code=response.status_code, payload=payload)
-
-    async def upload_documents_bytes(
-        self,
-        *,
-        conversation_id: str,
-        files: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Convenience wrapper that returns the payload only."""
-        result = await self.upload_documents_bytes_with_status(
-            conversation_id=conversation_id,
-            files=files,
-        )
-        return result.payload
 
     async def _handle_batch_upload_response(self, response: httpx.Response) -> dict[str, Any]:
         """Treat 201/207/409 as structured batch responses; raise otherwise."""

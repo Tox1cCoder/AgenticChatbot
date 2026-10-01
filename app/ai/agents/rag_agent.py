@@ -23,13 +23,9 @@ from ...observability.conversation_compaction import conversation_compaction_met
 from ...observability.rag import rag_metrics
 from ...repositories.document_chunk import DocumentChunkRepository
 from ...repositories.document_image import DocumentImageRepository
-from ...services.rag_evidence import EvidencePack
 from ...services.rag_grounding import (
     GROUNDED_ANSWER_CITATION_INSTRUCTIONS,
-    GROUNDED_ANSWER_REGENERATION_PROMPT,
-    GroundedAnswer,
     GroundedAnswerGate,
-    parse_grounded_answer,
 )
 from ...services.rag_image_selector import ImageCandidate, RAGImageSelector
 from ...services.rag_reranker import RAGReranker
@@ -1159,68 +1155,6 @@ class RAGAgent(BaseAgent):
             message=response_message,
             metadata=metadata,
         )
-
-    async def regenerate_grounded_answer(
-        self,
-        *,
-        question: str,
-        evidence: EvidencePack,
-        reason_codes: Any = (),
-        conversation_id: str | None = None,
-        user_id: str | None = None,
-        model_request: Any = None,
-        run_config: dict[str, Any] | None = None,
-    ) -> GroundedAnswer | None:
-        """Re-answer once under the gate's constraints, or return None.
-
-        This pass is deliberately hermetic: no tools, no persona, no skills, and
-        the framed evidence stays inside the human turn. Untrusted document
-        surfaces therefore cannot reach the system prompt or bind a tool.
-        """
-        records = getattr(evidence, "records", ()) or ()
-        if not records:
-            return None
-
-        allowed_ids = ", ".join(sorted(evidence.evidence_ids)) or "none"
-        rejected = ", ".join(str(code) for code in reason_codes if str(code)) or "none"
-        system_prompt = (
-            f"{GROUNDED_ANSWER_REGENERATION_PROMPT}\n\n"
-            f"Server validation rejected the previous answer for: {rejected}.\n"
-            f"Citable evidence ids for this turn: {allowed_ids}."
-            f"{GROUNDED_ANSWER_CITATION_INSTRUCTIONS}"
-        )
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(
-                content=(
-                    f"User Question: {question}\n\n"
-                    "Framed document evidence for this turn:\n"
-                    f"{evidence.to_tool_text()}"
-                )
-            ),
-        ]
-
-        runtime_config = self._resolve_runtime_model_config(user_id, model_request)
-        try:
-            response = await self._invoke_agentic_rag_model(
-                conversation_id=conversation_id,
-                messages=messages,
-                tools=[],
-                disable_tools=True,
-                user_id=user_id,
-                runtime_config=runtime_config,
-                run_config=run_config,
-            )
-        except Exception:
-            logger.exception("Constrained grounded-answer regeneration failed")
-            return None
-
-        # This is a terminal, tool-free pass, so no live counter may survive it.
-        metadata = response.metadata or {}
-        metadata.pop("_evidence_token_counter", None)
-        self._discard_evidence_token_counter(metadata.pop("evidence_tokenization", None))
-        text = coerce_response_text(response.message.content or "")
-        return parse_grounded_answer(text) if text.strip() else None
 
     async def _process_message_agentic(
         self,

@@ -166,8 +166,10 @@ def test_chunk_hydration_rejects_retired_generations(rag_scope_db):
 
     repository = DocumentChunkRepository(rag_scope_db.factory)
     assert [row.id for row in repository.get_by_document_ordered(document_id)] == [active_chunk.id]
-    assert repository.get_by_ids([retired_chunk.id]) == []
-    assert repository.get_by_qdrant_point_ids([str(retired_chunk.id)]) == []
+    hydrated = repository.get_active_by_ids_for_scope(
+        [active_chunk.id, retired_chunk.id], user_id=owner_id, conversation_id=conversation_id
+    )
+    assert [row.id for row in hydrated] == [active_chunk.id]
 
 
 def _minimal_agent() -> RAGAgent:

@@ -412,12 +412,6 @@ def test_user_and_conversation_filters_never_cross_tenants(
     assert totals_a.request_count == 1
     assert totals_b.request_count == 1
 
-    series_a = repository.get_minute_series(
-        user_id=user_a, start_inclusive=window_start, end_exclusive=window_end
-    )
-    assert len(series_a) == 1
-    assert all(row.user_id == user_a for row in series_a)
-
     breakdown_a = repository.get_dimension_breakdown(
         user_id=user_a,
         start_inclusive=window_start,
@@ -438,10 +432,6 @@ def test_user_and_conversation_filters_never_cross_tenants(
 
     with pytest.raises(ValueError):
         repository.get_summary_totals(
-            user_id=None, start_inclusive=window_start, end_exclusive=window_end
-        )
-    with pytest.raises(ValueError):
-        repository.get_minute_series(
             user_id=None, start_inclusive=window_start, end_exclusive=window_end
         )
     with pytest.raises(ValueError):

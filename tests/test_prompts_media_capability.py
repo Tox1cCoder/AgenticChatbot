@@ -67,6 +67,5 @@ def test_non_answer_prompts_stay_free_of_media_instructions() -> None:
         prompts.ROUTER_SYSTEM_PROMPT,
         prompts.TITLE_GENERATION_PROMPT,
         prompts.PLANNING_EXECUTION_PROMPT,
-        prompts.IMAGE_GENERATOR_SYSTEM_PROMPT,
     ):
         assert "Media and visuals:" not in prompt

@@ -485,36 +485,6 @@ async def test_the_version_is_owned_by_the_transition_not_the_caller(seeded: See
         )
 
 
-async def test_the_active_lookup_finds_the_running_turn(seeded: Seeded) -> None:
-    created = await seeded.repository.acreate(_create(seeded))
-
-    active = await seeded.repository.aget_active_for_conversation(
-        seeded.conversation_id, seeded.owner_id
-    )
-
-    assert active is not None
-    assert active.generation_id == created.generation_id
-
-
-async def test_the_active_lookup_ignores_a_finished_turn(seeded: Seeded) -> None:
-    created = await seeded.repository.acreate(_create(seeded))
-    await seeded.repository.atransition(
-        generation_id=created.generation_id,
-        user_id=seeded.owner_id,
-        conversation_id=seeded.conversation_id,
-        expected_statuses=(GenerationStatus.STARTING,),
-        expected_version=created.version,
-        values={"status": GenerationStatus.COMPLETED},
-    )
-
-    assert (
-        await seeded.repository.aget_active_for_conversation(
-            seeded.conversation_id, seeded.owner_id
-        )
-        is None
-    )
-
-
 # ----------------------------------------------------------------------
 # command ledger
 # ----------------------------------------------------------------------

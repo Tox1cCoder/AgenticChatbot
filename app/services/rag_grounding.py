@@ -92,15 +92,6 @@ GROUNDED CITATION FORMAT (REQUIRED — overrides the [Source: filename, Page X] 
 - If the framed evidence does not support an answer, state exactly what is missing instead of
   answering from memory."""
 
-GROUNDED_ANSWER_REGENERATION_PROMPT = """You are re-writing one answer so that every \
-factual claim is supported by the framed document evidence supplied with the user's question.
-
-Rules:
-- Use only the framed evidence. Do not add facts from memory.
-- The previous attempt was rejected by the server's grounded-answer validator.
-- Do not call tools; none are available on this pass.
-- If the evidence cannot support an answer, say what is missing instead of answering."""
-
 
 class GroundedClaim(BaseModel):
     text: str
@@ -518,24 +509,16 @@ def _rewrite_markers(text: str, known: Any) -> str:
     return _SPACE_BEFORE_PUNCTUATION.sub(r"\1", rewritten)
 
 
-def evidence_pack_from_payloads(payloads: Sequence[Mapping[str, Any]]) -> EvidencePack:
+def merge_evidence_payloads(
+    payloads: Sequence[Mapping[str, Any]],
+) -> tuple[EvidencePack, int]:
     """Rebuild the current turn's pack from the server records the loop stored.
 
     Ids are reissued per assembled pack, so one turn with several searches can
     label two different records ``E1``. Such an id cannot be attributed to a
     single server record, so it is dropped rather than rendered against a guess.
-    """
-    return merge_evidence_payloads(payloads)[0]
-
-
-def merge_evidence_payloads(
-    payloads: Sequence[Mapping[str, Any]],
-) -> tuple[EvidencePack, int]:
-    """Same merge as ``evidence_pack_from_payloads``, plus the drop count.
-
-    Callers that need to surface *how often* a turn collided on an id — the
-    ledgered rollout blocker this makes visible (round-1 finding 5) — use this
-    instead of the plain pack.
+    The drop count is returned too, so a turn-level id collision is visible
+    (round-1 finding 5) rather than silent.
     """
     by_id: dict[str, EvidenceRecord] = {}
     ambiguous: set[str] = set()

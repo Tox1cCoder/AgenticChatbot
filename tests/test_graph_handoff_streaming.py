@@ -57,7 +57,6 @@ async def test_planning_handoff_stream_returns_delegated_agent_answer():
     workflow.history_provider = None
     workflow.document_repository = None
     workflow._attach_context_outputs = lambda state, response: response
-    workflow._get_agent_type = lambda name: AgentType.SEARCH
     workflow._attach_planning_state_metadata = lambda response, state: response
 
     final_response = AgentResponse(

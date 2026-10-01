@@ -474,7 +474,12 @@ def test_most_specialist_cases_do_not_accept_chat_as_an_answer():
 
 def test_every_dataset_target_exists_in_the_evaluation_inventory():
     """A case routed to an agent the run cannot offer is unscoreable."""
-    routable = set(build_evaluation_inventory().routable_ids())
+    inventory = build_evaluation_inventory()
+    routable = {
+        descriptor.agent_id
+        for descriptor in inventory.agents
+        if inventory.is_routable(descriptor.agent_id)
+    }
     targets = {agent for case in load_dataset(GOLDEN) for agent in case.acceptable_agent_ids}
 
     assert targets <= routable, (

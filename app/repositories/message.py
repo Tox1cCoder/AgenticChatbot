@@ -362,12 +362,6 @@ class MessageRepository(RepositorySessionMixin):
         with self.session_factory() as session:
             return self._crud_strategy.count_by_conversation_id(session, conversation_id)
 
-    async def acount_by_conversation_id(self, conversation_id: UUID) -> int:
-        """Async twin of :meth:`count_by_conversation_id`."""
-        return await self._arun(
-            lambda session: self._crud_strategy.count_by_conversation_id(session, conversation_id)
-        )
-
     def get_by_user_id(
         self,
         user_id: UUID,
@@ -495,31 +489,6 @@ class MessageRepository(RepositorySessionMixin):
                 after_sequence=after_sequence,
                 limit=limit,
             )
-
-    @staticmethod
-    def _latest_by_conversation_statement(conversation_id: UUID):
-        return (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc())
-            .limit(1)
-        )
-
-    def get_latest_by_conversation(self, conversation_id: UUID) -> Message | None:
-        """Retrieve the most recent message in a conversation."""
-        with self.session_factory() as session:
-            statement = self._latest_by_conversation_statement(conversation_id)
-            return session.execute(statement).scalars().first()
-
-    async def aget_latest_by_conversation(self, conversation_id: UUID) -> Message | None:
-        """Async twin of :meth:`get_latest_by_conversation`."""
-        return await self._arun(
-            lambda session: (
-                session.execute(self._latest_by_conversation_statement(conversation_id))
-                .scalars()
-                .first()
-            )
-        )
 
     def get_canvas_artifact_candidates(
         self,

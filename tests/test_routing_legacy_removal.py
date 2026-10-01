@@ -90,9 +90,9 @@ def test_removed_legacy_token_is_absent_from_the_runtime(token):
 
 
 def test_the_router_owns_no_provider_sdk_client():
-    router = (REPO_ROOT / "app" / "ai" / "agents" / "router.py").read_text(encoding="utf-8")
-    assert "genai" not in router
-    assert "_call_llm" not in router
+    routing = (REPO_ROOT / "app" / "ai" / "workflow" / "routing.py").read_text(encoding="utf-8")
+    assert "genai" not in routing
+    assert "_call_llm" not in routing
 
 
 def test_routing_never_returns_a_hard_coded_agent():
@@ -137,14 +137,13 @@ def test_only_the_finalizer_reaches_end():
 # runs through it, so the remaining work is visible rather than implied.
 STILL_LIVE_LEGACY_MODULES = {
     "app/ai/workflow/tool_loop.py": (
-        "specialist wrappers still use its approval, artifact, and tool-error "
-        "helpers; its own tool and approval nodes, and the worker refusal, are gone"
+        "specialist wrappers still use its rich-candidate, tool-end event, and "
+        "tool-error helpers; its tool, approval, and handoff helpers are gone"
     ),
     "app/ai/agents/base_agent.py": (
         "specialist definitions delegate prompt and tool assembly to it; only its "
         "model/tool loop was superseded"
     ),
-    "app/ai/agents/router.py": "a thin RoutingService adapter the graph import still needs",
 }
 
 
@@ -153,6 +152,7 @@ DELETED_LEGACY_MODULES = (
     "app/ai/workflow/rag_loop.py",
     "app/ai/planning_subagents.py",
     "app/services/event_streaming/subagents.py",
+    "app/ai/agents/router.py",
 )
 
 

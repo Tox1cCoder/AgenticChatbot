@@ -200,29 +200,3 @@ class ToolExecutionReceiptRepository(RepositorySessionMixin):
                 )
 
         await self._arun(work)
-
-    # ------------------------------------------------------------------
-    # reconciliation
-    # ------------------------------------------------------------------
-
-    async def alist_unresolved(
-        self, *, user_id: Any, limit: int = 100
-    ) -> list[ToolExecutionReceipt]:
-        """Receipts an operator has to reconcile by hand."""
-
-        def work(session: Session) -> list[ToolExecutionReceipt]:
-            return list(
-                session.execute(
-                    select(ToolExecutionReceipt)
-                    .where(
-                        ToolExecutionReceipt.user_id == user_id,
-                        ToolExecutionReceipt.status == ReceiptStatus.OUTCOME_UNKNOWN,
-                    )
-                    .order_by(ToolExecutionReceipt.created_at.desc())
-                    .limit(max(0, int(limit)))
-                )
-                .scalars()
-                .all()
-            )
-
-        return await self._arun(work)

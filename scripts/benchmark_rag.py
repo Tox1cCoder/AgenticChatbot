@@ -219,15 +219,6 @@ def _corpus_summary(
     }
 
 
-def assess_corpus(
-    manifest_path: Path,
-    documents_requested: int,
-    *,
-    manifest_loader: Callable[[Path], list[dict[str, Any]]] = load_corpus_manifest,
-) -> dict[str, Any]:
-    return _corpus_summary(manifest_path, manifest_loader(manifest_path), documents_requested)
-
-
 # ---------------------------------------------------------------------------
 # Real Prometheus histogram / counter parsing (Task 12 telemetry)
 # ---------------------------------------------------------------------------

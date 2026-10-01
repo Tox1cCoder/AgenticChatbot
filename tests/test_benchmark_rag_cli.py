@@ -128,20 +128,23 @@ def test_current_git_sha_returns_a_real_sha_in_this_repository():
 # ---------------------------------------------------------------------------
 
 
-def test_assess_corpus_reports_the_real_fixture_count_as_insufficient():
-    script = _script()
+def _real_corpus_summary(script, documents_requested: int) -> dict:
+    manifest = Path("eval/rag/corpus_manifest.jsonl")
+    return script._corpus_summary(
+        manifest, script.load_corpus_manifest(manifest), documents_requested
+    )
 
-    corpus = script.assess_corpus(Path("eval/rag/corpus_manifest.jsonl"), documents_requested=1000)
+
+def test_corpus_summary_reports_the_real_fixture_count_as_insufficient():
+    corpus = _real_corpus_summary(_script(), documents_requested=1000)
 
     assert corpus["documents_available"] == 11
     assert corpus["documents_requested"] == 1000
     assert corpus["sufficient"] is False
 
 
-def test_assess_corpus_is_sufficient_when_manifest_meets_the_request():
-    script = _script()
-
-    corpus = script.assess_corpus(Path("eval/rag/corpus_manifest.jsonl"), documents_requested=5)
+def test_corpus_summary_is_sufficient_when_manifest_meets_the_request():
+    corpus = _real_corpus_summary(_script(), documents_requested=5)
 
     assert corpus["sufficient"] is True
 

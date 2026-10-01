@@ -320,7 +320,11 @@ async def test_a_fresh_canvas_still_binds_the_widget_tools():
     assert request.extras["excluded_tool_names"] is None
 
 
-def test_apply_tool_outputs_tracks_same_error_streak(monkeypatch):
+def _specialist_provenance(*artifacts: dict) -> SimpleNamespace:
+    return SimpleNamespace(artifacts=list(artifacts), images=[])
+
+
+def test_specialist_tool_results_track_same_error_streak(monkeypatch):
     monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 2, raising=False)
     graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     state = {"messages": [], "context": {}}
@@ -334,15 +338,9 @@ def test_apply_tool_outputs_tracks_same_error_streak(monkeypatch):
         "output": "missing",
     }
 
-    graph._apply_tool_outputs_to_state(
-        state,
-        tool_outputs=[{"tool_call_id": "call-1", "name": "read_file", "content": "missing"}],
-        tool_artifacts=[artifact],
-    )
-    graph._apply_tool_outputs_to_state(
-        state,
-        tool_outputs=[{"tool_call_id": "call-2", "name": "read_file", "content": "missing"}],
-        tool_artifacts=[{**artifact, "tool_call_id": "call-2"}],
+    graph._record_specialist_tool_results(state, _specialist_provenance(artifact))
+    graph._record_specialist_tool_results(
+        state, _specialist_provenance({**artifact, "tool_call_id": "call-2"})
     )
 
     streak = state["context"]["tool_error_streak"]
@@ -352,36 +350,7 @@ def test_apply_tool_outputs_tracks_same_error_streak(monkeypatch):
     assert streak["signature"]["args"] == '{"path":"missing.txt"}'
 
 
-def test_apply_tool_outputs_preserves_flagged_skill_terminal_errors(monkeypatch):
-    monkeypatch.setattr(settings, "tool_result_max_chars", 120, raising=False)
-    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-    state = {"messages": [], "context": {}}
-    terminal_content = '{"status":"error","untrusted_terminal_output":"' + "x" * 4000 + '"}'
-
-    graph._apply_tool_outputs_to_state(
-        state,
-        tool_outputs=[
-            {
-                "tool_call_id": "call-skill",
-                "name": "client__demo__run_skill_command",
-                "content": terminal_content,
-                "preserve_full_content": True,
-            },
-            {
-                "tool_call_id": "call-2",
-                "name": "big_tool",
-                "content": "y" * 4000,
-            },
-        ],
-        truncate_outputs=True,
-    )
-
-    skill_message, other_message = state["messages"]
-    assert skill_message.content == terminal_content
-    assert len(other_message.content) <= 120
-
-
-def test_apply_tool_outputs_lifts_but_does_not_persist_internal_rich_candidates():
+def test_specialist_tool_results_lift_but_do_not_persist_internal_rich_candidates():
     graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     state = {"messages": [], "context": {}}
     candidate = {
@@ -399,17 +368,7 @@ def test_apply_tool_outputs_lifts_but_does_not_persist_internal_rich_candidates(
         "_rich_item_candidates": [candidate],
     }
 
-    graph._apply_tool_outputs_to_state(
-        state,
-        tool_outputs=[
-            {
-                "tool_call_id": "call-1",
-                "name": "image_tool",
-                "content": "[image/png image]",
-            }
-        ],
-        tool_artifacts=[artifact],
-    )
+    graph._record_specialist_tool_results(state, _specialist_provenance(artifact))
 
     assert state["context"]["rich_item_candidates"] == [candidate]
     assert "_rich_item_candidates" not in artifact

@@ -204,7 +204,7 @@
     "disposition": "instrumented",
     "operation": "router",
     "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_router_records_one_success_attempt",
-    "exercise_symbol": "route_message"
+    "exercise_symbol": "_route"
   },
   {
     "file": "app/ai/workflow/specialists.py",

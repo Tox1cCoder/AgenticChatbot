@@ -348,14 +348,6 @@ class SkillInstallTransaction:
         }
 
 
-async def recover_install_transactions(
-    user_id: str,
-    installer: SkillBundleInstaller,
-) -> dict[str, Literal["committed", "rolled_back", "failed"]]:
-    async with profile_lock(user_id, SKILLS_MUTATION_SCOPE):
-        return await recover_install_transactions_locked(user_id, installer)
-
-
 async def recover_install_transactions_locked(
     user_id: str,
     installer: SkillBundleInstaller,

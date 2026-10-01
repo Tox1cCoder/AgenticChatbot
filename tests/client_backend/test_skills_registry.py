@@ -465,5 +465,4 @@ def test_install_metadata_defaults_to_not_installed_when_absent(tmp_path):
         content="content",
     )
 
-    assert skill.to_dict()["install"] == {"installed": False}
     assert skill.to_sync_dict()["install"] == {"installed": False}

@@ -245,38 +245,6 @@ def test_delegated_agent_messages_strip_handoff_control_messages():
     assert delegated == [messages[0]]
 
 
-def test_apply_hand_off_records_control_metadata():
-    """Successful hand_off must stamp ``state['context']['handoff']`` so the
-    streamer and delegated-agent scoping can react to it deterministically.
-    """
-    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-    workflow.agents = {"search_agent": object(), "planning_agent": object()}
-
-    state: dict[str, Any] = {
-        "active_agent_id": "planning_agent",
-        "messages": [],
-        "context": {},
-    }
-    tool_outputs = [
-        {
-            "tool_call_id": "handoff-9",
-            "name": "hand_off",
-            "content": '{"hand_off": "search_agent"}',
-        }
-    ]
-
-    new_state = workflow._apply_hand_off_if_present(state, tool_outputs)
-
-    assert new_state["active_agent_id"] == "search_agent"
-    handoff = new_state["context"]["handoff"]
-    assert handoff == {
-        "active": True,
-        "source_agent": "planning_agent",
-        "target_agent": "search_agent",
-        "tool_call_id": "handoff-9",
-    }
-
-
 def test_delegated_agent_messages_passthrough_when_no_active_handoff():
     """Without an active handoff entry, scoping must behave like
     ``_get_current_turn_messages`` — return the slice from the last

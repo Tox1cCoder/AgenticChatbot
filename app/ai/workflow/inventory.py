@@ -119,13 +119,6 @@ class RoutingInventory(BaseModel):
             return CUSTOM_AGENT_NODE
         return BASE_AGENT_NODE_OVERRIDES.get(descriptor.agent_id, descriptor.agent_id)
 
-    def routable_ids(self) -> tuple[str, ...]:
-        return tuple(
-            descriptor.agent_id
-            for descriptor in self.agents
-            if descriptor.enabled and descriptor.attached
-        )
-
 
 def _base_descriptor(agent_id: str, *, enabled: bool = True) -> AgentDescriptor:
     return AgentDescriptor(

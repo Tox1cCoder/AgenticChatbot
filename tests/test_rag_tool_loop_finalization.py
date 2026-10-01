@@ -21,12 +21,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.ai.agents.rag_agent import RAGAgent
-from app.ai.graph import MultiAgentWorkflow
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-
-
-def _make_workflow():
-    return MultiAgentWorkflow.__new__(MultiAgentWorkflow)
 
 
 def test_process_message_agentic_disables_tools_when_force_final_response_flag_set():
@@ -409,94 +404,6 @@ async def test_list_documents_empty_page_still_returns_pagination():
         "total": 7,
         "next_page": None,
     }
-
-
-def _grounded_state(*, evidence_id: str = "E1", filename: str = "report.pdf"):
-    """One RAG turn whose single search call produced one server-owned record."""
-    from uuid import UUID
-
-    artifact = {
-        "tool_call_id": "search-1",
-        "tool": "search_documents",
-        "args": {"action": "search_chunks", "query": "revenue"},
-        "output": f"BEGIN UNTRUSTED EVIDENCE {evidence_id}",
-        "error": None,
-        "status": "success",
-        "rag_evidence": {
-            "records": [
-                {
-                    "evidence_id": evidence_id,
-                    "document_id": str(UUID(int=1)),
-                    "chunk_id": str(UUID(int=11)),
-                    "image_id": None,
-                    "filename": filename,
-                    "page_start": 3,
-                    "page_end": 3,
-                    "section_path": ["Results"],
-                    "modality": "text",
-                    "content": "Revenue rose to 10 million in FY24.",
-                }
-            ],
-            "evidence_ids": [evidence_id],
-            "token_count": 19,
-            "omitted_count": 0,
-            "truncated_count": 0,
-            "count_strategy": "test:fixture",
-        },
-    }
-    return {
-        "conversation_id": "conv-1",
-        "user_id": "owner",
-        "context": {"tool_artifacts": [artifact], "agentic_rag_iteration": 1},
-        "messages": [
-            HumanMessage(content="What was revenue?"),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "search-1",
-                        "name": "search_documents",
-                        "args": {"action": "search_chunks", "query": "revenue"},
-                    }
-                ],
-            ),
-            ToolMessage(
-                content=f"BEGIN UNTRUSTED EVIDENCE {evidence_id}",
-                tool_call_id="search-1",
-                name="search_documents",
-            ),
-        ],
-    }
-
-
-def _grounded_workflow(*, final_text: str, regenerated_answer=None):
-    """A workflow whose RAG agent returns ``final_text`` as its final response."""
-    calls: dict[str, object] = {"regenerations": []}
-
-    async def process_message(_message, _conversation_id, **_kwargs):
-        return AgentResponse(
-            agent_type=AgentType.RAG,
-            agent_id="rag_agent",
-            message=AgentMessage(role=MessageRole.ASSISTANT, content=final_text),
-            metadata={"agentic_mode": True},
-        )
-
-    async def regenerate_grounded_answer(*, reason_codes, **kwargs):
-        calls["regenerations"].append((tuple(reason_codes), kwargs.get("question")))
-        return regenerated_answer
-
-    workflow = _make_workflow()
-    workflow.rag_agent = SimpleNamespace(
-        process_message=process_message,
-        regenerate_grounded_answer=regenerate_grounded_answer,
-    )
-
-    async def history(*_args, **_kwargs):
-        return []
-
-    workflow._get_conversation_history = history
-    workflow._get_state_attachments = lambda _state: []
-    return workflow, calls
 
 
 @pytest.mark.asyncio

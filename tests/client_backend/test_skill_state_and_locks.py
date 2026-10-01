@@ -159,10 +159,7 @@ async def test_lock_filenames_never_embed_raw_scope_text(tmp_path, monkeypatch):
 
 
 def test_lifecycle_audit_never_serializes_paths_or_uploaded_names(tmp_path):
-    from client_backend.services.skill_runtime.audit import (
-        LIFECYCLE_AUDIT_FIELDS,
-        SkillLifecycleAuditWriter,
-    )
+    from client_backend.services.skill_runtime.audit import SkillLifecycleAuditWriter
 
     writer = SkillLifecycleAuditWriter(path=tmp_path / "lifecycle.jsonl")
     writer.write(
@@ -176,7 +173,16 @@ def test_lifecycle_audit_never_serializes_paths_or_uploaded_names(tmp_path):
     )
     payload = json.loads((tmp_path / "lifecycle.jsonl").read_text(encoding="utf-8"))
 
-    assert set(payload) <= LIFECYCLE_AUDIT_FIELDS
+    assert set(payload) == {
+        "timestamp",
+        "event",
+        "user_id",
+        "upload_id",
+        "skill",
+        "source_hash",
+        "status",
+        "metrics",
+    }
     assert "path" not in json.dumps(payload).lower()
     assert "filename" not in json.dumps(payload).lower()
 

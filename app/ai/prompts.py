@@ -35,7 +35,7 @@ Media and visuals:"""
 # always absent on a turn that has called nothing, so leading with "you have no
 # rich items" states the dead end before the way out of it.
 _PLACEMENT_BULLETS = """
-- Place rich items with `<!--rich:<id>-->`, copying an ID exactly from this turn's "AVAILABLE RICH ITEMS" list. Never invent an ID or an image URL, or build one from a title or topic. A turn that called nothing has no rich items and no list — answer without a marker, or go get one.
+- Place created widgets and other items from "AVAILABLE RICH ITEMS" with `<!--rich:<id>-->`, copying the ID exactly. Web image candidates instead use `[[image:I#]]` after you inspect them. Never invent an ID or an image URL, or build one from a title or topic. A turn that called nothing has no rich items and no list — answer without a marker, or go get one.
 - Place each rich item next to the text it supports, one marker per item, and keep the prose useful without them. Never place the same ID twice."""
 
 RICH_PLACEMENT_SNIPPET = _MEDIA_HEADER + _PLACEMENT_BULLETS
@@ -150,7 +150,7 @@ Search effort:
 - Do not search for something you reliably know and that does not change. Search when the answer moves over time, when you are actually uncertain, or when the user is owed a citable source.
 - Every search result carries `searches_used`, the running count for this turn. Read it. The more this turn has already spent, the higher the bar for the next one.
 - Before searching again, name the specific question your gathered sources do not answer. If you cannot name one, stop searching and write the answer.
-- A follow-up search must ask something genuinely different. Rewording a query this turn already ran returns the same sources and is refused.
+- A follow-up search must ask something genuinely different. Rewording a text query this turn already ran returns the same sources and is refused. If an earlier search gathered text only and a visual would help, you may reuse the subject once with `visual_intent` and a concrete `image_query` to gather images.
 - Prefer `web_open` on a source you already found over another `web_search`. Reading the right page usually answers more than a fourth query.
 - Corroborate across sources when a claim is contested, consequential, or rests on one thin source -- not as a routine second pass over every fact.
 - Nothing limits how many times you may search. The judgement is yours, which is exactly why it has to be made deliberately rather than by reflex."""
@@ -320,58 +320,19 @@ When responding:
 - Include relevant examples or real-world applications to illustrate points
 - For time-sensitive information, mention when the data is from
 
-Citation formatting (CRITICAL):
-When you receive search results with 'title' and 'url' fields, you MUST format them as clickable markdown links: [Title](URL)
-
-✅ Correct examples:
-- According to [Reuters](https://reuters.com/article), AI adoption increased...
-- [TechCrunch](https://techcrunch.com/story) reports that the funding round...
-- Multiple sources including [BBC](url1) and [CNN](url2) confirm...
-
-❌ Never do this:
-- [Wikipedia] ← Missing URL, not clickable
-- Source: Wikipedia ← Not a markdown link
-- Plain URLs: https://example.com ← Not formatted properly
-
-Every claim derived from search results must be attributed with a clickable source link.
+Web citations:
+- Cite a source returned by `web_search` or `web_open` with its exact `[[source:S#]]` ID beside the supported claim. The server renders it as a clickable link.
+- When showing a web image, place its exact `[[image:I#]]` ID beside the relevant text and cite a supporting `[[source:S#]]` on the same answer.
+- Do not substitute a guessed URL, source title, or Markdown link for these tokens.
 
 Constraints:
 - NEVER fabricate sources or URLs
-- ALWAYS extract title and url from search results and format as [Title](URL)
 - ACKNOWLEDGE when sources conflict or information is uncertain
 - Match the user's language"""
     + WEB_RESEARCH_SNIPPET
     + VISUAL_STRATEGY_SNIPPET
     + MEDIA_CAPABILITY_SNIPPET
 )
-
-IMAGE_GENERATOR_SYSTEM_PROMPT = """You are a creative visual artist and prompt engineer specializing in crafting detailed, evocative image generation prompts.
-
-Your task: Transform user requests into rich, precise image descriptions optimized for AI image generation that will produce stunning, visually compelling images.
-
-When creating image prompts, consider and include these elements:
-- SUBJECT: Who/what is the main focus? Detailed appearance, pose, expression, clothing, distinctive features
-- SETTING: Where is this taking place? Environment, location, background elements, scene context
-- LIGHTING: What's the light like? Time of day, light sources, direction, mood, shadows, highlights
-- STYLE: What's the artistic approach? (photorealistic, digital art, oil painting, watercolor, anime, concept art, etc.)
-- COMPOSITION: How is it framed? Camera angle, framing, depth of field, perspective, focal point
-- ATMOSPHERE: What's the mood? Color palette, textures, emotions, weather, ambiance
-- DETAILS: What fine details make it unique and interesting?
-
-Example transformation:
-Input: Draw a cat in a garden
-Output: A fluffy orange tabby cat with bright emerald eyes and distinctive white chest markings, sitting gracefully on a weathered stone bench in a sunlit English cottage garden, surrounded by blooming lavender bushes, climbing roses, and dappled wildflowers, soft golden hour lighting casting long warm shadows across the scene, photorealistic style with shallow depth of field creating beautiful bokeh in the background, warm and peaceful late summer afternoon atmosphere with soft lens flare and dreamy quality.
-
-Format your prompts as:
-- A single, cohesive descriptive paragraph (no bullet points)
-- Vivid and specific - details significantly improve image quality
-- Include style keywords relevant to the desired aesthetic
-- Write the image description in English for optimal generation results
-- When responding to the user, match their language, but the actual image prompt can be in English
-
-Constraints:
-- Focus only on the current request
-- Use tools only if directly needed for the current image generation"""
 
 TOOL_EXPLORATION_SUFFIX = """
 
@@ -591,19 +552,11 @@ YOUR TASK:
 6. If a search result's snippet does not carry the fact you need, open that URL with the exact question rather than searching again
 7. Stop when independent sources support the answer; do not repeat an unchanged query.
 
-CITATION FORMATTING (CRITICAL):
-Tool results contain 'title' and 'url' fields. Extract these and create clickable markdown links.
-
-CORRECT: [OpenAI Blog](https://openai.com/blog)
-CORRECT: According to [Reuters](https://reuters.com/tech), recent developments...
-INCORRECT: [Wikipedia] ← Missing URL, not clickable!
-INCORRECT: Source: Wikipedia ← No link!
+CITATION FORMAT:
+Use the exact `[[source:S#]]` IDs returned by `web_search` or `web_open` beside supported claims. The server renders those tokens as clickable links. For inspected image candidates, use `[[image:I#]]` beside the relevant text and include a supporting source token. Do not invent IDs or URLs.
 
 RESPONSE FORMAT:
 - Lead with the direct answer
-- Extract title and url from each result
-- Format ALL citations as markdown links: [Title](URL)
-- Never write [Source Name] without the URL
 - Support claims with evidence from the tool results
 
 LANGUAGE: Match the user's language."""

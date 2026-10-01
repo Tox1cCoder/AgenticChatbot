@@ -25,21 +25,3 @@ class ConversationFactory:
             "project_id": conversation_data.project_id,
             **timestamps,
         }
-
-    @staticmethod
-    def create_from_dict(conversation_data: dict[str, Any]) -> dict[str, Any]:
-        """Create Conversation data dictionary from dictionary"""
-        timestamps = TimestampUtils.get_timestamp_dict(
-            created_at=conversation_data.get("created_at"),
-            updated_at=conversation_data.get("updated_at"),
-        )
-
-        return {
-            "id": conversation_data.get("id", uuid4()),
-            "owner_id": conversation_data["owner_id"],
-            "title": conversation_data["title"],
-            "persona_prompt": conversation_data.get("persona_prompt"),
-            "planning_mode_enabled": conversation_data.get("planning_mode_enabled", False),
-            "project_id": conversation_data.get("project_id"),
-            **timestamps,
-        }

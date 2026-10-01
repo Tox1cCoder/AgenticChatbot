@@ -125,6 +125,5 @@ def test_non_answer_prompts_unchanged():
         prompts.ROUTER_SYSTEM_PROMPT,
         prompts.TITLE_GENERATION_PROMPT,
         prompts.PLANNING_EXECUTION_PROMPT,
-        prompts.IMAGE_GENERATOR_SYSTEM_PROMPT,
     ):
         assert "Show, don't only tell:" not in prompt

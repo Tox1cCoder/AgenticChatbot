@@ -100,12 +100,6 @@ class SkillCatalogService:
         """
         return await self.snapshot(force=True, sync=sync)
 
-    async def retry_pending_sync(self) -> dict[str, Any]:
-        """Re-attempt publication for a catalog committed while offline."""
-        if self._persisted_sync_status() == "synced":
-            return await self.snapshot(force=False, sync=False)
-        return await self.snapshot(force=False, sync=True)
-
     async def _refresh_if_stale(self, *, force: bool) -> None:
         """Rescan at most once for any number of concurrent callers.
 
@@ -255,9 +249,3 @@ def get_skill_catalog_service() -> SkillCatalogService:
     if _catalog_service is None:
         _catalog_service = SkillCatalogService()
     return _catalog_service
-
-
-def close_skill_catalog_service() -> None:
-    """Drop the cached service so the next call rebuilds its state."""
-    global _catalog_service
-    _catalog_service = None

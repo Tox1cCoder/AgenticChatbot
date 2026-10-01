@@ -55,10 +55,6 @@ class DiscoveredCollection:
     manifest: CollectionManifest
     skills: list[DiscoveredSkill] = field(default_factory=list)
 
-    @property
-    def is_single_skill(self) -> bool:
-        return len(self.skills) == 1
-
 
 @dataclass(frozen=True)
 class DiscoveredSkill:

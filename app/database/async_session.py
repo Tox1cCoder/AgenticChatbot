@@ -53,16 +53,6 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
-def get_async_engine() -> AsyncEngine:
-    """Return the shared async engine."""
-    return async_engine
-
-
-def get_async_session_factory() -> async_sessionmaker[AsyncSession]:
-    """Return the shared async session factory."""
-    return AsyncSessionLocal
-
-
 async def dispose_async_engine() -> None:
     """Close pooled async connections. Called on application shutdown."""
     await async_engine.dispose()

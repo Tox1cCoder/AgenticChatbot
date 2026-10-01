@@ -15,11 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from client_backend.services.skill_catalog import (
-    SkillCatalogService,
-    close_skill_catalog_service,
-    get_skill_catalog_service,
-)
+from client_backend.services.skill_catalog import SkillCatalogService
 
 USER_ID = "user-a"
 
@@ -250,7 +246,7 @@ async def test_disconnected_bridge_reports_disconnected_without_calling_it(catal
 
 
 @pytest.mark.asyncio
-async def test_pending_sync_status_persists_and_can_be_retried(catalog_env):
+async def test_pending_sync_status_persists_until_a_sync_succeeds(catalog_env):
     catalog_env.bridge.raise_on_refresh = RuntimeError("offline")
     await catalog_env.service.after_mutation(sync=True)
 
@@ -258,19 +254,9 @@ async def test_pending_sync_status_persists_and_can_be_retried(catalog_env):
     assert (await reloaded.snapshot(force=True))["catalogSyncStatus"] == "pending"
 
     catalog_env.bridge.raise_on_refresh = None
-    retried = await reloaded.retry_pending_sync()
+    synced = await reloaded.snapshot(sync=True)
 
-    assert retried["catalogSyncStatus"] == "synced"
-
-
-@pytest.mark.asyncio
-async def test_retry_is_a_no_op_once_synced(catalog_env):
-    await catalog_env.service.after_mutation(sync=True)
-    calls_after_sync = catalog_env.bridge.refresh_calls
-
-    await catalog_env.service.retry_pending_sync()
-
-    assert catalog_env.bridge.refresh_calls == calls_after_sync
+    assert synced["catalogSyncStatus"] == "synced"
 
 
 @pytest.mark.asyncio
@@ -314,13 +300,3 @@ async def test_unreadable_state_is_discarded_rather_than_crashing(catalog_env):
     snapshot = await catalog_env.service.snapshot(force=True)
 
     assert snapshot["catalogGeneration"] == 1
-
-
-def test_service_singleton_is_resettable():
-    first = get_skill_catalog_service()
-    assert get_skill_catalog_service() is first
-
-    close_skill_catalog_service()
-
-    assert get_skill_catalog_service() is not first
-    close_skill_catalog_service()

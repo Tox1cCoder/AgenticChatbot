@@ -2,7 +2,6 @@
 
 Covers:
 * normalization (casefold + path stripping + NFC)
-* repository ``filename_exists_in_conversation`` lookup
 * ``DocumentService.validate_and_create_document`` rejecting duplicates
 * repository create translating IntegrityError into the domain exception
 """
@@ -35,24 +34,11 @@ def test_normalize_rejects_empty_inputs():
         normalize_document_filename("   ")
 
 
-def test_repository_filename_exists_in_conversation_returns_true_when_present():
-    from app.repositories.document import DocumentRepository
-
-    session = MagicMock()
-    query = MagicMock()
-    query.filter.return_value = query
-    session.query.return_value = query
-    session.query.return_value.scalar.return_value = True
-
-    session_factory = MagicMock()
-    session_factory.return_value.__enter__.return_value = session
-
-    repo = DocumentRepository(session_factory=session_factory)
-    assert repo.filename_exists_in_conversation(uuid4(), "report.pdf") is True
-
-
 def test_service_rejects_duplicate_filename_before_create():
+    from types import SimpleNamespace
+
     from app.core.exceptions.validation import DuplicateDocumentFilenameError
+    from app.schemas.document import DocumentStatus
     from app.services.document_service import DocumentService
 
     service = object.__new__(DocumentService)
@@ -65,7 +51,9 @@ def test_service_rejects_duplicate_filename_before_create():
     service.processing_service = processing_service
 
     document_repository = MagicMock()
-    document_repository.filename_exists_in_conversation.return_value = True
+    document_repository.get_by_conversation_and_filename_key.return_value = SimpleNamespace(
+        id=uuid4(), status=DocumentStatus.READY.value
+    )
     document_repository.create.side_effect = AssertionError(
         "Repository create must not be called when a duplicate exists"
     )

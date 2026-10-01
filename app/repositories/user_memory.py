@@ -123,12 +123,6 @@ class UserMemoryRepository(RepositorySessionMixin):
             return None
         return self._run(self._resolve_project_work(user_id, conversation_id))
 
-    async def aresolve_project_id(self, user_id: str, conversation_id: str | None) -> str | None:
-        """Async twin of :meth:`resolve_project_id`."""
-        if not conversation_id:
-            return None
-        return await self._arun(self._resolve_project_work(user_id, conversation_id))
-
     # ------------------------------------------------------------------
     # Writes
     # ------------------------------------------------------------------

@@ -623,10 +623,6 @@ def test_get_document_images_uses_scoped_repository_when_scope_present(tmp_path)
 
     image_repo = MagicMock()
     image_repo.get_by_document_for_scope.return_value = [fake_image]
-    # Catch accidental fallthrough to unscoped path.
-    image_repo.get_by_document_id.side_effect = AssertionError(
-        "Unscoped lookup must not be used when scope is provided"
-    )
 
     document_id = uuid4()
     with patch("app.ai.agents.rag_agent.DocumentImageRepository") as repo_cls:

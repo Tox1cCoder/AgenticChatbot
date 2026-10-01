@@ -2,9 +2,7 @@
 
 from types import SimpleNamespace
 
-from app.ai import graph as graph_module
 from app.ai.hitl_config import calls_requiring_approval
-from app.ai.workflow import tool_loop as tool_loop_module
 
 
 class _FakeManager:
@@ -13,28 +11,6 @@ class _FakeManager:
 
     def get_server_for_tool(self, tool):
         return self._mapping.get(id(tool))
-
-
-def _workflow_stub(tool_map, manager, monkeypatch):
-    """A bare object exposing just what _needs_approval / _should_call_tools touch."""
-    wf = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
-    agent = object()
-    wf.agents = {"chat_agent": agent}
-
-    async def _fake_tool_map(*_a, **_k):
-        return tool_map
-
-    async def _fake_manager():
-        return manager
-
-    # ``_run_agent_in_isolated_context`` still lives in ``app.ai.graph``; the
-    # tool/HITL helpers (``_needs_approval`` etc.) were relocated to
-    # ``app.ai.workflow.tool_loop`` (Task 8), so patch the names where each
-    # consumer now resolves them.
-    monkeypatch.setattr(graph_module, "ensure_agent_tool_map", _fake_tool_map)
-    monkeypatch.setattr(tool_loop_module, "ensure_agent_tool_map", _fake_tool_map)
-    monkeypatch.setattr(tool_loop_module, "get_global_mcp_manager", _fake_manager)
-    return wf
 
 
 def _policy(*, master_enabled=True, global_tools=(), client_mcp=None):

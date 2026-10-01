@@ -76,7 +76,7 @@ def test_custom_agent_prompt_mentions_missing_device_capabilities():
 # --------------------------------------------------------------------------- #
 
 
-from langchain_core.messages import HumanMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import HumanMessage  # noqa: E402
 
 from app.ai.graph import MultiAgentWorkflow  # noqa: E402
 
@@ -96,35 +96,6 @@ def _workflow():
     wf._runtime_model_resolver = None
     wf._model_usage_recorder = None
     return wf
-
-
-def _custom_state(runtime_id, *, messages=None, iteration_count=0):
-    return {
-        "active_agent_id": runtime_id,
-        "custom_agents": {
-            runtime_id: {
-                "id": runtime_id.split(":", 1)[1],
-                "runtime_agent_id": runtime_id,
-                "name": "Analyst",
-                "prompt": "p",
-                "model_request": {"provider_type": "openai", "model": "gpt-4.1-mini"},
-                "tool_refs": [],
-                "skill_refs": [],
-            }
-        },
-        "messages": messages or [],
-        "iteration_count": iteration_count,
-        "context": {},
-    }
-
-
-def test_no_custom_agents_keeps_existing_chat_path():
-    wf = _workflow()
-    # A base agent is its own node.
-    assert wf._route_target_for({"custom_agents": {}}, "chat_agent") == "chat_agent"
-    assert wf._route_target_for({"custom_agents": {}}, "rag_agent") == "rag_agent"
-    # A custom id nobody attached is not reachable as the custom node.
-    assert wf._route_target_for({"custom_agents": {}}, "custom_agent:abc") == "custom_agent:abc"
 
 
 def test_initial_state_injects_attached_custom_agents():
@@ -151,36 +122,11 @@ def test_initial_state_injects_attached_custom_agents():
     assert state["custom_agents"][rid]["name"] == "Analyst"
 
 
-def test_an_attached_custom_agent_routes_to_the_single_custom_node():
-    wf = _workflow()
-    rid = f"custom_agent:{uuid4()}"
-    state = _custom_state(rid)
-
-    assert wf._route_target_for(state, rid) == "custom_agent"
-    assert not wf._is_attached_custom_agent(state, f"custom_agent:{uuid4()}")
-
-
 # --------------------------------------------------------------------------- #
 # Dynamic router + dynamic handoff (Task 10)
 # --------------------------------------------------------------------------- #
 
-import json  # noqa: E402
-
-import pytest  # noqa: E402
-
-from app.ai.agents.router import Router  # noqa: E402
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole  # noqa: E402
-from app.core.config import settings  # noqa: E402
-
-
-def _handoff_output(target, tool_call_id="h1"):
-    return [
-        {
-            "name": "hand_off",
-            "content": json.dumps({"hand_off": target}),
-            "tool_call_id": tool_call_id,
-        }
-    ]
 
 
 def _multi_custom_state(selected, ids):
@@ -194,99 +140,6 @@ def _multi_custom_state(selected, ids):
             for i, cid in enumerate(ids)
         },
     }
-
-
-@pytest.mark.asyncio
-async def test_attached_custom_agent_is_a_routable_target_chosen_by_the_model():
-    """The model selects a custom agent from the inventory.
-
-    There is no explicit-name matcher: naming an agent in the message must not
-    select it in Python. It only makes the model's choice more likely.
-    """
-    from app.ai.workflow.contracts import RoutingDecision
-
-    rid = f"custom_agent:{uuid4()}"
-    descriptors = [
-        {
-            "runtime_agent_id": rid,
-            "name": "Data Analyst",
-            "description": "analytics",
-            "agent_order": 0,
-        }
-    ]
-
-    class _Service:
-        def __init__(self):
-            self.last_inventory = None
-
-        async def route(self, context, inventory, *, user_id, model_request, request_id):
-            self.last_inventory = inventory
-            return RoutingDecision(agent_id=rid, confidence=0.9, reason="analytics specialist")
-
-    service = _Service()
-    router = Router(recorder=None, routing_service=service)
-    msg = AgentMessage(
-        role=MessageRole.USER,
-        content="Please ask the Data Analyst to summarize this.",
-        metadata={},
-    )
-
-    result = await router.route_message(
-        msg, ["chat_agent", "rag_agent", rid], custom_agent_descriptors=descriptors
-    )
-
-    assert result == rid
-    assert service.last_inventory.is_routable(rid) is True
-    assert service.last_inventory.resolve_node(rid) == "custom_agent"
-
-
-@pytest.mark.asyncio
-async def test_naming_an_agent_does_not_select_it_without_the_model():
-    """A message naming an agent still routes wherever the model decides."""
-    from app.ai.workflow.contracts import RoutingDecision
-
-    rid = f"custom_agent:{uuid4()}"
-
-    class _Service:
-        async def route(self, context, inventory, *, user_id, model_request, request_id):
-            return RoutingDecision(agent_id="chat_agent", confidence=0.6, reason="general help")
-
-    router = Router(recorder=None, routing_service=_Service())
-    result = await router.route_message(
-        AgentMessage(role=MessageRole.USER, content=f"use {rid} now", metadata={}),
-        ["chat_agent", rid],
-        custom_agent_descriptors=[{"runtime_agent_id": rid, "name": "Data Analyst"}],
-    )
-    assert result == "chat_agent"
-
-
-def test_base_agent_can_handoff_to_custom_agent():
-    wf = _workflow()
-    rid = f"custom_agent:{uuid4()}"
-    state = _multi_custom_state("chat_agent", [rid])
-    new_state = wf._apply_hand_off_if_present(state, _handoff_output(rid))
-    assert new_state["active_agent_id"] == rid
-    assert new_state["context"]["handoff"]["source_agent"] == "chat_agent"
-    assert new_state["context"]["handoff"]["target_agent"] == rid
-
-
-def test_custom_agent_can_handoff_to_base_agent():
-    wf = _workflow()
-    rid = f"custom_agent:{uuid4()}"
-    state = _multi_custom_state(rid, [rid])
-    new_state = wf._apply_hand_off_if_present(state, _handoff_output("search_agent"))
-    assert new_state["active_agent_id"] == "search_agent"
-    assert new_state["context"]["handoff"]["source_agent"] == rid
-    assert new_state["context"]["handoff"]["target_agent"] == "search_agent"
-
-
-def test_custom_agent_can_handoff_to_another_attached_custom_agent():
-    wf = _workflow()
-    rid1 = f"custom_agent:{uuid4()}"
-    rid2 = f"custom_agent:{uuid4()}"
-    state = _multi_custom_state(rid1, [rid1, rid2])
-    new_state = wf._apply_hand_off_if_present(state, _handoff_output(rid2))
-    assert new_state["active_agent_id"] == rid2
 
 
 def test_custom_agent_handoff_targets_are_dynamic_graph_targets():
@@ -407,110 +260,13 @@ def test_custom_agent_system_prompt_describes_dynamic_handoff_targets():
     assert "coordinate the work" not in prompt
 
 
-def test_no_custom_agents_regression_across_paths():
-    """With no custom agents, routing/handoff/request/display behave as before."""
+def test_workflow_requests_default_to_no_custom_agents():
     from app.ai.schemas import WorkflowExecutionRequest as AIWorkflowExecutionRequest
     from app.schemas.workflow import WorkflowExecutionRequest
 
-    wf = _workflow()
-    # Routing: base agents unchanged, no custom node reachable.
-    for base in ("chat_agent", "rag_agent", "search_agent", "canvas_agent", "planning_agent"):
-        assert wf._route_target_for({"custom_agents": {}}, base) == base
-    # Handoff to a base target still works without any custom agents.
-    state = {
-        "active_agent_id": "chat_agent",
-        "delegation_count": 0,
-        "messages": [HumanMessage(content="hi")],
-        "context": {},
-        "custom_agents": {},
-    }
-    out = wf._apply_hand_off_if_present(state, _handoff_output("search_agent"))
-    assert out["active_agent_id"] == "search_agent"
     # Workflow requests default custom_agents to empty for both schemas.
     assert WorkflowExecutionRequest(message="x").custom_agents == {}
     assert AIWorkflowExecutionRequest(message="x").custom_agents == {}
-
-
-def test_handoff_to_unattached_custom_agent_rewrites_its_single_tool_result():
-    wf = _workflow()
-    rid = f"custom_agent:{uuid4()}"
-    bogus = f"custom_agent:{uuid4()}"
-    state = _multi_custom_state("chat_agent", [rid])
-    outputs = _handoff_output(bogus)
-
-    new_state = wf._apply_hand_off_if_present(state, outputs)
-
-    # Selection remains unchanged and the interpreter has not appended a
-    # duplicate message. The normal tool-output writer creates the sole pair.
-    assert new_state["active_agent_id"] == "chat_agent"
-    assert len(new_state["messages"]) == 1
-    wf._apply_tool_outputs_to_state(new_state, tool_outputs=outputs)
-    handoff_messages = [message for message in new_state["messages"] if message.name == "hand_off"]
-    assert len(handoff_messages) == 1
-    last = handoff_messages[0]
-    assert isinstance(last, ToolMessage)
-    assert "not a reachable target" in last.content
-
-
-@pytest.mark.parametrize(
-    ("outputs", "expected_error"),
-    [
-        (
-            [
-                *_handoff_output("search_agent", tool_call_id="h1"),
-                *_handoff_output("planning_agent", tool_call_id="h2"),
-            ],
-            "exactly one hand_off call",
-        ),
-        (
-            [
-                {
-                    "name": "hand_off",
-                    "content": '{"hand_off": "search_agent", "reason": "legacy"}',
-                    "tool_call_id": "h1",
-                }
-            ],
-            "exactly one target agent",
-        ),
-    ],
-)
-def test_handoff_rewrites_noncanonical_or_multiple_outputs(outputs, expected_error):
-    wf = _workflow()
-    state = _multi_custom_state("chat_agent", [])
-
-    wf._apply_hand_off_if_present(state, outputs)
-
-    assert state["active_agent_id"] == "chat_agent"
-    assert all(expected_error in output["content"] for output in outputs)
-
-
-def test_handoff_rejects_self_and_revisited_targets():
-    wf = _workflow()
-    state = _multi_custom_state("chat_agent", [])
-    self_output = _handoff_output("chat_agent")
-
-    wf._apply_hand_off_if_present(state, self_output)
-
-    assert "not a reachable target" in self_output[0]["content"]
-    state["context"]["agents_invoked"] = [{"id": "search_agent"}]
-    repeated_output = _handoff_output("search_agent")
-    wf._apply_hand_off_if_present(state, repeated_output)
-
-    assert "already handled this turn" in repeated_output[0]["content"]
-
-
-def test_handoff_rejects_when_configured_depth_is_exhausted(monkeypatch):
-    wf = _workflow()
-    state = _multi_custom_state("chat_agent", [])
-    # Delegation depth is turn-scoped context, not a top-level state field.
-    state["context"] = {**(state.get("context") or {}), "delegation_count": 1}
-    outputs = _handoff_output("search_agent")
-    monkeypatch.setattr(settings, "max_handoff_delegation_depth", 1)
-
-    wf._apply_hand_off_if_present(state, outputs)
-
-    assert state["active_agent_id"] == "chat_agent"
-    assert "maximum delegation depth of 1" in outputs[0]["content"]
 
 
 # --------------------------------------------------------------------------- #
@@ -543,8 +299,13 @@ def test_finalize_response_adds_canonical_custom_agent_metadata():
 def test_finalize_response_adds_handoff_metadata():
     wf = _workflow()
     rid = f"custom_agent:{uuid4()}"
-    state = _multi_custom_state("chat_agent", [rid])
-    wf._apply_hand_off_if_present(state, _handoff_output(rid, tool_call_id="h1"))
+    state = _multi_custom_state(rid, [rid])
+    state["context"]["handoff"] = {
+        "active": True,
+        "source_agent": "chat_agent",
+        "target_agent": rid,
+        "tool_call_id": "h1",
+    }
 
     response = AgentResponse(
         agent_type=AgentType.CHAT,
@@ -697,7 +458,7 @@ def test_agent_trail_records_router_selection_and_handoff():
     # Simulate the router having selected chat_agent for this turn.
     wf._record_agent_invocation(state, "chat_agent", via="router")
     # Then chat_agent hands off to the custom agent.
-    wf._apply_hand_off_if_present(state, _handoff_output(rid))
+    wf._record_agent_invocation(state, rid, via="handoff")
 
     trail = state["context"]["agents_invoked"]
     assert [e["id"] for e in trail] == ["chat_agent", rid]

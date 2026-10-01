@@ -76,8 +76,7 @@ def test_a_single_skill_keeps_the_archive_root_as_its_bundle(tmp_path):
 
     collection = discover_collection(tmp_path, fallback_name="demo")
 
-    assert collection.is_single_skill
-    assert hasattr(collection, "skills"), "discovery must retain the exact SKILL.md"
+    assert len(collection.skills) == 1
     discovered = collection.skills[0]
     assert discovered.bundle_root == tmp_path
     assert discovered.skill_file == tmp_path / "skills" / "demo" / "SKILL.md"
@@ -89,7 +88,6 @@ def test_a_collection_gives_each_skill_its_own_root(tmp_path):
 
     collection = discover_collection(tmp_path, fallback_name="library")
 
-    assert not collection.is_single_skill
     assert [skill.bundle_root.name for skill in collection.skills] == ["one", "two"]
 
 

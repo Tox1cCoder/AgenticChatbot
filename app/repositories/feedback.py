@@ -24,13 +24,6 @@ class FeedbackCRUDStrategy(
         statement = select(Feedback).where(Feedback.message_id == message_id)
         return db.execute(statement).scalar_one_or_none()
 
-    def get_by_user_id(self, db: Session, user_id: UUID) -> list[Feedback]:
-        """Get all feedback by user ID"""
-        statement = (
-            select(Feedback).where(Feedback.user_id == user_id).order_by(Feedback.created_at.desc())
-        )
-        return list(db.execute(statement).scalars().all())
-
     def get_rating_for_message(self, db: Session, message_id: UUID) -> float | None:
         """Get rating for a message"""
         statement = select(Feedback.rating).where(Feedback.message_id == message_id)
@@ -50,11 +43,6 @@ class FeedbackRepository:
         """Get feedback by message ID (1-1 relationship per ERD)"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_message_id(session, message_id)
-
-    def get_by_user_id(self, user_id: UUID) -> list[Feedback]:
-        """Get all feedback by user ID (no pagination needed for user's own feedback)"""
-        with self.session_factory() as session:
-            return self._crud_strategy.get_by_user_id(session, user_id)
 
     def get_rating_for_message(self, message_id: UUID) -> float | None:
         """Get rating for a message"""

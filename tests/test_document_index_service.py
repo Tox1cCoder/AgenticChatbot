@@ -687,11 +687,9 @@ def test_ensure_collection_validates_dimension_match():
 
 
 def test_index_document_calls_bulk_mark_indexed(monkeypatch=None):
-    """T005 — T004: mark_indexed_bulk is called once; mark_indexed is NOT called.
+    """T005 — T004: mark_indexed_bulk is called once with all chunk IDs.
 
-    After T004, DocumentIndexService.index_document calls
-    chunk_repository.mark_indexed_bulk once with all chunk IDs instead of
-    calling mark_indexed once per chunk.
+    The per-chunk ``mark_indexed`` it replaced has been deleted.
     """
     import pytest  # noqa: F401 — needed for assertions in this scope
 
@@ -717,10 +715,6 @@ def test_index_document_calls_bulk_mark_indexed(monkeypatch=None):
     # Bulk mark is called exactly once.
     assert repo.mark_indexed_bulk.call_count == 1, (
         f"mark_indexed_bulk must be called once; got {repo.mark_indexed_bulk.call_count}"
-    )
-    # Per-chunk mark_indexed must NOT be called.
-    assert repo.mark_indexed.call_count == 0, (
-        f"mark_indexed (per-chunk) must not be called; got {repo.mark_indexed.call_count}"
     )
     # The IDs passed to bulk mark match the persisted chunk IDs.
     bulk_call = repo.mark_indexed_bulk.call_args

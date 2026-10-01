@@ -14,8 +14,7 @@ from the snapshot's pending interrupts, not from committed state.
 
 from types import SimpleNamespace
 
-from app.ai.graph import MultiAgentWorkflow
-from app.ai.hitl_config import build_interrupt_response
+from app.ai.hitl_config import build_interrupt_response, pending_interrupt_payload
 from app.ai.utils import (
     apply_hitl_decisions,
     build_interrupt_resume_payload,
@@ -46,41 +45,15 @@ STALE_CONTEXT = {
 }
 
 
-def test_recovers_action_requests_from_live_interrupt_value():
-    snapshot = _snapshot(
-        interrupts=[_interrupt({"action_requests": [LIVE_CALL], "metadata": {"device_id": "d1"}})],
-        context=STALE_CONTEXT,
-    )
-    payload = MultiAgentWorkflow._interrupt_payload_from_pending_interrupts(snapshot)
-    assert payload is not None
-    ids = [r.get("id") or r.get("tool_call_id") for r in payload["action_requests"]]
-    assert ids == ["0927a7ed-59bf-434d-8c06-9d7c225ad75e"]
-    assert payload["metadata"] == {"device_id": "d1"}
-
-
-def test_recovers_from_task_interrupts_when_aggregate_empty():
-    task = SimpleNamespace(interrupts=(_interrupt({"action_requests": [LIVE_CALL]}),))
-    snapshot = _snapshot(interrupts=(), tasks=[task], context=STALE_CONTEXT)
-    payload = MultiAgentWorkflow._interrupt_payload_from_pending_interrupts(snapshot)
-    assert payload is not None
-    assert payload["action_requests"][0]["id"] == "0927a7ed-59bf-434d-8c06-9d7c225ad75e"
-
-
-def test_returns_none_when_no_pending_interrupts():
-    snapshot = _snapshot(interrupts=(), tasks=(), context=STALE_CONTEXT)
-    assert MultiAgentWorkflow._interrupt_payload_from_pending_interrupts(snapshot) is None
-
-
 def test_approve_all_roundtrip_uses_live_ids_not_stale_state():
     """End-to-end: stale committed state + live interrupt -> 'Approve All' must resolve."""
     snapshot = _snapshot(
         interrupts=[_interrupt({"action_requests": [LIVE_CALL]})],
         context=STALE_CONTEXT,
     )
-    interrupt_payload = MultiAgentWorkflow._interrupt_payload_from_pending_interrupts(snapshot)
+    interrupt_payload = pending_interrupt_payload(snapshot).to_interrupt_payload()
 
     # Server builds the UI-facing response from the recovered payload.
-    interrupt_payload["interrupt_id"] = "int-1"
     response = build_interrupt_response(interrupt_payload, "thread-1", "conv-1")
     action_requests = response["action_requests"]
 

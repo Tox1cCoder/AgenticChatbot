@@ -15,7 +15,6 @@ from client_backend.services.local_skills_registry import LocalSkillsRegistry
 from client_backend.services.skill_runtime.collection import DiscoveredSkill
 from client_backend.services.skill_runtime.environment import SkillEnvironmentManager
 from client_backend.services.skill_runtime.install import SkillBundleInstaller, SkillInstallSpec
-from client_backend.services.skill_runtime.locks import SKILLS_MUTATION_SCOPE, profile_lock
 from shared.skills.errors import SKILL_INSTALL_CONFLICT, SkillRuntimeError
 
 USER_ID = "user-a"
@@ -202,7 +201,7 @@ async def test_recovery_resumes_an_incomplete_precommit_rollback(transaction_env
     assert json.loads(journal.read_text(encoding="utf-8"))["state"] == "rolling_back"
 
     monkeypatch.setattr(transactions.shutil, "rmtree", real_rmtree)
-    outcomes = await transactions.recover_install_transactions(
+    outcomes = await transactions.recover_install_transactions_locked(
         USER_ID,
         transaction_env.installer,
     )
@@ -278,46 +277,13 @@ async def test_committed_recovery_rejects_tampered_bundle_content(transaction_en
     )
     from client_backend.services.skill_runtime import transactions
 
-    outcomes = await transactions.recover_install_transactions(USER_ID, transaction_env.installer)
+    outcomes = await transactions.recover_install_transactions_locked(
+        USER_ID, transaction_env.installer
+    )
 
     assert outcomes == {"tx-tampered": "failed"}
 
 
-@pytest.mark.asyncio
-async def test_recovery_holds_the_global_mutation_lock(transaction_env, monkeypatch):
-    one = _write_skill(transaction_env.root / "sources" / "one", "one", "original")
-    await transaction_env.installer.install_many(
-        [await _spec(transaction_env.installer, one)], transaction_id="tx-lock"
-    )
-    from client_backend.services.skill_runtime import transactions
-
-    entered = threading.Event()
-    release = threading.Event()
-    real_hash = transactions.compute_skill_bundle_hash
-
-    def blocking_hash(path: Path):
-        entered.set()
-        assert release.wait(timeout=5)
-        return real_hash(path)
-
-    monkeypatch.setattr(transactions, "compute_skill_bundle_hash", blocking_hash)
-    recovery = asyncio.create_task(
-        transactions.recover_install_transactions(USER_ID, transaction_env.installer)
-    )
-    assert await asyncio.to_thread(entered.wait, 5)
-    acquired = asyncio.Event()
-
-    async def competing_mutation() -> None:
-        async with profile_lock(USER_ID, SKILLS_MUTATION_SCOPE):
-            acquired.set()
-
-    competitor = asyncio.create_task(competing_mutation())
-    await asyncio.sleep(0.05)
-    assert not acquired.is_set()
-    release.set()
-    await recovery
-    await competitor
-    assert acquired.is_set()
 
 
 @pytest.mark.asyncio
@@ -327,7 +293,9 @@ async def test_recovery_removes_an_unjournaled_cancelled_install_stage(transacti
     (orphan / "SKILL.md").write_text("partial", encoding="utf-8")
     from client_backend.services.skill_runtime import transactions
 
-    outcomes = await transactions.recover_install_transactions(USER_ID, transaction_env.installer)
+    outcomes = await transactions.recover_install_transactions_locked(
+        USER_ID, transaction_env.installer
+    )
 
     assert outcomes == {}
     assert not orphan.exists()

@@ -25,41 +25,19 @@ def test_rich_image_metrics_are_bounded_and_content_free():
     metrics = RichImageMetrics()
     secret = f"https://secret.example/{uuid4()}"
 
-    metrics.record_discovery(provider="brave_image_search", result_count=6)
-    metrics.record_candidate(provider="tavily", outcome="eligible")
-    metrics.record_candidate(provider=secret, outcome=secret)
-    metrics.record_fetch(provider="brave", outcome="success", duration_seconds=0.2)
+    metrics.record_fetch(provider="brave_image_search", outcome="success", duration_seconds=0.2)
+    metrics.record_fetch(provider="tavily", outcome="timeout", duration_seconds=0.3)
     metrics.record_fetch(provider=secret, outcome=secret, duration_seconds=0.1)
 
     payload = metrics.render().decode("utf-8")
 
-    assert "rich_image_discovery_results" in payload
-    assert "rich_image_candidates_total" in payload
     assert "rich_image_fetches_total" in payload
     assert "rich_image_fetch_duration_seconds" in payload
     assert 'provider="brave"' in payload
     assert 'provider="tavily"' in payload
     assert 'provider="other"' in payload
-    assert secret not in payload
-
-
-def test_discovery_outcomes_are_bounded_and_content_free():
-    metrics = RichImageMetrics(registry=CollectorRegistry())
-    tenant_content = f"https://tenant.example/private/{uuid4()}"
-
-    metrics.record_discovery_outcome(outcome="selected", duration_seconds=0.2)
-    metrics.record_discovery_outcome(outcome="skipped", duration_seconds=0.0)
-    metrics.record_discovery_outcome(outcome=tenant_content, duration_seconds=0.1)
-
-    payload = metrics.render().decode("utf-8")
-
-    assert "rich_image_discovery_outcome_total" in payload
-    assert "rich_image_discovery_duration_seconds" in payload
-    assert 'outcome="selected"' in payload
-    assert 'outcome="skipped"' in payload
     assert 'outcome="other"' in payload
-    assert tenant_content not in payload
-    assert "tenant.example" not in payload
+    assert secret not in payload
     assert "rich_image_" + "verification" not in payload
 
 
@@ -77,18 +55,10 @@ def test_health_router_exposes_rich_image_metrics():
 
 def test_stage_counters_are_bounded_and_content_free():
     metrics = RichImageMetrics()
-    metrics.record_candidate(provider="tavily", outcome="rejected_aspect_ratio")
-    metrics.record_candidate(provider="brave", outcome="not-a-real-outcome")
     metrics.record_presentation(provider="brave", count=3)
-    metrics.record_anchor(provider="brave", outcome="fallback_anchored")
-    metrics.record_anchor(provider="brave", outcome="unplaced")
     metrics.record_final_selection(provider="brave", count=1)
     body = metrics.render().decode()
 
-    assert 'outcome="rejected_aspect_ratio"' in body
-    assert 'outcome="other"' in body
-    assert 'outcome="fallback_anchored"' in body
-    assert 'outcome="unplaced"' in body
     assert "rich_image_presented_total" in body
     assert "rich_image_final_selection_total" in body
     for forbidden in ("query", "caption", "http", "conversation"):
@@ -116,14 +86,19 @@ def test_presentation_and_final_selection_ignore_non_positive_counts():
     assert 'rich_image_final_selection_total{provider="brave"}' not in body
 
 
-def test_record_anchor_bounds_unknown_outcome_to_other():
-    metrics = RichImageMetrics()
-    metrics.record_anchor(provider="brave", outcome="not-a-real-outcome")
+def test_unwired_stage_metrics_are_not_exposed():
+    """Discovery, candidate and anchor collectors were never recorded, so they
+    read zero forever; an always-zero series looks like a healthy stage."""
+    body = RichImageMetrics().render().decode()
 
-    body = metrics.render().decode()
-
-    assert 'outcome="other"' in body
-    assert "not-a-real-outcome" not in body
+    for name in (
+        "rich_image_discovery_results",
+        "rich_image_candidates_total",
+        "rich_image_anchor_outcomes_total",
+        "rich_image_discovery_outcome_total",
+        "rich_image_discovery_duration_seconds",
+    ):
+        assert name not in body
 
 
 def test_registration_outcomes_are_recorded_and_bounded():

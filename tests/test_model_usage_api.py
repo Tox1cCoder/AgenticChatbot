@@ -13,11 +13,10 @@ from fastapi.testclient import TestClient
 from app.api.model_usage import router as model_usage_router
 from app.core.config import settings
 from app.core.container import Container, container, setup_auto_injection
-from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
+from app.core.dependency_injection import AppAutoInjector
 from app.core.exceptions import ResourceNotFoundException
 from app.interfaces import IModelUsageService
 from app.main import app
-from app.repositories.model_usage import ModelUsageRepository
 from app.schemas.model_usage import (
     ConversationUsage,
     ConversationUsageQuery,
@@ -143,10 +142,6 @@ def validating_usage_service() -> ModelUsageService:
 
 def test_api_test_module_preserves_declarative_injector_wiring() -> None:
     assert AppAutoInjector.wiring_map[IModelUsageService] is Container.model_usage_service
-    assert AppContainerInjector.wiring_map[IModelUsageService] is Container.model_usage_service
-    assert AppContainerInjector.wiring_map[ModelUsageRepository] is (
-        Container.model_usage_repository
-    )
 
 
 def test_usage_route_endpoints_are_synchronous_for_threadpool_execution() -> None:

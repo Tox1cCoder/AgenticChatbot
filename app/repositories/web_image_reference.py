@@ -52,25 +52,6 @@ class WebImageReferenceRepository(RepositorySessionMixin):
 
         return await self._arun(work)
 
-    async def aget_pending_for_user(
-        self,
-        image_id: UUID,
-        user_id: UUID,
-        *,
-        conversation_id: UUID,
-    ) -> WebImageReference | None:
-        def work(db: Session) -> WebImageReference | None:
-            statement = select(WebImageReference).where(
-                WebImageReference.id == image_id,
-                WebImageReference.user_id == user_id,
-                WebImageReference.conversation_id == conversation_id,
-                WebImageReference.lifecycle_state == "pending",
-                WebImageReference.deleted_at.is_(None),
-            )
-            return db.execute(statement).scalars().first()
-
-        return await self._arun(work)
-
     async def amark_selected(
         self,
         image_ids: list[UUID] | tuple[UUID, ...],

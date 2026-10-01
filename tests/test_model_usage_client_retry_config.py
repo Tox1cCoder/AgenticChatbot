@@ -93,12 +93,12 @@ def test_router_owns_no_provider_sdk_client():
     """
     import inspect
 
-    from app.ai.agents import router
+    from app.ai.workflow import routing
     from app.ai.workflow.routing import RoutingService
 
-    source = inspect.getsource(router)
+    source = inspect.getsource(routing)
     assert "genai" not in source
-    assert not hasattr(router, "genai")
+    assert not hasattr(routing, "genai")
     assert frozenset({"supports_structured_output"}) == RoutingService.REQUIRED_CAPABILITIES
 
 

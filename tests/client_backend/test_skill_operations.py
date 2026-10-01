@@ -340,7 +340,7 @@ class _OperationEnv:
         self.installer.transaction_outcomes[operation.transaction_id] = (
             "committed" if commit_started else "rolled_back"
         )
-        self.service.persist_for_test(operation)
+        self.service._persist(operation)
         return operation
 
     def persist_installed_bundle(self, *, source_hash: str, name: str = "demo") -> None:

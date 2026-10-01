@@ -78,37 +78,6 @@ def test_demo_py_document_uploader_accepts_multiple_files():
     )
 
 
-def test_upload_support_py_extensions_match_server_validation():
-    upload_path = _REPO_ROOT / "upload_support.py"
-    if not upload_path.exists():
-        import pytest
-
-        pytest.skip("upload_support.py not present")
-
-    source = upload_path.read_text(encoding="utf-8")
-    extensions = _extract_document_type_list(source)
-    assert extensions is not None, (
-        "Could not find a document type=[...] literal in upload_support.py"
-    )
-    assert EXPECTED.issubset(extensions), (
-        f"upload_support.py upload list missing extensions: {sorted(EXPECTED - extensions)}"
-    )
-
-
-def test_upload_support_py_document_uploader_accepts_multiple_files():
-    upload_path = _REPO_ROOT / "upload_support.py"
-    if not upload_path.exists():
-        import pytest
-
-        pytest.skip("upload_support.py not present")
-
-    block = _document_uploader_block(upload_path.read_text(encoding="utf-8"))
-    assert block is not None, "Could not find a document file_uploader block in upload_support.py"
-    assert "accept_multiple_files=True" in block, (
-        "upload_support.py document file_uploader must accept multiple files for batch uploads"
-    )
-
-
 def test_upload_callers_use_batch_endpoint():
     """Both UI entry points must POST to /documents/uploads (plural)."""
     upload_path = _REPO_ROOT / "upload_support.py"

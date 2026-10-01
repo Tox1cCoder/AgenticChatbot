@@ -35,27 +35,6 @@ def get_tools_requiring_approval() -> list[str]:
     return getattr(settings, "hitl_tools_require_approval", [])
 
 
-def requires_human_approval(tool_names: list[str]) -> bool:
-    """
-    Check if any of the given tool names require human approval.
-
-    Args:
-        tool_names: List of tool names to check
-
-    Returns:
-        True if HITL is enabled and any tool requires approval
-    """
-    if not is_hitl_enabled():
-        return False
-
-    approval_list = get_tools_requiring_approval()
-    if not approval_list:
-        # Empty list means no tools require approval
-        return False
-
-    return any(name in approval_list for name in tool_names if name)
-
-
 @dataclass(frozen=True)
 class CallIdentity:
     """Resolved provenance for a single pending tool call."""

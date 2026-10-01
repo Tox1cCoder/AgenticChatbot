@@ -16,8 +16,6 @@ from app.database.async_session import (
     AsyncSessionLocal,
     async_database_url,
     async_engine,
-    get_async_engine,
-    get_async_session_factory,
 )
 from app.database.session import engine as sync_engine
 
@@ -48,11 +46,6 @@ def test_async_session_factory_matches_sync_semantics():
 
 def test_async_session_factory_is_bound_to_the_async_engine():
     assert AsyncSessionLocal.kw["bind"] is async_engine
-
-
-def test_providers_return_the_shared_objects():
-    assert get_async_engine() is async_engine
-    assert get_async_session_factory() is AsyncSessionLocal
 
 
 def test_pool_is_explicitly_sized():

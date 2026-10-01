@@ -301,18 +301,6 @@ async def test_a_receipt_owned_by_another_user_is_not_readable(seeded: Seeded) -
     assert record.result is None
 
 
-async def test_outcome_unknown_is_listed_for_reconciliation(seeded: Seeded) -> None:
-    repository, owner_id, conversation_id, _, _, _ = seeded
-    scope = _scope(owner_id, conversation_id)
-    key = execution_key(scope)
-
-    await repository.areserve(scope=scope, key=key)
-    await repository.amark_outcome_unknown(key=key, scope=scope)
-
-    unresolved = await repository.alist_unresolved(user_id=owner_id)
-    assert [row.execution_key for row in unresolved] == [key]
-
-
 async def test_a_bounded_result_is_stored_and_read_back(seeded: Seeded) -> None:
     repository, owner_id, conversation_id, _, _, _ = seeded
     scope = _scope(owner_id, conversation_id)
@@ -366,9 +354,6 @@ async def test_a_lost_process_after_a_non_idempotent_effect_reports_outcome_unkn
     assert raised.value.execution_key == key
     assert invocations == [], "a non-idempotent provider must not be called a second time"
     assert _row(session_factory, key).status == ReceiptStatus.OUTCOME_UNKNOWN
-
-    unresolved = await repository.alist_unresolved(user_id=owner_id)
-    assert [row.execution_key for row in unresolved] == [key]
 
 
 async def test_an_adjudicated_unknown_outcome_is_never_retried_later(seeded: Seeded) -> None:

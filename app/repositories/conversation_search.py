@@ -254,22 +254,6 @@ class ConversationSearchRepository(RepositorySessionMixin):
             )
         )
 
-    async def asearch(
-        self,
-        user_id: str,
-        query: str,
-        project_id: str | None = None,
-        limit: int = 5,
-        exclude_conversation_id: str | None = None,
-        snippet_chars: int = 240,
-    ) -> list[ConversationHit]:
-        """Async twin of :meth:`search`."""
-        return await self._arun(
-            self._search_work(
-                user_id, project_id, query, limit, exclude_conversation_id, snippet_chars
-            )
-        )
-
     def read(
         self,
         user_id: str,

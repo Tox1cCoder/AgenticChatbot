@@ -57,27 +57,6 @@ class DocumentIndexGenerationRepository:
                 .first()
             )
 
-    def get_latest_failed(self, document_id: UUID) -> DocumentIndexGeneration | None:
-        with self.session_factory() as db:
-            return (
-                db.query(DocumentIndexGeneration)
-                .filter(
-                    DocumentIndexGeneration.document_id == document_id,
-                    DocumentIndexGeneration.status == "failed",
-                )
-                .order_by(DocumentIndexGeneration.created_at.desc())
-                .first()
-            )
-
-    def list_for_document(self, document_id: UUID) -> list[DocumentIndexGeneration]:
-        with self.session_factory() as db:
-            return (
-                db.query(DocumentIndexGeneration)
-                .filter(DocumentIndexGeneration.document_id == document_id)
-                .order_by(DocumentIndexGeneration.created_at.asc())
-                .all()
-            )
-
     def mark_ready(self, generation_id: UUID) -> DocumentIndexGeneration:
         with self.session_factory() as db:
             generation = db.get(DocumentIndexGeneration, generation_id)
@@ -218,10 +197,6 @@ class DocumentIndexGenerationRepository:
                 .order_by(DocumentIndexGeneration.created_at.asc())
                 .all()
             )
-
-    def retired_before(self, document_id: UUID, cutoff: datetime) -> list[DocumentIndexGeneration]:
-        """Backward-compatible alias for all safe-to-purge inactive generations."""
-        return self.purgeable_before(document_id, cutoff)
 
     def delete(self, generation_id: UUID) -> bool:
         with self.session_factory() as db:

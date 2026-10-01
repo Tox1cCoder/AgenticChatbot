@@ -331,15 +331,6 @@ class RoutingContextBuilder:
             context.payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
 
-    def build_messages(
-        self, context: RoutingContext, *, system_instruction: str
-    ) -> list[SystemMessage | HumanMessage]:
-        """Trusted instructions and untrusted data as two separate messages."""
-        return [
-            SystemMessage(content=system_instruction),
-            HumanMessage(content=context.serialized_json or self.serialize(context)),
-        ]
-
     # -- sources ---------------------------------------------------------
 
     async def _history(

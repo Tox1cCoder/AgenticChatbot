@@ -135,4 +135,3 @@ async def test_the_custom_agent_lock_queries_still_work():
 
     assert registry.is_runtime_agent_in_use(str(owner_id), "custom:abc") is True
     assert len(registry.find_by_conversation(conversation_id)) == 1
-    assert len(registry.find_by_user(owner_id)) == 1

@@ -111,7 +111,7 @@ class SkillMetadata:
     tags: list[str] = None
     # Populated by the installer (source hash, bundle name, etc.). Always None
     # for a hand-authored bundle the sidecar never installed; declared here so
-    # to_dict()/to_sync_dict() have a stable, redacted place to surface it.
+    # to_sync_dict() has a stable, redacted place to surface it.
     install_metadata: dict | None = None
     # Environment variable names the skill's front matter says it needs. Names
     # only -- a value never comes from a bundle -- and device-local: they are
@@ -164,20 +164,6 @@ class SkillMetadata:
 
         summary.setdefault("installed", bool(self.install_metadata.get("installed", False)))
         return summary
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for serialization."""
-        return {
-            "name": self.name,
-            "path": str(self.path),
-            "description": self.description,
-            "enabled": self.enabled,
-            "category": self.category,
-            "tags": self.tags,
-            "content_length": len(self.content) if self.content else 0,
-            "execution": self._execution_summary(),
-            "install": self._install_summary(),
-        }
 
     def to_sync_dict(self) -> dict:
         """

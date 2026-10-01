@@ -84,30 +84,6 @@ class DocumentChunkRepository:
             db.commit()
             return deleted
 
-    def mark_indexed(
-        self,
-        chunk_id: UUID,
-        *,
-        point_id: str,
-        embedding_model: str,
-        embedding_dimension: int,
-        collection_name: str,
-    ) -> DocumentChunk | None:
-        with self.session_factory() as db:
-            chunk = db.query(DocumentChunk).filter(DocumentChunk.id == chunk_id).first()
-            if chunk is None:
-                return None
-            chunk.qdrant_point_id = point_id
-            chunk.embedding_model = embedding_model
-            chunk.embedding_dimension = embedding_dimension
-            chunk.qdrant_collection_name = collection_name
-            chunk.index_status = "indexed"
-            chunk.index_error = None
-            chunk.indexed_at = datetime.now(timezone.utc)
-            db.commit()
-            db.refresh(chunk)
-            return chunk
-
     def mark_indexed_bulk(
         self,
         chunk_ids: list[UUID],
@@ -272,18 +248,6 @@ class DocumentChunkRepository:
                 .first()
                 is not None
             )
-
-    def get_by_ids(self, chunk_ids: Iterable[UUID]) -> list[DocumentChunk]:
-        ids = list(chunk_ids)
-        if not ids:
-            return []
-        with self.session_factory() as db:
-            query = (
-                db.query(DocumentChunk)
-                .options(joinedload(DocumentChunk.document))
-                .filter(DocumentChunk.id.in_(ids))
-            )
-            return self._active(query).all()
 
     def get_by_ids_for_scope(
         self,
@@ -464,15 +428,3 @@ class DocumentChunkRepository:
                     .all()
                 )
             return [(chunk, float(raw_score)) for chunk, raw_score in rows]
-
-    def get_by_qdrant_point_ids(self, point_ids: Iterable[str]) -> list[DocumentChunk]:
-        ids = [p for p in point_ids if p]
-        if not ids:
-            return []
-        with self.session_factory() as db:
-            query = (
-                db.query(DocumentChunk)
-                .options(joinedload(DocumentChunk.document))
-                .filter(DocumentChunk.qdrant_point_id.in_(ids))
-            )
-            return self._active(query).all()

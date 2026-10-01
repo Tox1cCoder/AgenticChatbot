@@ -20,7 +20,6 @@ from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 def _workflow() -> MultiAgentWorkflow:
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow._attach_context_outputs = lambda state, response: response
-    workflow._get_agent_type = lambda name: AgentType.CHAT
     return workflow
 
 

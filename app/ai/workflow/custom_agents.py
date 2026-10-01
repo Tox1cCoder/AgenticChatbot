@@ -220,17 +220,3 @@ class CustomAgentsMixin:
         if agent is None:
             return None
         return build_custom_specialist_definition(agent)
-
-    def _is_attached_custom_agent(self, state: GraphState, runtime_agent_id: str | None) -> bool:
-        """True when ``runtime_agent_id`` is an attached custom agent in state."""
-        if not is_custom_runtime_id(runtime_agent_id):
-            return False
-        return runtime_agent_id in GraphStateView(state).custom_agents()
-
-    def _route_target_for(self, state: GraphState, active_agent_id: str) -> str:
-        """Map a selected agent to its graph node name (custom ids → custom_agent)."""
-        if is_custom_runtime_id(active_agent_id) and self._is_attached_custom_agent(
-            state, active_agent_id
-        ):
-            return "custom_agent"
-        return active_agent_id

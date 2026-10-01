@@ -12,7 +12,6 @@ from app.ai.client_runtime_tools import _CLIENT_TOOL_CACHE, get_client_runtime_t
 from app.ai.client_tool_catalog import get_client_tool_catalog, reset_all_client_catalogs
 from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_tool_state
 from app.ai.graph import MultiAgentWorkflow
-from app.ai.hitl_config import requires_human_approval
 from app.ai.mcp_tool_catalog import ToolReference
 from app.ai.schemas import AgentType
 from app.core.config import settings
@@ -273,22 +272,6 @@ def test_deferred_binding_only_includes_loaded_client_tools(monkeypatch):
         "tool_search",
         "client__time_server__get_current_time",
     ]
-
-
-def test_client_tools_follow_explicit_hitl_allowlist(monkeypatch):
-    monkeypatch.setattr(settings, "enable_human_in_the_loop", True)
-    monkeypatch.setattr(settings, "hitl_tools_require_approval", [])
-
-    assert requires_human_approval(["client__desktop_commander__start_process"]) is False
-    assert requires_human_approval(["server_only_tool"]) is False
-
-    monkeypatch.setattr(
-        settings,
-        "hitl_tools_require_approval",
-        ["client__desktop_commander__start_process"],
-    )
-
-    assert requires_human_approval(["client__desktop_commander__start_process"]) is True
 
 
 def test_interrupt_resume_rejects_device_mismatch():
@@ -602,7 +585,7 @@ async def test_deferred_tool_snapshot_round_trip_restores_aliases_and_client_sco
 
 
 @pytest.mark.asyncio
-async def test_execute_agent_tool_calls_persists_deferred_snapshot_to_state_context(monkeypatch):
+async def test_deferred_snapshot_persists_to_state_context_and_rehydrates():
     reset_client_runtime_store()
     reset_deferred_tool_state()
     _CLIENT_TOOL_CACHE.clear()
@@ -644,46 +627,38 @@ async def test_execute_agent_tool_calls_persists_deferred_snapshot_to_state_cont
         "context": {},
     }
 
-    async def _fake_execute_tool_calls(**kwargs):
-        deferred_state = get_deferred_tool_state()
-        deferred_state.autoload(
-            conversation_id="conversation-1",
-            agent_key="chat",
-            references=[
-                ToolReference(
-                    tool_name="search",
-                    server_name="brave",
-                    call_name="brave__search",
-                )
-            ],
-        )
-        deferred_state.autoload_client_tools(
-            conversation_id="conversation-1",
-            agent_key="chat",
-            references=[
-                SimpleNamespace(
-                    tool_name="client__desktop_commander__start_process",
-                    server_name="desktop_commander",
-                    device_id=str(device_id),
-                    session_id="session-a",
-                    catalog_version=2,
-                    tool_instance_id="instance-123",
-                )
-            ],
-            device_id=str(device_id),
-            session_id="session-a",
-            user_id=str(user_id),
-        )
-        return ([], [], [])
-
-    monkeypatch.setattr("app.ai.workflow.tool_loop.execute_tool_calls", _fake_execute_tool_calls)
-
-    await workflow._execute_agent_tool_calls(
-        state=state,
-        agent=agent,
-        tool_calls=[{"id": "tool-1", "name": "tool_search", "args": {"query": "search"}}],
-        tool_map={"tool_search": SimpleNamespace(name="tool_search")},
+    # What a tool_search call loads during the subgraph run.
+    deferred_state = get_deferred_tool_state()
+    deferred_state.autoload(
+        conversation_id="conversation-1",
+        agent_key="chat",
+        references=[
+            ToolReference(
+                tool_name="search",
+                server_name="brave",
+                call_name="brave__search",
+            )
+        ],
     )
+    deferred_state.autoload_client_tools(
+        conversation_id="conversation-1",
+        agent_key="chat",
+        references=[
+            SimpleNamespace(
+                tool_name="client__desktop_commander__start_process",
+                server_name="desktop_commander",
+                device_id=str(device_id),
+                session_id="session-a",
+                catalog_version=2,
+                tool_instance_id="instance-123",
+            )
+        ],
+        device_id=str(device_id),
+        session_id="session-a",
+        user_id=str(user_id),
+    )
+
+    workflow._persist_deferred_tool_snapshot_to_state(state, agent=agent)
 
     snapshot = state["context"]["deferred_tool_snapshot"]
     assert [tool["call_name"] for tool in snapshot["server_tools"]] == ["brave__search"]

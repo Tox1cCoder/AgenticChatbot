@@ -34,7 +34,6 @@ from app.ai.tool_execution_policy import (
     resolve_tool_execution_policy,
     tool_policy_context,
 )
-from app.api.device_runtime import DeviceRuntimeGateway
 from app.core.config import settings
 from app.services import client_runtime_store as runtime_store_module
 from app.services.client_device_service import ClientDeviceService
@@ -221,35 +220,6 @@ async def test_client_tool_dispatch_uses_scoped_policy_deadlines(monkeypatch):
         assert dispatches[0]["response_timeout_seconds"] == 29.0
     finally:
         _reset_runtime_state()
-
-
-@pytest.mark.asyncio
-async def test_device_runtime_gateway_maps_manual_timeout_to_both_deadlines(monkeypatch):
-    dispatches: list[dict] = []
-
-    async def _capture_dispatch(**kwargs):
-        dispatches.append(kwargs)
-        return {"success": True, "result": "ok"}
-
-    monkeypatch.setattr(ClientDeviceService, "dispatch_tool_call", _capture_dispatch)
-    gateway = DeviceRuntimeGateway(
-        websocket=SimpleNamespace(),
-        device_id=uuid4(),
-        session=SimpleNamespace(user_id=uuid4(), device_id=uuid4(), session_id="session-1"),
-        service=SimpleNamespace(),
-    )
-
-    result = await gateway.dispatch_tool_call(
-        request_id="request-1",
-        tool_name="echo_text",
-        qualified_tool_id="demo::echo_text",
-        arguments={"text": "hello"},
-        timeout_seconds=5.5,
-    )
-
-    assert result == {"success": True, "result": "ok"}
-    assert dispatches[0]["execution_timeout_seconds"] == 5.5
-    assert dispatches[0]["response_timeout_seconds"] == 5.5
 
 
 def _build_message_service() -> MessageService:

@@ -419,36 +419,6 @@ class ModelUsageRepository:
             row = session.execute(statement).mappings().one()
         return _totals_from_mapping(row)
 
-    def get_minute_series(
-        self,
-        *,
-        user_id: UUID,
-        start_inclusive: datetime,
-        end_exclusive: datetime,
-        conversation_id: UUID | None = None,
-    ) -> list[ModelUsageMinute]:
-        """Return raw per-minute rollup rows in the window, oldest first."""
-        if user_id is None:
-            raise ValueError("get_minute_series requires a non-null user_id")
-        start = _require_aware(start_inclusive, "start_inclusive")
-        end = _require_aware(end_exclusive, "end_exclusive")
-        statement = (
-            select(ModelUsageMinute)
-            .where(
-                ModelUsageMinute.user_id == user_id,
-                ModelUsageMinute.bucket_start_utc >= start,
-                ModelUsageMinute.bucket_start_utc < end,
-            )
-            .order_by(ModelUsageMinute.bucket_start_utc)
-        )
-        if conversation_id is not None:
-            statement = statement.where(ModelUsageMinute.conversation_id == conversation_id)
-        with self.session_factory() as session:
-            rows = list(session.execute(statement).scalars().all())
-            for row in rows:
-                session.expunge(row)
-            return rows
-
     def get_bucket_series(
         self,
         *,

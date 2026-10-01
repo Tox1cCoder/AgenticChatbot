@@ -3,7 +3,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import asc, case, desc, exists, func, or_, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 
 from app.models.conversation import Conversation
 from app.models.enums import PlanLifecycle
@@ -162,15 +162,6 @@ class ConversationCRUDStrategy(
         )
         return int(db.execute(count_statement).scalar() or 0)
 
-    def get_with_messages(self, db: Session, conversation_id: UUID) -> Conversation | None:
-        """Get conversation with its messages"""
-        statement = (
-            select(Conversation)
-            .options(joinedload(Conversation.messages))
-            .where(Conversation.id == conversation_id, Conversation.deleted_at.is_(None))
-        )
-        return db.execute(statement).unique().scalar_one_or_none()
-
     def get_with_recent_messages(
         self,
         db: Session,
@@ -303,11 +294,6 @@ class ConversationRepository(RepositorySessionMixin):
                 session, owner_id, search, project_id=project_id
             )
 
-    def get_with_messages(self, conversation_id: UUID) -> Conversation | None:
-        """Get conversation with its messages"""
-        with self.session_factory() as session:
-            return self._crud_strategy.get_with_messages(session, conversation_id)
-
     def user_owns_conversation(self, owner_id: UUID, conversation_id: UUID) -> bool:
         """Check if user owns the conversation"""
         with self.session_factory() as session:
@@ -351,10 +337,6 @@ class ConversationRepository(RepositorySessionMixin):
     def update(self, id: UUID, input_schema: ConversationUpdate) -> Conversation | None:
         """Update conversation by ID"""
         return self._run(lambda session: self._update_in_session(session, id, input_schema))
-
-    async def aupdate(self, id: UUID, input_schema: ConversationUpdate) -> Conversation | None:
-        """Async twin of :meth:`update`."""
-        return await self._arun(lambda session: self._update_in_session(session, id, input_schema))
 
     def set_plan_lifecycle(self, id: UUID, lifecycle: PlanLifecycle | None) -> Conversation | None:
         """Persist the internal plan lifecycle state."""

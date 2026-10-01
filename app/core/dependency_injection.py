@@ -18,14 +18,7 @@ from app.interfaces import (
     IUserService,
 )
 from app.interfaces.task_plan_service_interface import ITaskPlanService
-from app.repositories.conversation import ConversationRepository
-from app.repositories.document import DocumentRepository
-from app.repositories.feedback import FeedbackRepository
 from app.repositories.hitl_interrupt import HITLInterruptRepository
-from app.repositories.message import MessageRepository
-from app.repositories.model_usage import ModelUsageRepository
-from app.repositories.task_plan import TaskPlanRepository
-from app.repositories.user import UserRepository
 from app.services.ai_service import AIService
 from app.services.custom_agent_service import CustomAgentService
 from app.services.document_processing_service import DocumentProcessingService
@@ -35,21 +28,9 @@ from app.services.mcp_service import MCPService
 from app.services.model_config_service import ModelConfigService
 from app.services.project_service import ProjectService
 from app.services.provider_service import ProviderService
-from app.utils.validation.conversation_validation import (
-    ConversationValidationUtils,
-)
-from app.utils.validation.document_validation import DocumentValidationUtils
-from app.utils.validation.feedback_validation import FeedbackValidationUtils
-from app.utils.validation.message_validation import MessageValidationUtils
-from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
-from app.utils.validation.user_validation import UserValidationUtils
 
 
 class AutoInjector:
-    wiring_map: dict[type, Any] = {}
-
-
-class ContainerInjector:
     wiring_map: dict[type, Any] = {}
 
 
@@ -157,44 +138,3 @@ class AppAutoInjector(AutoInjector):
             return wrapper_factory()
 
         return decorator
-
-
-class AppContainerInjector(ContainerInjector):
-    """Type -> provider map for repositories, services and validation utils.
-
-    Nothing in the application reads this map; only tests assert on it.
-    """
-
-    @classmethod
-    def setup_wiring_map(cls, container):
-        container_ref = container
-
-        cls.wiring_map = {
-            # Services
-            IUserService: container_ref.user_service,
-            IConversationService: container_ref.conversation_service,
-            IMessageService: container_ref.message_service,
-            IFeedbackService: container_ref.feedback_service,
-            IAuthService: container_ref.auth_service,
-            IDocumentService: container_ref.document_service,
-            ITaskPlanService: container_ref.task_plan_service,
-            IModelUsageService: container_ref.model_usage_service,
-            DocumentProcessingService: container_ref.document_processing_service,
-            JwtService: container_ref.jwt_service,
-            AIService: container_ref.ai_service,
-            # Repositories
-            UserRepository: container_ref.user_repository,
-            ConversationRepository: container_ref.conversation_repository,
-            MessageRepository: container_ref.message_repository,
-            FeedbackRepository: container_ref.feedback_repository,
-            DocumentRepository: container_ref.document_repository,
-            TaskPlanRepository: container_ref.task_plan_repository,
-            ModelUsageRepository: container_ref.model_usage_repository,
-            # Validation utilities
-            UserValidationUtils: container_ref.user_validation_utils,
-            ConversationValidationUtils: container_ref.conversation_validation_utils,
-            MessageValidationUtils: container_ref.message_validation_utils,
-            FeedbackValidationUtils: container_ref.feedback_validation_utils,
-            DocumentValidationUtils: container_ref.document_validation_utils,
-            TaskPlanValidationUtils: container_ref.task_plan_validation_utils,
-        }

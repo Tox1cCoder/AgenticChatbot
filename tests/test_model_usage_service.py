@@ -212,10 +212,6 @@ class EmptyUsageRepository:
         self.calls.append(("summary", kwargs))
         return repository_totals()
 
-    def get_minute_series(self, **kwargs):
-        self.calls.append(("series", kwargs))
-        return []
-
     def get_bucket_series(self, **kwargs):
         self.calls.append(("bucket_series", kwargs))
         return []
@@ -243,15 +239,6 @@ class ForeignConversationRepository:
         return False
 
 
-class BoundedSeriesSpyRepository(EmptyUsageRepository):
-    def get_minute_series(self, **kwargs):
-        raise AssertionError("dashboard must not load raw dimension-level minute rows")
-
-    def get_bucket_series(self, **kwargs):
-        self.calls.append(("bucket_series", kwargs))
-        return []
-
-
 def repository_totals(**values: int) -> RepositoryUsageTotals:
     return RepositoryUsageTotals(
         **{field.name: values.get(field.name, 0) for field in fields(RepositoryUsageTotals)}
@@ -270,10 +257,6 @@ class PopulatedUsageRepository(EmptyUsageRepository):
     def get_summary_totals(self, **kwargs):
         self.calls.append(("summary", kwargs))
         return self.summary
-
-    def get_minute_series(self, **kwargs):
-        self.calls.append(("series", kwargs))
-        return self.minute_rows
 
     def get_bucket_series(self, *, bucket_intervals, **kwargs):
         self.calls.append(("bucket_series", {"bucket_intervals": bucket_intervals, **kwargs}))
@@ -340,8 +323,8 @@ def test_dashboard_defaults_to_last_30_local_days_and_returns_empty_buckets() ->
     assert result.coverage == UsageCoverage()
 
 
-def test_dashboard_uses_one_bounded_bucket_query_and_never_raw_minute_rows() -> None:
-    repository = BoundedSeriesSpyRepository()
+def test_dashboard_uses_one_bounded_bucket_query() -> None:
+    repository = EmptyUsageRepository()
     service = ModelUsageService(
         repository=repository,
         conversation_repository=OwningConversationRepository(),
@@ -976,10 +959,8 @@ def test_model_usage_service_is_a_factory_and_injectable_by_interface() -> None:
     from dependency_injector import providers
 
     from app.core.container import Container
-    from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
+    from app.core.dependency_injection import AppAutoInjector
     from app.interfaces import IModelUsageService
 
     assert isinstance(Container.model_usage_service, providers.Factory)
     assert AppAutoInjector.wiring_map[IModelUsageService] is Container.model_usage_service
-    assert AppContainerInjector.wiring_map[IModelUsageService] is Container.model_usage_service
-    assert AppContainerInjector.wiring_map[ModelUsageRepository] is Container.model_usage_repository

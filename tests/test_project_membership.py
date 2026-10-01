@@ -29,20 +29,8 @@ def test_factory_carries_project_id_from_schema():
     assert fields["project_id"] == project_id
 
 
-def test_factory_carries_project_id_from_dict():
-    """Both factory paths, because updating only one is how a field goes missing."""
-    owner_id = uuid4()
-    project_id = uuid4()
-
-    fields = ConversationFactory.create_from_dict(
-        {"owner_id": owner_id, "title": "t", "project_id": project_id}
-    )
-
-    assert fields["project_id"] == project_id
-
-
 def test_factory_defaults_project_id_to_none():
-    fields = ConversationFactory.create_from_dict({"owner_id": uuid4(), "title": "t"})
+    fields = ConversationFactory.create_from_schema(ConversationCreate(title="t"), uuid4())
 
     assert fields["project_id"] is None
 

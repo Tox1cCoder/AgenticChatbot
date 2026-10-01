@@ -227,8 +227,6 @@ def test_the_server_source_list_is_still_appended():
 STRANDED_BY_STREAMABLE_GROUNDING = {
     "GroundedAnswerGate.finalize": "decided abstention; nothing calls it now",
     "GroundedAnswerGate.abstain": "authored the abstention text; nothing calls it now",
-    "RAGAgent.regenerate_grounded_answer": "the second model call; nothing calls it now",
-    "GROUNDED_ANSWER_REGENERATION_PROMPT": "instructed that call; nothing reads it now",
 }
 
 
@@ -250,13 +248,13 @@ def test_stranded_enforcement_machinery_has_no_production_caller():
         if path != gate_module
     )
 
-    # Its definition in rag_agent.py is the one occurrence that is allowed to
-    # remain; a second is a call site.
+    # The second model call that re-answered a rejected draft was deleted
+    # (Task 26). Bringing it back brings back withholding the answer stream.
     all_runtime = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted((repo_root / "app").rglob("*.py"))
     )
-    assert all_runtime.count("regenerate_grounded_answer") == 1, (
-        "regenerate_grounded_answer has a caller again — enforcement is back, "
+    assert "regenerate_grounded_answer" not in all_runtime, (
+        "regenerate_grounded_answer is back — enforcement is back, "
         "and withholding the answer stream would be back with it"
     )
     # Narrow on purpose: ``.finalize(`` alone matches unrelated finalizers all

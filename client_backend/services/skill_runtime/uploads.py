@@ -854,16 +854,6 @@ class SkillUploadService:
             return
         self._audit.write(event=event, **fields)
 
-    # ------------------------------------------------------------- test seams
-
-    def persist_for_test(self, record: SkillUploadRecord) -> None:
-        """Write a record directly; used by tests to arrange stored state."""
-        self._write_record(record)
-
-    def staging_dir_for_test(self, user_id: str, upload_id: str) -> Path:
-        """Expose the staging directory for assertions about stored bytes."""
-        return self._staging_dir(user_id, upload_id)
-
 
 _upload_service: SkillUploadService | None = None
 

@@ -190,13 +190,13 @@ class _UploadEnv:
                 setup={},
             ),
         )
-        self.service.persist_for_test(record)
+        self.service._write_record(record)
         return record
 
     def persist_uploads(self, owner: str, *, count: int, bytes_each: int) -> None:
         for index in range(count):
             record = self.persist_upload(owner=owner, upload_id=f"upload-{index}")
-            directory = self.service.staging_dir_for_test(owner, record.upload_id)
+            directory = self.service._staging_dir(owner, record.upload_id)
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "archive.zip").write_bytes(b"x" * bytes_each)
 
@@ -653,7 +653,7 @@ async def test_mark_succeeded_discards_bytes_but_keeps_the_record(upload_env):
 
     stored = upload_env.service.get_owned(USER_A, record.upload_id)
     assert stored.state == "installed"
-    staging = upload_env.service.staging_dir_for_test(USER_A, record.upload_id)
+    staging = upload_env.service._staging_dir(USER_A, record.upload_id)
     assert not any(staging.rglob("*.zip"))
     assert not (staging / "extracted").exists()
 
@@ -891,7 +891,7 @@ async def test_persisted_member_paths_cannot_escape_the_staged_archive(upload_en
         stream=_AsyncReader(_valid_skill_zip_bytes()),
     )
     record.members[0].bundle_path = "../outside"
-    upload_env.service.persist_for_test(record)
+    upload_env.service._write_record(record)
 
     with pytest.raises(SkillUploadStateError, match="invalid"):
         upload_env.service.discovered_skills(USER_A, record.upload_id)

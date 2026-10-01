@@ -24,8 +24,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from prometheus_client import CollectorRegistry
 
 from app.ai.agents.base_agent import BaseAgent
-from app.ai.agents.router import Router
-from app.ai.schemas import AgentMessage, AgentType, MessageRole
+from app.ai.schemas import AgentType
 from app.core.config import settings
 from app.core.runtime_modeling import ResolvedRuntimeModelConfig, RuntimeFallbackConfig
 from app.observability.model_usage import ModelUsageMetrics
@@ -433,6 +432,23 @@ def _routing_service_for(recorder, *, decision=None, error=None):
     ), model
 
 
+async def _route(service, content: str) -> str:
+    """One routing call the way the graph makes it: bounded context, then route."""
+    from app.ai.workflow.inventory import build_routing_inventory
+    from app.ai.workflow.routing import RoutingContextBuilder, RoutingContextRequest
+
+    inventory = build_routing_inventory(
+        base_agent_ids=["chat_agent", "search_agent"], custom_agents={}
+    )
+    context = await RoutingContextBuilder(
+        history_provider=None, document_repository=None, settings=settings
+    ).build(RoutingContextRequest(message=content, inventory=inventory))
+    decision = await service.route(
+        context, inventory, user_id=None, model_request=None, request_id="request-1"
+    )
+    return decision.agent_id
+
+
 async def test_router_records_one_success_attempt():
     from app.ai.workflow.contracts import RoutingDecision
 
@@ -441,19 +457,15 @@ async def test_router_records_one_success_attempt():
         recorder,
         decision=RoutingDecision(agent_id="search_agent", confidence=0.9, reason="current news"),
     )
-    router = Router(recorder=recorder, routing_service=service)
 
     with bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")):
-        result = await router.route_message(
-            AgentMessage(role=MessageRole.USER, content="find the news"),
-            ["chat_agent", "search_agent"],
-        )
+        result = await _route(service, "find the news")
 
     assert result == "search_agent"
     assert len(repo.commands) == 1
     command = repo.commands[0]
     assert command.provider == "gemini"
-    assert command.model == router.model_name
+    assert command.model == settings.router_model
     assert command.context.operation == "router"
     assert command.context.agent_id == "router"
     assert command.status == "success"
@@ -465,16 +477,12 @@ async def test_router_provider_error_records_every_attempt_and_never_defaults():
 
     recorder, repo = make_recorder()
     service, model = _routing_service_for(recorder, error=ConnectionError("gemini down"))
-    router = Router(recorder=recorder, routing_service=service)
 
     with (
         bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")),
         pytest.raises(WorkflowRoutingException) as exc,
     ):
-        await router.route_message(
-            AgentMessage(role=MessageRole.USER, content="find the news"),
-            ["chat_agent", "search_agent"],
-        )
+        await _route(service, "find the news")
 
     assert exc.value.error.code == "routing_provider_unavailable"
     assert model.calls == 2
@@ -502,16 +510,12 @@ async def test_router_records_zero_events_when_no_provider_call_is_made():
         validator=RoutingDecisionValidator(),
         usage_recorder=recorder,
     )
-    router = Router(recorder=recorder, routing_service=service)
 
     with (
         bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")),
         pytest.raises(WorkflowRoutingException) as exc,
     ):
-        await router.route_message(
-            AgentMessage(role=MessageRole.USER, content="hi"),
-            ["chat_agent", "search_agent"],
-        )
+        await _route(service, "hi")
 
     assert exc.value.error.code == "routing_provider_unavailable"
     assert repo.commands == []

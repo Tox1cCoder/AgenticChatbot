@@ -19,7 +19,7 @@ from app.ai.skills_tool import get_available_skill_summaries
 from app.ai.web_research.service import WebResearchService
 from app.ai.workflow.routing import RoutingContextBuilder, RoutingService
 from app.core.config import settings
-from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
+from app.core.dependency_injection import AppAutoInjector
 from app.database.database import Database
 from app.database.session import SessionLocal
 from app.interfaces import (
@@ -824,7 +824,6 @@ class Container(containers.DeclarativeContainer):
 def setup_auto_injection(container_ref: Container | type[Container] | None = None):
     target = container_ref or Container
     AppAutoInjector.setup_wiring_map(target)
-    AppContainerInjector.setup_wiring_map(target)
 
 
 setup_auto_injection(Container)

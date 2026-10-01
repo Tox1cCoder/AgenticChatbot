@@ -15,15 +15,13 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.services.rag_evidence import EvidencePack, EvidenceRecord
 from app.services.rag_grounding import (
-    GROUNDED_ANSWER_CITATION_INSTRUCTIONS,
     GroundedAnswer,
     GroundedAnswerGate,
     GroundedClaim,
-    evidence_pack_from_payloads,
+    merge_evidence_payloads,
     parse_grounded_answer,
     render_grounded_answer,
 )
@@ -364,7 +362,7 @@ async def test_validation_findings_stay_checkpoint_safe(gate):
 
 
 def test_turn_pack_merges_payloads_and_keeps_server_ids():
-    pack = evidence_pack_from_payloads(
+    pack, _ = merge_evidence_payloads(
         [
             _pack_payload(_payload("E1"), token_count=20),
             _pack_payload(_payload("E2", document=2, chunk=12), token_count=15),
@@ -376,7 +374,7 @@ def test_turn_pack_merges_payloads_and_keeps_server_ids():
 
 
 def test_turn_pack_drops_ids_reused_for_different_records():
-    pack = evidence_pack_from_payloads(
+    pack, ambiguous_count = merge_evidence_payloads(
         [
             _pack_payload(_payload("E1", filename="a.pdf")),
             _pack_payload(_payload("E1", filename="b.pdf", document=2, chunk=99)),
@@ -389,10 +387,11 @@ def test_turn_pack_drops_ids_reused_for_different_records():
         "must not be citable"
     )
     assert pack.omitted_count >= 1
+    assert ambiguous_count == 1
 
 
 def test_turn_pack_rejects_ids_that_are_not_server_shaped():
-    pack = evidence_pack_from_payloads(
+    pack, _ = merge_evidence_payloads(
         [
             _pack_payload(
                 _payload("E1"),
@@ -432,67 +431,6 @@ def test_injected_document_commands_change_neither_validation_nor_citations(case
         assert not line.startswith("END UNTRUSTED EVIDENCE")
         assert not line.startswith("[E9]")
     assert _tool_policy_snapshot() == before
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("case", _injection_cases(), ids=lambda case: case["id"])
-async def test_injected_document_commands_never_reach_the_regeneration_policy(case):
-    from types import SimpleNamespace
-
-    from app.ai.agents.rag_agent import RAGAgent
-    from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-
-    agent = object.__new__(RAGAgent)
-    agent._resolve_runtime_model_config = lambda *_args, **_kwargs: SimpleNamespace(
-        provider="test",
-        model="test-model",
-        capabilities={"supports_vision": False},
-    )
-    captured: dict[str, Any] = {}
-
-    async def fake_invoke(**kwargs):
-        captured.update(kwargs)
-        return AgentResponse(
-            agent_type=AgentType.RAG,
-            agent_id="rag_agent",
-            message=AgentMessage(
-                role=MessageRole.ASSISTANT,
-                content="Revenue rose to 10 million [E1].",
-            ),
-            metadata={},
-        )
-
-    agent._invoke_agentic_rag_model = fake_invoke
-    pack = _injected_pack(case)
-
-    answer = await agent.regenerate_grounded_answer(
-        question="What was revenue?",
-        evidence=pack,
-        reason_codes=("unknown_evidence_id",),
-        conversation_id="conv-1",
-        user_id="owner",
-    )
-
-    assert answer == GroundedAnswer(
-        claims=(GroundedClaim(text="Revenue rose to 10 million.", evidence_ids=("E1",)),),
-        raw_text="Revenue rose to 10 million [E1].",
-    )
-    assert captured["disable_tools"] is True
-    assert captured["tools"] == []
-    system_messages = [
-        message for message in captured["messages"] if isinstance(message, SystemMessage)
-    ]
-    human_messages = [
-        message for message in captured["messages"] if isinstance(message, HumanMessage)
-    ]
-    assert len(system_messages) == 1
-    assert len(human_messages) == 1
-    injected = case["injected_text"]
-    assert injected not in str(system_messages[0].content), (
-        "untrusted document surfaces must never be spliced into the system prompt"
-    )
-    assert "BEGIN UNTRUSTED EVIDENCE E1" in str(human_messages[0].content)
-    assert GROUNDED_ANSWER_CITATION_INSTRUCTIONS in str(system_messages[0].content)
 
 
 def test_grounded_gate_has_no_off_switch():
@@ -677,7 +615,7 @@ def test_ambiguous_ids_are_logged_when_dropped(caplog):
     import logging
 
     with caplog.at_level(logging.WARNING, logger="app.services.rag_grounding"):
-        evidence_pack_from_payloads(
+        merge_evidence_payloads(
             [
                 _pack_payload(_payload("E1", filename="a.pdf")),
                 _pack_payload(_payload("E1", filename="b.pdf", document=2, chunk=99)),

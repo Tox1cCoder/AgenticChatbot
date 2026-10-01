@@ -55,45 +55,6 @@ def test_initial_state_carries_user_and_assistant_ids():
     assert human.id == user_id
 
 
-def test_finalize_response_stamps_only_final_assistant_message():
-    """Tool-calling AI messages must NOT carry the reserved assistant id —
-    only the final user-visible reply gets it."""
-    workflow = _make_workflow()
-    assistant_id = str(uuid4())
-
-    final_response = AgentResponse(
-        agent_type=AgentType.CHAT,
-        agent_id="chat_agent",
-        message=AgentMessage(role=MessageRole.ASSISTANT, content="all done"),
-    )
-    state_with_final: dict = {
-        "messages": [],
-        "assistant_message_id": assistant_id,
-    }
-    workflow._finalize_agent_response(state_with_final, final_response)
-    [final] = state_with_final["messages"]
-    assert isinstance(final, AIMessage)
-    assert final.id == assistant_id
-
-    tool_response = AgentResponse(
-        agent_type=AgentType.CHAT,
-        agent_id="chat_agent",
-        message=AgentMessage(
-            role=MessageRole.ASSISTANT,
-            content="",
-            tool_calls=[{"id": "abc", "name": "search", "args": {}}],
-        ),
-    )
-    state_with_tool: dict = {
-        "messages": [],
-        "assistant_message_id": assistant_id,
-    }
-    workflow._finalize_agent_response(state_with_tool, tool_response)
-    [intermediate] = state_with_tool["messages"]
-    assert isinstance(intermediate, AIMessage)
-    assert intermediate.id != assistant_id
-
-
 async def _run_compaction(workflow, *, snapshot, config, thread_id):
     workflow.checkpointer = object()
     captured = {}
