@@ -23,6 +23,7 @@ _SEE_MASK_NOASYNC = 0x00000100
 _SW_HIDE = 0
 _INFINITE = 0xFFFFFFFF
 _ERROR_CANCELLED = 1223
+_ERROR_INSUFFICIENT_BUFFER = 122
 _LOGON32_LOGON_INTERACTIVE = 2
 _LOGON32_PROVIDER_DEFAULT = 0
 
@@ -145,7 +146,8 @@ def account_environment(username: str, password: str) -> tuple[dict[str, str], s
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        return _token_environment(userenv, token), _profile_directory(userenv, token)
+        profile = _account_profile(userenv, token, username, password)
+        return _token_environment(userenv, token), profile
     finally:
         ctypes.windll.kernel32.CloseHandle(token)
 
@@ -188,13 +190,60 @@ def _token_environment(userenv, token) -> dict[str, str]:
     return env
 
 
+def _account_profile(userenv, token, username: str, password: str) -> str:
+    """The account's profile folder, created first if the account has none yet.
+
+    ``LogonUser`` does not create a profile, so a freshly set-up account has
+    none until something signs in with one. Starting a throwaway program the
+    way real launches do (``LOGON_WITH_PROFILE``) makes Windows create it.
+    """
+
+    try:
+        return _profile_directory(userenv, token)
+    except OSError:
+        print(
+            f"Creating the Windows profile for {username}; the first launch takes a moment.",
+            file=sys.stderr,
+        )
+        _create_profile(username, password)
+    try:
+        return _profile_directory(userenv, token)
+    except OSError as exc:
+        raise OSError(
+            exc.errno,
+            f"The account has no Windows profile and signing in once did not create one: "
+            f"{exc.strerror}",
+            None,
+            exc.winerror,
+        ) from exc
+
+
 def _profile_directory(userenv, token) -> str:
+    """The profile folder, or the error that says why there is none.
+
+    The first call only asks for the size; any failure other than "buffer too
+    small" is the real error. Ignoring it sized the buffer from a zero and
+    reported "the data area passed to a system call is too small" instead.
+    """
+
     size = wintypes.DWORD(0)
-    userenv.GetUserProfileDirectoryW(token, None, ctypes.byref(size))
+    if not userenv.GetUserProfileDirectoryW(token, None, ctypes.byref(size)):
+        error = ctypes.get_last_error()
+        if error != _ERROR_INSUFFICIENT_BUFFER or size.value == 0:
+            raise ctypes.WinError(error)
     buffer = ctypes.create_unicode_buffer(size.value)
     if not userenv.GetUserProfileDirectoryW(token, buffer, ctypes.byref(size)):
         raise ctypes.WinError(ctypes.get_last_error())
     return buffer.value
+
+
+def _create_profile(username: str, password: str) -> None:
+    """Start and wait for a program that does nothing, as the account, with its profile."""
+
+    system_root = os.environ.get("SYSTEMROOT", r"C:\Windows")
+    cmd = os.path.join(system_root, "System32", "cmd.exe")
+    environment = f"SystemRoot={system_root}\0\0"
+    run_as_user(username, password, f'"{cmd}" /c exit 0', system_root, environment)
 
 
 def run_as_user(
