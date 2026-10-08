@@ -240,10 +240,42 @@ def _profile_directory(userenv, token) -> str:
 def _create_profile(username: str, password: str) -> None:
     """Start and wait for a program that does nothing, as the account, with its profile."""
 
-    system_root = os.environ.get("SYSTEMROOT", r"C:\Windows")
-    cmd = os.path.join(system_root, "System32", "cmd.exe")
-    environment = f"SystemRoot={system_root}\0\0"
-    run_as_user(username, password, f'"{cmd}" /c exit 0', system_root, environment)
+    _run_nothing(username, password, system_root())
+
+
+def system_root() -> str:
+    return os.environ.get("SYSTEMROOT", r"C:\Windows")
+
+
+def can_start_in(username: str, password: str, cwd: str) -> bool:
+    """Whether a program Windows ships (cmd) starts and exits cleanly as the account in ``cwd``.
+
+    Tells a folder the account may not open apart from a program it may not
+    run: the same start with ``cmd`` in place of the program.
+    """
+
+    try:
+        return _run_nothing(username, password, cwd) == 0
+    except OSError:
+        return False
+
+
+def _run_nothing(username: str, password: str, cwd: str) -> int:
+    cmd = os.path.join(system_root(), "System32", "cmd.exe")
+    environment = f"SystemRoot={system_root()}\0\0"
+    return run_as_user(username, password, f'"{cmd}" /c exit 0', cwd, environment)
+
+
+STEP_CREATE = "starting the process"
+STEP_JOB = "placing it in its kill-on-close job"
+
+
+class ProcessStartError(OSError):
+    """Windows refused one step of starting a program as another account."""
+
+    def __init__(self, step: str, error: int) -> None:
+        super().__init__(0, f"{ctypes.FormatError(error).strip()} (while {step})", None, error)
+        self.step = step
 
 
 def run_as_user(
@@ -298,12 +330,12 @@ def run_as_user(
     ):
         error = ctypes.get_last_error()
         kernel32.CloseHandle(job)
-        raise ctypes.WinError(error)
+        raise ProcessStartError(STEP_CREATE, error)
     try:
         if not kernel32.AssignProcessToJobObject(job, process.hProcess):
             error = ctypes.get_last_error()
             kernel32.TerminateProcess(process.hProcess, 1)
-            raise ctypes.WinError(error)
+            raise ProcessStartError(STEP_JOB, error)
         kernel32.ResumeThread(process.hThread)
         kernel32.WaitForSingleObject(process.hProcess, _INFINITE)
         exit_code = wintypes.DWORD()
@@ -355,6 +387,7 @@ def _kill_on_close_job(kernel32):
 
 # What to do about the errors that stop a program starting as the account.
 _ERROR_ADVICE = {
+    267: "The working folder does not exist, or the account cannot open it",
     1058: (
         "The Secondary Logon service (seclogon) is disabled, and Windows needs it to "
         "start a program as another account. As administrator, run: "

@@ -232,11 +232,39 @@ def _launch(argv: list[str], cwd: str) -> int:
     except OSError as exc:
         relay.close()
         reason = explain_windows_error(exc)
+        if _denied_at_start(exc):
+            reason = f"{reason}. {_denied_part(credentials, argv[0], cwd)}"
         return _fail(126, f"Could not start the program as {credentials.username}: {reason}")
     stderr = relay.close()
     if code != 0:
         return _fail(code, f"{argv[0]} exited with code {code} as {credentials.username}", stderr)
     return 0
+
+
+_ERROR_ACCESS_DENIED = 5
+
+
+def _denied_at_start(error: OSError) -> bool:
+    from client_backend.services.sandbox.windows import STEP_CREATE
+
+    return error.winerror == _ERROR_ACCESS_DENIED and getattr(error, "step", None) == STEP_CREATE
+
+
+def _denied_part(credentials, program: str, cwd: str) -> str:
+    """Which part of the start the account may not touch, found by starting cmd instead.
+
+    "Access is denied" names neither the program nor the working folder, and
+    either one closed to the account refuses the start the same way.
+    """
+
+    from client_backend.services.sandbox.windows import can_start_in, system_root
+
+    username, password = credentials.username, credentials.password
+    if not can_start_in(username, password, system_root()):
+        return "Windows refuses to start any program as the account, so no folder grant fixes it"
+    if not can_start_in(username, password, cwd):
+        return f'The account cannot open the working folder; check: icacls "{cwd}"'
+    return f'The account cannot read or run the program; check: icacls "{program}"'
 
 
 if __name__ == "__main__":

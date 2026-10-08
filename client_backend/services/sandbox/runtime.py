@@ -206,22 +206,65 @@ def install_desktop_commander(version: str = PINNED_VERSION) -> Path:
 
 
 def node_executable() -> Path:
-    """A node the account can run.
+    """A node the account can run: a copy in the runtime folder.
 
-    A node under the user's own profile (fnm, nvm, a per-user installer) is
-    closed to the account, so it is copied into the runtime folder.
+    Where node is installed says nothing about whether the account may run it.
+    One under the user's profile (fnm, nvm, a per-user installer) is closed to
+    it, and so is one in any folder other accounts cannot read -- a portable
+    install on another drive, a locked-down tools folder -- which fails the
+    launch with "Access is denied". The runtime folder is the one place the
+    account is sure to read and run, so node always runs from there.
     """
 
     found = shutil.which("node")
     if not found:
         raise SandboxRuntimeError("Node.js is not installed or not on PATH")
-    node = Path(found).resolve()
-    if not node.is_relative_to(Path.home().resolve()):
-        return node
+    node = _real_node(found)
     copy = ensure_runtime_root() / "node" / node.name
-    copy.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(node, copy)
+    if not _is_current_copy(node, copy):
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(node, copy)
     return copy
+
+
+def _real_node(found: str) -> Path:
+    """The node executable itself, behind any shim or link on PATH.
+
+    A version manager's shim (Volta, Scoop, Chocolatey) finds the real node
+    from the user's own settings, which the account does not have, so the
+    copy must be of node itself; node knows where it is.
+    """
+
+    try:
+        completed = subprocess.run(
+            [found, "-p", "process.execPath"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return Path(found).resolve()
+    reported = Path(completed.stdout.strip()) if completed.returncode == 0 else None
+    if reported is not None and reported.is_file():
+        return reported.resolve()
+    return Path(found).resolve()
+
+
+def _is_current_copy(source: Path, copy: Path) -> bool:
+    """Whether ``copy`` already is ``source``, as ``shutil.copy2`` left it.
+
+    Copying on every launch would fail while another session's node still
+    runs from the copy, and costs tens of megabytes each time.
+    """
+
+    if not copy.is_file():
+        return False
+    source_stat, copy_stat = source.stat(), copy.stat()
+    return (
+        source_stat.st_size == copy_stat.st_size
+        and int(source_stat.st_mtime) == int(copy_stat.st_mtime)
+    )
 
 
 def _icacls(folder: Path, *arguments: str) -> None:

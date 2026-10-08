@@ -256,6 +256,55 @@ def test_a_refused_sign_in_is_reported_with_its_reason(monkeypatch):
     assert "log on locally" in message
 
 
+def _denied(monkeypatch, step: str, openable: set[str]) -> str:
+    """Launch with the start refused at ``step``; cmd starts only in ``openable``."""
+    from client_backend.services.sandbox import windows
+
+    def refuse(_stderr_handle):
+        raise windows.ProcessStartError(step, 5)
+
+    monkeypatch.setattr(windows, "can_start_in", lambda _user, _pw, cwd: cwd in openable)
+    monkeypatch.setattr(windows, "system_root", lambda: r"C:\Windows")
+    code, _ = _run_main(monkeypatch, None, run=refuse)
+    assert code == 126
+    return _failure().message
+
+
+def test_a_program_the_account_cannot_run_is_named(monkeypatch):
+    """"Access is denied" alone names neither the program nor the folder."""
+    from client_backend.services.sandbox.windows import STEP_CREATE
+
+    message = _denied(monkeypatch, STEP_CREATE, openable={r"C:\Windows", r"C:\work"})
+
+    assert "[WinError 5]" in message
+    assert 'cannot read or run the program; check: icacls "node"' in message
+
+
+def test_a_working_folder_the_account_cannot_open_is_named(monkeypatch):
+    from client_backend.services.sandbox.windows import STEP_CREATE
+
+    message = _denied(monkeypatch, STEP_CREATE, openable={r"C:\Windows"})
+
+    assert r'cannot open the working folder; check: icacls "C:\work"' in message
+
+
+def test_an_account_that_can_start_nothing_is_not_blamed_on_a_folder(monkeypatch):
+    from client_backend.services.sandbox.windows import STEP_CREATE
+
+    message = _denied(monkeypatch, STEP_CREATE, openable=set())
+
+    assert "refuses to start any program" in message
+
+
+def test_a_refused_job_is_reported_as_the_job_not_a_permission(monkeypatch):
+    from client_backend.services.sandbox.windows import STEP_JOB
+
+    message = _denied(monkeypatch, STEP_JOB, openable=set())
+
+    assert "kill-on-close job" in message
+    assert "icacls" not in message
+
+
 def test_profile_root_argument_names_the_profile_before_settings_load(monkeypatch):
     """Settings are built on first use, from the environment, so the argument
     has to be in the environment before anything reads them."""

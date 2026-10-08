@@ -215,11 +215,52 @@ def test_existing_runtime_root_is_granted_to_replacement_profile_account(profile
     assert grants == [(root, ("/grant", "KaniSbNewProfile:(OI)(CI)RX"))]
 
 
-def test_node_the_account_can_already_run_is_used_in_place(profile, monkeypatch):
-    shared_node = profile / "Program Files" / "nodejs" / "node.exe"
-    shared_node.parent.mkdir(parents=True)
-    shared_node.write_bytes(b"MZ")
-    monkeypatch.setattr(runtime.Path, "home", classmethod(lambda cls: profile / "home"))
-    monkeypatch.setattr(runtime.shutil, "which", lambda name: str(shared_node))
+def test_node_outside_the_profile_is_copied_too(profile, monkeypatch):
+    """Outside the profile is not the same as open to the account: a node in a
+    folder it could not read failed the launch with "Access is denied"."""
+    tools_node = profile / "D-drive" / "tools" / "node" / "node.exe"
+    tools_node.parent.mkdir(parents=True)
+    tools_node.write_bytes(b"MZ-tools-node")
+    monkeypatch.setattr(runtime.shutil, "which", lambda name: str(tools_node))
+    monkeypatch.setattr(runtime, "ensure_runtime_root", lambda principal=None: profile / "rt")
 
-    assert runtime.node_executable() == shared_node
+    node = runtime.node_executable()
+
+    assert node == profile / "rt" / "node" / "node.exe"
+    assert node.read_bytes() == b"MZ-tools-node"
+
+
+def test_node_behind_a_shim_is_copied_from_where_node_says_it_is(profile, monkeypatch):
+    """A version manager's shim finds node from the user's own settings, which
+    the account does not have; the copy has to be of node itself."""
+    shim = profile / "scoop" / "shims" / "node.exe"
+    real = profile / "scoop" / "apps" / "nodejs" / "current" / "node.exe"
+    for path, content in ((shim, b"MZ-shim"), (real, b"MZ-real-node")):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(content)
+
+    def fake_run(argv, **kwargs):
+        assert argv == [str(shim), "-p", "process.execPath"]
+        return subprocess.CompletedProcess(argv, 0, stdout=f"{real}\n", stderr="")
+
+    monkeypatch.setattr(runtime.shutil, "which", lambda name: str(shim))
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+    monkeypatch.setattr(runtime, "ensure_runtime_root", lambda principal=None: profile / "rt")
+
+    assert runtime.node_executable().read_bytes() == b"MZ-real-node"
+
+
+def test_an_unchanged_node_is_not_copied_again(profile, monkeypatch):
+    """A copy on every launch fails while another session's node runs from it."""
+    node = profile / "nodejs" / "node.exe"
+    node.parent.mkdir(parents=True)
+    node.write_bytes(b"MZ-node")
+    monkeypatch.setattr(runtime.shutil, "which", lambda name: str(node))
+    monkeypatch.setattr(runtime, "ensure_runtime_root", lambda principal=None: profile / "rt")
+    runtime.node_executable()
+    copies = []
+    monkeypatch.setattr(runtime.shutil, "copy2", lambda *args: copies.append(args))
+
+    runtime.node_executable()
+
+    assert copies == []
