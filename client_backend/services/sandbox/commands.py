@@ -9,6 +9,7 @@ wait; the elevated copy has no visible console, so it leaves a result file
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,7 +23,10 @@ from client_backend.services.sandbox.setup import (
 )
 from client_backend.services.sandbox.windows import (
     ElevationDeclinedError,
+    account_environment,
+    explain_windows_error,
     logon_problem,
+    run_as_user,
     run_elevated,
 )
 
@@ -75,13 +79,42 @@ def _status() -> int:
     if credentials is None:
         print("The sandbox account is not set up. Run: python -m client_backend sandbox setup")
         return 1
-    problem = logon_problem(credentials.username, credentials.password)
+    problem = logon_problem(credentials.username, credentials.password) or launch_problem(
+        credentials.username, credentials.password
+    )
     if problem is not None:
         print(f"The sandbox account {credentials.username} cannot be used: {problem}")
         return 1
     print(f"The sandbox account {credentials.username} is set up and usable.")
     _print_workspace()
     return 0
+
+
+def launch_problem(username: str, password: str) -> str | None:
+    """Why a program cannot be started as the account, or None.
+
+    Signing in (``logon_problem``) is not enough: Desktop Commander is started
+    through ``CreateProcessWithLogonW``, which also needs the Secondary Logon
+    service, so this starts a real, trivial program the same way.
+    """
+
+    from client_backend.services.sandbox.launcher import (
+        environment_block,
+        overlay_environment,
+        profile_variables,
+    )
+
+    system_root = os.environ.get("SYSTEMROOT",r"C:\Windows")
+    command_line = f'"{Path(system_root) / "System32" / "cmd.exe"}" /c exit 0'
+    try:
+        windows_env, profile = account_environment(username, password)
+        env = overlay_environment(windows_env, profile_variables(profile))
+        code = run_as_user(username, password, command_line, system_root, environment_block(env))
+    except OSError as exc:
+        return f"starting a program as it failed: {explain_windows_error(exc)}"
+    if code != 0:
+        return f"a test program started as it exited with code {code}"
+    return None
 
 
 def _print_workspace() -> None:

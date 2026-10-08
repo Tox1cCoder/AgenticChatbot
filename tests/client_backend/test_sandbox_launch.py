@@ -62,6 +62,19 @@ def test_desktop_commander_runs_as_the_sandbox_account_from_the_pinned_install(t
     assert program == [str(_LAUNCH.node), str(_LAUNCH.desktop_commander), "--no-onboarding"]
 
 
+def test_the_launcher_is_told_which_profile_holds_the_account(tmp_path, monkeypatch):
+    """The MCP SDK passes the launcher only a dozen variables, so a profile root
+    configured in the sidecar's environment would never reach it."""
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "custom profile"))
+
+    args = _entries(tmp_path, _LAUNCH)["desktop-commander"]["args"]
+
+    options = args[: args.index("--")]
+    assert options[options.index("--profile-root") + 1] == str(tmp_path / "custom profile")
+
+
 def test_sandboxed_desktop_commander_keeps_its_quiet_non_interactive_environment(tmp_path):
     from client_backend.services.sandbox.launcher import ENV_VARIABLE, decode_environment
 

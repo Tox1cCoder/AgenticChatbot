@@ -198,15 +198,22 @@ def _profile_directory(userenv, token) -> str:
 
 
 def run_as_user(
-    username: str, password: str, command_line: str, cwd: str, environment: str
+    username: str,
+    password: str,
+    command_line: str,
+    cwd: str,
+    environment: str,
+    *,
+    stderr_handle: int | None = None,
 ) -> int:
     """Run a command line as another local account, on this process's stdio, and wait.
 
     The child gets exactly ``environment`` (a Unicode environment block) and
     this process's standard handles, so whoever holds our pipes talks to it
-    directly. It starts suspended inside a kill-on-close job and only then
-    runs: when this process exits, for any reason, the child and everything it
-    started go too.
+    directly; ``stderr_handle``, an inheritable handle, replaces its stderr.
+    It starts suspended inside a kill-on-close job and only then runs: when
+    this process exits, for any reason, the child and everything it started
+    go too.
     """
 
     kernel32 = _kernel32()
@@ -220,6 +227,8 @@ def run_as_user(
     startup.hStdInput, startup.hStdOutput, startup.hStdError = (
         kernel32.GetStdHandle(handle) for handle in _STD_HANDLES
     )
+    if stderr_handle is not None:
+        startup.hStdError = stderr_handle
     process = _ProcessInformation()
     command_buffer = ctypes.create_unicode_buffer(command_line)
     # Raw UTF-16 bytes: a str buffer would stop at the first of the block's NULs.
@@ -295,6 +304,35 @@ def _kill_on_close_job(kernel32):
     return job
 
 
+# What to do about the errors that stop a program starting as the account.
+_ERROR_ADVICE = {
+    1058: (
+        "The Secondary Logon service (seclogon) is disabled, and Windows needs it to "
+        "start a program as another account. As administrator, run: "
+        "sc config seclogon start= demand"
+    ),
+    1326: (
+        "The stored password no longer matches the account. Run: "
+        "python -m client_backend sandbox setup"
+    ),
+    1331: "The account is disabled. Run: python -m client_backend sandbox setup",
+    1385: (
+        "Windows policy does not let the account sign in locally (the 'Allow log on "
+        "locally' / 'Deny log on locally' rights); an administrator has to allow it"
+    ),
+}
+
+
+def explain_windows_error(error: OSError) -> str:
+    """The error as Windows words it, plus what to do when that is known."""
+
+    code = getattr(error, "winerror", None)
+    text = (error.strerror or str(error)).strip()
+    described = f"[WinError {code}] {text}" if code else text
+    advice = _ERROR_ADVICE.get(code) if code else None
+    return f"{described}. {advice}" if advice else described
+
+
 def logon_problem(username: str, password: str) -> str | None:
     """Why Windows would refuse to start a process as this account, or None."""
 
@@ -310,4 +348,4 @@ def logon_problem(username: str, password: str) -> str | None:
     ):
         ctypes.windll.kernel32.CloseHandle(token)
         return None
-    return ctypes.FormatError(ctypes.get_last_error()).strip()
+    return explain_windows_error(ctypes.WinError(ctypes.get_last_error()))

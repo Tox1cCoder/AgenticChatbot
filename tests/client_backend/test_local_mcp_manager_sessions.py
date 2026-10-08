@@ -112,6 +112,82 @@ async def test_call_after_a_crash_is_served_by_a_fresh_server(manager, tmp_path)
     assert await _call(manager, "increment") == "1"
 
 
+_FAILED_LAUNCH = """
+import json, sys, time
+from pathlib import Path
+report = Path(sys.argv[1])
+report.parent.mkdir(parents=True, exist_ok=True)
+report.write_text(json.dumps({
+    "message": "node exited with code 1 as KaniSbTest",
+    "stderr": ["at Module._compile", "Error: EPERM: operation not permitted, mkdir 'C:\\\\x'"],
+    "written_at": time.time(),
+}))
+"""
+
+
+async def test_a_failed_sandboxed_start_reports_the_launchers_reason(tmp_path, monkeypatch):
+    """A sandboxed start that fails reaches the MCP session only as "Connection
+    closed"; the manager reports the launcher's recorded reason instead."""
+    from client_backend.core.config import client_settings
+    from client_backend.services import local_mcp_manager
+    from client_backend.services.sandbox.launch_report import launch_report_path
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "profile"))
+    monkeypatch.setattr(local_mcp_manager, "read_sandbox_mode", lambda: "off")
+    store = _store(tmp_path)
+    # Stands in for the launcher: it records why, then exits before initialize.
+    failing_launch = tmp_path / "failing_launch.py"
+    failing_launch.write_text(_FAILED_LAUNCH, encoding="utf-8")
+    store.save_custom_server(
+        "desktop-commander",
+        {
+            "transport": "stdio",
+            "command": sys.executable,
+            "args": [str(failing_launch), str(launch_report_path()), "desktop-commander"],
+        },
+        env={},
+        headers={},
+    )
+    manager = LocalMCPManager(store=store)
+    try:
+        await manager.initialize({"desktop-commander"})
+        error = manager.servers["desktop-commander"].error_message
+    finally:
+        await manager.shutdown()
+
+    assert "Connection closed" in error
+    assert "node exited with code 1 as KaniSbTest" in error
+    assert "EPERM: operation not permitted" in error
+
+
+async def test_a_report_from_an_earlier_launch_is_not_blamed(tmp_path, monkeypatch):
+    from client_backend.core.config import client_settings
+    from client_backend.services import local_mcp_manager
+    from client_backend.services.sandbox.launch_report import write_launch_failure
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "profile"))
+    monkeypatch.setattr(local_mcp_manager, "read_sandbox_mode", lambda: "off")
+    write_launch_failure("stale reason from yesterday")
+    store = _store(tmp_path)
+    store.save_custom_server(
+        "desktop-commander",
+        {"transport": "stdio", "command": sys.executable, "args": ["-c", "", "desktop-commander"]},
+        env={},
+        headers={},
+    )
+    manager = LocalMCPManager(store=store)
+    try:
+        # The report must predate this start, however coarse the clock.
+        await asyncio.sleep(0.05)
+        await manager.initialize({"desktop-commander"})
+        error = manager.servers["desktop-commander"].error_message
+    finally:
+        await manager.shutdown()
+
+    assert "Connection closed" in error
+    assert "stale reason" not in error
+
+
 async def test_server_that_died_while_idle_is_restarted_for_the_next_call(manager):
     pid = int(await _call(manager, "process_id"))
     psutil.Process(pid).kill()

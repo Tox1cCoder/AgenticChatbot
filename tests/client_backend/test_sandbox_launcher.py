@@ -89,14 +89,24 @@ def test_the_environment_block_is_sorted_and_double_nul_terminated():
     assert block == "A=1\0b=2\0C=x=y\0\0"
 
 
-def _run_main(monkeypatch, encoded: str | None) -> tuple[int, list[tuple[str, str]]]:
+@pytest.fixture(autouse=True)
+def profile(tmp_path, monkeypatch):
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path))
+    return tmp_path
+
+
+def _run_main(
+    monkeypatch, encoded: str | None, run=None
+) -> tuple[int, list[tuple[str, str]]]:
     from client_backend.services.sandbox import account, windows
 
     started: list[tuple[str, str]] = []
 
-    def run_as_user(username, password, command_line, cwd, environment):
+    def run_as_user(username, password, command_line, cwd, environment, *, stderr_handle=None):
         started.append((command_line, environment))
-        return 0
+        return run(stderr_handle) if run else 0
 
     credentials = type("Credentials", (), {"username": "KaniSbTest", "password": "pw"})()
     monkeypatch.setattr(account, "load_credentials", lambda: credentials)
@@ -161,3 +171,99 @@ def test_a_payload_that_is_not_base64_is_refused(monkeypatch):
 
     assert code == 126
     assert started == []
+
+
+def _failure():
+    from client_backend.services.sandbox.launch_report import read_launch_failure
+
+    return read_launch_failure(since=0)
+
+
+def _write_to_handle(handle: int, data: bytes) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    written = wintypes.DWORD()
+    assert ctypes.windll.kernel32.WriteFile(
+        wintypes.HANDLE(handle), data, len(data), ctypes.byref(written), None
+    )
+
+
+def test_a_program_that_fails_leaves_its_stderr_tail_in_the_report(monkeypatch, capfd):
+    """Its stderr reaches only the sidecar's console, which the sidecar cannot
+    read; the report is how "Connection closed" gets its real reason."""
+
+    def crash(stderr_handle):
+        _write_to_handle(stderr_handle, b"line one\r\nError: Cannot find module 'x'\r\n")
+        return 1
+
+    code, _ = _run_main(monkeypatch, None, run=crash)
+
+    assert code == 1
+    failure = _failure()
+    assert failure.message == "node exited with code 1 as KaniSbTest"
+    assert failure.stderr == ("line one", "Error: Cannot find module 'x'")
+    assert failure.summary().endswith("Error: Cannot find module 'x'")
+    # Still passed through to the console, as before.
+    assert "Cannot find module" in capfd.readouterr().err
+
+
+def test_a_program_that_exits_cleanly_leaves_no_report(monkeypatch):
+    code, _ = _run_main(monkeypatch, None)
+
+    assert code == 0
+    assert _failure() is None
+
+
+def test_missing_credentials_are_reported(monkeypatch):
+    from client_backend.services.sandbox import account
+
+    monkeypatch.setattr(account, "load_credentials", lambda: None)
+
+    assert launcher.main(["--cwd", r"C:\work", "--", "node", "index.js"]) == 127
+    assert "not set up" in _failure().message
+
+
+def test_a_disabled_secondary_logon_service_says_how_to_enable_it(monkeypatch):
+    import ctypes
+
+    def refuse(_stderr_handle):
+        raise ctypes.WinError(1058)
+
+    code, _ = _run_main(monkeypatch, None, run=refuse)
+
+    assert code == 126
+    message = _failure().message
+    assert "Could not start the program as KaniSbTest" in message
+    assert "seclogon" in message
+
+
+def test_a_refused_sign_in_is_reported_with_its_reason(monkeypatch):
+    import ctypes
+
+    from client_backend.services.sandbox import account, windows
+
+    def refuse(*_):
+        raise ctypes.WinError(1385)
+
+    credentials = type("Credentials", (), {"username": "KaniSbTest", "password": "pw"})()
+    monkeypatch.setattr(account, "load_credentials", lambda: credentials)
+    monkeypatch.setattr(windows, "account_environment", refuse)
+
+    assert launcher.main(["--cwd", r"C:\work", "--", "node", "index.js"]) == 126
+    message = _failure().message
+    assert "Could not sign in as KaniSbTest" in message
+    assert "log on locally" in message
+
+
+def test_profile_root_argument_names_the_profile_before_settings_load(monkeypatch):
+    """Settings are built on first use, from the environment, so the argument
+    has to be in the environment before anything reads them."""
+    from client_backend.services.sandbox import account
+
+    monkeypatch.setenv("CLIENT_PROFILE_ROOT", "inherited")
+    monkeypatch.setattr(account, "load_credentials", lambda: None)
+
+    launcher.main(["--cwd", r"C:\work", "--profile-root", r"D:\profiles\kani", "--", "node"])
+
+    assert os.environ["CLIENT_PROFILE_ROOT"] == r"D:\profiles\kani"

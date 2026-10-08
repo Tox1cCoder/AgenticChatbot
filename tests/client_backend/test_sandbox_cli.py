@@ -85,6 +85,31 @@ def _pretend_account_is_usable(monkeypatch) -> None:
     creds = SandboxCredentials("KaniSandbox", "x")
     monkeypatch.setattr(commands, "load_credentials", lambda: creds)
     monkeypatch.setattr(commands, "logon_problem", lambda *args: None)
+    monkeypatch.setattr(commands, "launch_problem", lambda *args: None)
+
+
+def test_status_fails_when_a_program_cannot_be_started_as_the_account(
+    profile, monkeypatch, capsys
+):
+    """Signing in can succeed while starting a program fails, as when the
+    Secondary Logon service is disabled; status has to try the real thing."""
+    import ctypes
+
+    from client_backend.services.sandbox.account import SandboxCredentials
+
+    def refuse(*_args):
+        raise ctypes.WinError(1058)
+
+    creds = SandboxCredentials("KaniSandbox", "x")
+    monkeypatch.setattr(commands, "load_credentials", lambda: creds)
+    monkeypatch.setattr(commands, "logon_problem", lambda *args: None)
+    monkeypatch.setattr(commands, "account_environment", lambda *_: ({}, r"C:\Users\KaniSb"))
+    monkeypatch.setattr(commands, "run_as_user", refuse)
+
+    assert cli.main(["sandbox", "status"]) == 1
+    out = capsys.readouterr().out
+    assert "cannot be used" in out
+    assert "sc config seclogon start= demand" in out
 
 
 def test_status_shows_the_managed_workspace_when_no_root_is_configured(

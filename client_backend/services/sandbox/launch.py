@@ -57,7 +57,10 @@ class SandboxLaunch:
     def mcp_entry(self, env: Mapping[str, str]) -> dict[str, Any]:
         """The MCP server entry that starts Desktop Commander through the launcher."""
 
-        args = ["-m", _LAUNCHER_MODULE, "--cwd", str(self.cwd), "--"]
+        # The launcher gets only a few of this process's variables, so the
+        # profile holding the account's credentials is named outright.
+        args = ["-m", _LAUNCHER_MODULE, "--cwd", str(self.cwd)]
+        args += ["--profile-root", str(client_settings.profile_root), "--"]
         args += [str(self.node), str(self.desktop_commander), NO_ONBOARDING_FLAG]
         # The values ride in the launcher's environment, not its command line,
         # which every process can read and process-audit logs record.

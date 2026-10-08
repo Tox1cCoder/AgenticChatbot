@@ -9,6 +9,7 @@ per-call session would discard that state along with the server process.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -39,6 +40,7 @@ from client_backend.services.mcp_config_migration import prepare_mcp_config_stor
 from client_backend.services.mcp_config_store import EffectiveMCPServer, MCPConfigStore
 from client_backend.services.sandbox import launch
 from client_backend.services.sandbox.launch import SandboxLaunch
+from client_backend.services.sandbox.launch_report import read_launch_failure
 from client_backend.services.sandbox.mode import read_sandbox_mode
 from client_backend.services.upstream_auth import get_upstream_auth_service
 
@@ -358,15 +360,18 @@ class LocalMCPManager:
         if self._client is None:
             raise RuntimeError(runtime.error_message or "MCP client is not initialized")
 
+        desktop_commander = is_desktop_commander(runtime.config.command, runtime.config.args)
         session = _ServerSession(self._client, server_name)
+        started_at = time.time()
         try:
             loaded_tools = await session.start()
         except Exception as exc:
             message = _terminal_exception_message(exc)
+            if desktop_commander:
+                message = self._with_sandbox_launch_failure(server_name, message, started_at)
             runtime.mark_error(message)
             raise RuntimeError(f"MCP server '{server_name}' failed to start: {message}") from exc
 
-        desktop_commander = is_desktop_commander(runtime.config.command, runtime.config.args)
         named_tools = {
             clean_mcp_tool_name(str(getattr(tool, "name", "") or ""), server_name=server_name): tool
             for tool in loaded_tools
@@ -385,6 +390,25 @@ class LocalMCPManager:
         self._sessions[server_name] = session
         logger.info("Started MCP server '%s' with %d tools", server_name, len(records))
         return session
+
+    @staticmethod
+    def _with_sandbox_launch_failure(server_name: str, message: str, started_at: float) -> str:
+        """``message`` with the sandbox launcher's reason, when it recorded one.
+
+        A sandboxed start that fails reaches the MCP session only as "Connection
+        closed"; the launcher's report says what actually went wrong.
+        """
+
+        failure = read_launch_failure(since=started_at)
+        if failure is None:
+            return message
+        logger.error(
+            "Sandboxed MCP server '%s' failed to start: %s%s",
+            server_name,
+            failure.message,
+            "".join(f"\n  stderr| {line}" for line in failure.stderr),
+        )
+        return f"{message} (sandbox launcher: {failure.summary()})"
 
     @staticmethod
     def _tool_records_from_loaded_tools(
