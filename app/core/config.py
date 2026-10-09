@@ -238,6 +238,15 @@ class Settings(BaseSettings):
             "into a forked conversation (413 above this)."
         ),
     )
+    conversation_fork_memory_prepare_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        le=120,
+        description=(
+            "How long a forked child's first turn waits for its summary job before "
+            "proceeding with ordinary bounded history (the job keeps running)."
+        ),
+    )
 
     # API settings
     api_host: str = Field(

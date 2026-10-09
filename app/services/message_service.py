@@ -475,6 +475,7 @@ class MessageService(IMessageService):
         turn_coordinator: ConversationTurnCoordinator | None = None,
         generation_control_service: Any | None = None,
         project_context_service: Any | None = None,
+        fork_memory_preparer: Any | None = None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -502,6 +503,9 @@ class MessageService(IMessageService):
         # Resolves project instructions into the system prompt when wired;
         # None preserves plain persona-only behavior.
         self.project_context_service = project_context_service
+        # Builds a forked child's first summary before history assembly; None
+        # leaves forks on ordinary bounded history until the worker catches up.
+        self.fork_memory_preparer = fork_memory_preparer
         self.redis_client = self._init_redis_client()
 
     def _generation_control(self):
@@ -4729,6 +4733,11 @@ class MessageService(IMessageService):
         assistant_message_id: UUID | None = None,
     ) -> tuple[UUID | None, str | None, WorkflowExecutionRequest]:
         resolved_user_id = user_id or (conversation.owner_id if conversation else None)
+        # Before anything reads prompt history: routing and every agent see the
+        # child's summary only if it exists by the time the request runs.
+        await self._aprepare_fork_memory(
+            message_create_data.conversation_id, conversation, resolved_user_id
+        )
         if self.project_context_service is None:
             sanitized_persona = sanitize_persona(
                 conversation.persona_prompt if conversation else None
@@ -4773,6 +4782,26 @@ class MessageService(IMessageService):
             hitl_policy=hitl_policy,
         )
         return resolved_user_id, sanitized_persona, request
+
+    async def _aprepare_fork_memory(
+        self, conversation_id: UUID, conversation: Any, user_id: UUID | None
+    ) -> None:
+        """Give a forked child its first summary, bounded; see ``ForkMemoryPreparer``.
+
+        The preparer never raises for a failed summary: it logs the limitation
+        and the turn continues on ordinary bounded history.
+        """
+        preparer = getattr(self, "fork_memory_preparer", None)
+        if preparer is None or conversation is None or user_id is None:
+            return
+        result = await preparer.aprepare(
+            conversation_id=conversation_id,
+            owner_id=user_id,
+            forked_through_sequence=getattr(conversation, "forked_through_sequence", None),
+        )
+        if result.status == "prepared":
+            with contextlib.suppress(Exception):
+                self.ai_service.invalidate_history_cache(str(conversation_id))
 
     @staticmethod
     def _validate_request_device_id(device_id: Any, user_id: Any) -> str | None:

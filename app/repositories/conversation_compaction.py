@@ -709,6 +709,48 @@ class ConversationCompactionRepository(RepositorySessionMixin):
                 session.expunge(memory)
             return memory
 
+    def get_job_status(self, conversation_id: UUID) -> str | None:
+        """The summary job's lifecycle status, or ``None`` when it has none."""
+        with self.session_factory() as session:
+            status = session.execute(
+                select(ConversationSummaryJob.status).where(
+                    ConversationSummaryJob.conversation_id == conversation_id
+                )
+            ).scalar_one_or_none()
+            return None if status is None else str(getattr(status, "value", status))
+
+    def load_fork_prefix_tail(
+        self,
+        conversation_id: UUID,
+        through_sequence: int,
+        *,
+        limit: int | None,
+    ) -> list[Message]:
+        """The newest ``limit`` prompt-visible rows at or before a fork cutoff, oldest first.
+
+        Bounded by ``limit`` so deciding whether a copied prefix fits the
+        history budget never loads the whole prefix.
+        """
+        with self.session_factory() as session:
+            statement = (
+                select(Message)
+                .options(lazyload(Message.feedback))
+                .where(
+                    Message.conversation_id == conversation_id,
+                    Message.sequence <= through_sequence,
+                    Message.deleted_at.is_(None),
+                )
+                .order_by(Message.sequence.desc())
+            )
+            if limit is not None:
+                statement = statement.limit(limit)
+            rows = list(session.execute(statement).scalars().all())
+            rows.reverse()
+            visible = [row for row in rows if not self._is_hidden_artifact(row)]
+            for row in visible:
+                session.expunge(row)
+            return visible
+
     def get_compaction_health_snapshot(self) -> dict[str, Any]:
         """Return aggregate queue, lease, and sequence-lag health without IDs."""
         now = self._utcnow()

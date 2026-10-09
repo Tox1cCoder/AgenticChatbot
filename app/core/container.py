@@ -68,6 +68,7 @@ from app.repositories.web_image_reference import WebImageReferenceRepository
 from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
 from app.services.chat_image_service import ChatImageStorageService
+from app.services.conversation_fork_memory import ForkMemoryPreparer
 from app.services.conversation_fork_service import ConversationForkService
 from app.services.conversation_service import ConversationService
 from app.services.conversation_turn_coordinator import (
@@ -114,7 +115,10 @@ from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
 from app.utils.validation.user_validation import UserValidationUtils
 from app.workers.celery_app import celery_app
-from app.workers.conversation_compaction import publish_conversation_compaction
+from app.workers.conversation_compaction import (
+    publish_conversation_compaction,
+    run_conversation_compaction_now,
+)
 
 
 def _build_document_chunk_builder(
@@ -611,6 +615,15 @@ class Container(containers.DeclarativeContainer):
         max_bytes=providers.Object(settings.conversation_fork_max_bytes),
     )
 
+    # A forked child's first turn: run its committed summary job under the
+    # ordinary worker lease, bounded, before history is assembled.
+    fork_memory_preparer = providers.Factory(
+        ForkMemoryPreparer,
+        repository=conversation_compaction_repository,
+        runner=providers.Object(run_conversation_compaction_now),
+        settings=providers.Object(settings),
+    )
+
     # Routing-v2: the sole owner of new-turn classification. Resolved strictly
     # (no provider fallback) through the same runtime model abstraction every
     # other agent uses.
@@ -758,6 +771,7 @@ class Container(containers.DeclarativeContainer):
         web_image_service=web_image_service,
         turn_coordinator=conversation_turn_coordinator,
         generation_control_service=generation_control_service,
+        fork_memory_preparer=fork_memory_preparer,
         project_context_service=project_context_service,
     )
 
