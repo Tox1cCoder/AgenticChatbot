@@ -208,9 +208,15 @@ class ConversationCompactor:
     def select_compactable_prefix(self, messages: Sequence[Any]) -> CompactionSelection:
         """Select an assistant-ended prefix while retaining recent complete turns."""
         full_window = tuple(messages)
+        # Grouped through this class's role reader: persisted rows carry
+        # ``sender``, which the shared grouping helper does not read.
+        role_views = [
+            {"role": self._role(message), "tool_calls": self._value(message, "tool_calls")}
+            for message in full_window
+        ]
         complete_boundaries = []
         offset = 0
-        for group in _atomic_history_groups(full_window):
+        for group in _atomic_history_groups(role_views):
             offset += len(group.messages)
             if group.complete:
                 complete_boundaries.append(offset - 1)

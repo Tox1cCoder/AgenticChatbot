@@ -138,6 +138,32 @@ def test_prefix_ends_on_assistant_and_retains_complete_recent_turns() -> None:
     assert [item["sequence"] for item in selection.retained_recent] == [3, 4, 5]
 
 
+def test_prefix_selection_reads_the_sender_of_persisted_message_rows() -> None:
+    """The worker passes ORM ``Message`` rows, which carry ``sender``, not ``role``.
+
+    Grouping by ``role`` alone saw no complete turn in any real transcript, so
+    every durable compaction ended ``no_complete_turn`` and wrote no memory.
+    """
+    from app.models.enums import MessageRole
+    from app.models.message import Message
+
+    compactor = _compactor(lambda **_: _valid_output(), messages=1, keep=1)
+    rows = [
+        Message(sequence=sequence, sender=sender.value, content=f"row {sequence}")
+        for sequence, sender in (
+            (1, MessageRole.user),
+            (2, MessageRole.assistant),
+            (3, MessageRole.user),
+            (4, MessageRole.assistant),
+        )
+    ]
+
+    selection = compactor.select_compactable_prefix(rows)
+
+    assert [row.sequence for row in selection.compactable_prefix] == [1, 2]
+    assert [row.sequence for row in selection.retained_recent] == [3, 4]
+
+
 def test_prefix_selection_counts_complete_tool_turns_not_assistant_events() -> None:
     compactor = _compactor(lambda **_: _valid_output(), keep=2)
     messages = [
