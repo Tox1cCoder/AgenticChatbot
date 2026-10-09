@@ -9,8 +9,13 @@ the provider's hard limit -- so an early fact in a long prefix would be missing
 from the first child turn.
 
 ``ForkMemoryPreparer`` closes that gap on the next-generation path, before the
-workflow request is built. When the child has no valid memory and its copied
-prefix exceeds the tightest history budget, it runs the child's existing durable
+workflow request is built, and only for the child's *first* turn: once any row
+follows the copied prefix (besides the turn's own user message), later turns rely
+on background compaction and never wait or claim here. That bound matters
+because every persisted assistant reply re-queues the job with its attempts
+reset, so a failing provider would otherwise cost a wait on every turn. When the
+child has no valid memory and its copied prefix exceeds the tightest history
+budget, it runs the child's existing durable
 job through the ordinary worker (``run_conversation_compaction_now``): the same
 lease, CAS write and retry accounting a Celery worker uses, never a second
 summary path. The work runs in a thread because the worker's repository is
@@ -18,10 +23,11 @@ synchronous, and it is bounded by
 ``conversation_fork_memory_prepare_timeout_seconds``.
 
 Every way preparation cannot finish -- compaction disabled, a lease held by a
-worker, a dead job, a timeout, a summary failure -- proceeds with the ordinary
-bounded history and logs one structured warning. Preparation never fails a turn.
-Even when it succeeds the child gets the application's normal bounded memory (a
-summary plus recent rows), not its full transcript.
+worker, a dead job, a retry still in backoff, a timeout, a summary failure --
+proceeds with the ordinary bounded history and logs one structured warning.
+Preparation never fails a turn. Even when it succeeds the child gets the
+application's normal bounded memory (a summary plus recent rows), not its full
+transcript.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -69,6 +76,10 @@ def applicable_history_budget(settings: Any) -> tuple[int, int]:
     return min(messages, default=0), min(tokens, default=0)
 
 
+def _in_future(moment: datetime | None) -> bool:
+    return moment is not None and moment > datetime.now(UTC)
+
+
 class ForkMemoryPreparer:
     """Build a forked child's first summary before its first prompt, or say why not."""
 
@@ -89,6 +100,7 @@ class ForkMemoryPreparer:
         conversation_id: UUID,
         owner_id: UUID,
         forked_through_sequence: int | None,
+        current_message_id: UUID | None = None,
     ) -> ForkMemoryPreparation:
         """Prepare the child's memory within the timeout; never raises for a failed summary."""
         if forked_through_sequence is None:
@@ -100,7 +112,11 @@ class ForkMemoryPreparer:
             # summary is ready for a later turn instead of leaving a stale lease.
             result = await asyncio.wait_for(
                 asyncio.to_thread(
-                    self._prepare_blocking, conversation_id, owner_id, forked_through_sequence
+                    self._prepare_blocking,
+                    conversation_id,
+                    owner_id,
+                    forked_through_sequence,
+                    current_message_id,
                 ),
                 timeout=timeout,
             )
@@ -115,8 +131,19 @@ class ForkMemoryPreparer:
         return result
 
     def _prepare_blocking(
-        self, conversation_id: UUID, owner_id: UUID, through_sequence: int
+        self,
+        conversation_id: UUID,
+        owner_id: UUID,
+        through_sequence: int,
+        current_message_id: UUID | None,
     ) -> ForkMemoryPreparation:
+        if self.repository.has_messages_after(
+            conversation_id, through_sequence, excluding_message_id=current_message_id
+        ):
+            # Not the first turn: background compaction owns this child now,
+            # including after a later edit invalidates its memory.
+            logger.debug("Fork memory preparation skipped after the first turn %s", conversation_id)
+            return ForkMemoryPreparation("skipped", "not_first_turn")
         if self.repository.get_owned_valid_memory(conversation_id, owner_id) is not None:
             return ForkMemoryPreparation("skipped", "memory_present")
         if not self._prefix_exceeds_budget(conversation_id, through_sequence):
@@ -150,14 +177,17 @@ class ForkMemoryPreparer:
 
     def _job_refusal(self, conversation_id: UUID) -> ForkMemoryPreparation | None:
         """Refuse what the durable lifecycle says must not run now; reopen an idle job."""
-        status = self.repository.get_job_status(conversation_id)
+        state = self.repository.get_job_state(conversation_id)
+        if state is None:
+            return ForkMemoryPreparation("fallback", "summary_job_missing")
+        status = state.status
         if status == SummaryJobStatus.PROCESSING.value:
             return ForkMemoryPreparation("fallback", "lease_busy")
-        if status is None:
-            return ForkMemoryPreparation("fallback", "summary_job_missing")
         if status == SummaryJobStatus.DEAD.value:
-            # Reviving a dead job here would retry a failing provider on every turn.
             return ForkMemoryPreparation("fallback", "summary_job_dead")
+        if status == SummaryJobStatus.RETRY.value and _in_future(state.available_at):
+            # Claiming by id ignores ``available_at``; honour the backoff here.
+            return ForkMemoryPreparation("fallback", "summary_job_backoff")
         if status == SummaryJobStatus.IDLE.value:
             # A background run found the prefix below its own trigger and went
             # idle without memory; ask again through the ordinary request path.

@@ -342,6 +342,63 @@ async def test_every_preparation_failure_proceeds_with_bounded_history(pg, caplo
         assert FACT in later.memory.content
 
 
+@pytest.mark.parametrize("provider", ["hangs", "fails_fast"])
+async def test_a_failing_provider_costs_only_the_first_turn(pg, caplog, provider):
+    """Turn 1 tries and falls back; turn 2 neither claims, calls the provider, nor waits.
+
+    Persisting turn 1's reply re-queues the job with its attempts reset, so
+    without the first-turn gate turn 2 would pay the same claim and wait.
+    """
+    source = _long_source(pg, turns=20)
+    child = await _fork_at(pg, source, 40)
+    hangs = provider == "hangs"
+    summarizer = FakeSummarizer(
+        delay=5.0 if hangs else 0.0, error=None if hangs else RuntimeError("provider 503")
+    )
+    memory = Memory(
+        pg,
+        summarizer=summarizer,
+        conversation_fork_memory_prepare_timeout_seconds=0.3,
+        conversation_summary_timeout_seconds=1,
+    )
+    turns = ChildTurns(pg, memory, child.id, source.owner_id)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await turns.stream("What is my locker code?")
+        first_warnings = len([r for r in caplog.records if r.name == LOGGER])
+        started = time.monotonic()
+        events = await turns.stream("Are you sure?")
+        second_turn_seconds = time.monotonic() - started
+
+    assert [event.type for event in events][-1] == "complete"
+    assert first_warnings == 1
+    assert len([r for r in caplog.records if r.name == LOGGER]) == 1
+    assert memory.runs == [True]
+    assert len(summarizer.transcripts) == 1
+    assert second_turn_seconds < 1.0
+    [_first, (_request_, second_context)] = turns.seen
+    assert second_context.memory is None
+    # Let turn 1's leased run end before cleanup.
+    await _until(lambda: _job(pg, child.id).status != "processing")
+
+
+async def test_a_later_turn_with_invalidated_memory_is_not_prepared_synchronously(pg):
+    source = _long_source(pg, turns=20)
+    child = await _fork_at(pg, source, 40)
+    memory = Memory(pg)
+    turns = ChildTurns(pg, memory, child.id, source.owner_id)
+    await turns.stream("What is my locker code?")
+    assert memory.runs == [True]
+    covered = next(row for row in _messages(pg, child.id) if row.sequence == 2)
+    assert memory.compaction.invalidate_for_mutation(covered.id, new_content="edited") is True
+
+    await turns.stream("And now?")
+
+    assert memory.runs == [True]
+    [_first, (_request_, context)] = turns.seen
+    assert context.memory is None
+
+
 async def _until(condition, *, seconds: float = 10.0) -> None:
     deadline = time.monotonic() + seconds
     while not condition():

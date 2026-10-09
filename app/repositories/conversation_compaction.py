@@ -45,6 +45,13 @@ class SummaryJobClaim(NamedTuple):
     attempt_count: int = 0
 
 
+class SummaryJobState(NamedTuple):
+    """A job's lifecycle status and when it may next be claimed."""
+
+    status: str
+    available_at: datetime | None
+
+
 @dataclass(frozen=True)
 class CompactionInput:
     """Detached authoritative input loaded after a worker commits its lease."""
@@ -709,15 +716,39 @@ class ConversationCompactionRepository(RepositorySessionMixin):
                 session.expunge(memory)
             return memory
 
-    def get_job_status(self, conversation_id: UUID) -> str | None:
-        """The summary job's lifecycle status, or ``None`` when it has none."""
+    def get_job_state(self, conversation_id: UUID) -> SummaryJobState | None:
+        """The summary job's status and next eligible time, or ``None`` when it has none."""
         with self.session_factory() as session:
-            status = session.execute(
-                select(ConversationSummaryJob.status).where(
+            row = session.execute(
+                select(ConversationSummaryJob.status, ConversationSummaryJob.available_at).where(
                     ConversationSummaryJob.conversation_id == conversation_id
                 )
-            ).scalar_one_or_none()
-            return None if status is None else str(getattr(status, "value", status))
+            ).one_or_none()
+            if row is None:
+                return None
+            status, available_at = row
+            if available_at is not None and available_at.tzinfo is None:
+                available_at = available_at.replace(tzinfo=UTC)
+            return SummaryJobState(str(getattr(status, "value", status)), available_at)
+
+    def has_messages_after(
+        self,
+        conversation_id: UUID,
+        after_sequence: int,
+        *,
+        excluding_message_id: UUID | None = None,
+    ) -> bool:
+        """Whether any live row follows ``after_sequence``, ignoring one message."""
+        with self.session_factory() as session:
+            clauses = [
+                Message.conversation_id == conversation_id,
+                Message.sequence > after_sequence,
+                Message.deleted_at.is_(None),
+            ]
+            if excluding_message_id is not None:
+                clauses.append(Message.id != excluding_message_id)
+            found = session.execute(select(Message.id).where(*clauses).limit(1)).first()
+            return found is not None
 
     def load_fork_prefix_tail(
         self,

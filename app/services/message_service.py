@@ -4736,7 +4736,7 @@ class MessageService(IMessageService):
         # Before anything reads prompt history: routing and every agent see the
         # child's summary only if it exists by the time the request runs.
         await self._aprepare_fork_memory(
-            message_create_data.conversation_id, conversation, resolved_user_id
+            message_create_data.conversation_id, conversation, resolved_user_id, user_message_id
         )
         if self.project_context_service is None:
             sanitized_persona = sanitize_persona(
@@ -4784,7 +4784,11 @@ class MessageService(IMessageService):
         return resolved_user_id, sanitized_persona, request
 
     async def _aprepare_fork_memory(
-        self, conversation_id: UUID, conversation: Any, user_id: UUID | None
+        self,
+        conversation_id: UUID,
+        conversation: Any,
+        user_id: UUID | None,
+        user_message_id: UUID | None,
     ) -> None:
         """Give a forked child its first summary, bounded; see ``ForkMemoryPreparer``.
 
@@ -4798,6 +4802,7 @@ class MessageService(IMessageService):
             conversation_id=conversation_id,
             owner_id=user_id,
             forked_through_sequence=getattr(conversation, "forked_through_sequence", None),
+            current_message_id=user_message_id,
         )
         if result.status == "prepared":
             with contextlib.suppress(Exception):

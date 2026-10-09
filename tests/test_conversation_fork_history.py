@@ -20,7 +20,7 @@ import json
 import logging
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
@@ -29,6 +29,7 @@ import pytest
 
 from app.api.ai_sdk import AISDKChatRequest, chat_ui_message_stream
 from app.models.enums import MessageRole
+from app.repositories.conversation_compaction import SummaryJobState
 from app.schemas.message import MessageCreate, MessageRead
 from app.services.conversation_fork_memory import (
     ForkMemoryPreparation,
@@ -91,14 +92,30 @@ def _prefix(turns: int, *, answer_chars: int = 0) -> list[SimpleNamespace]:
 
 
 class FakeRepository:
-    """The four reads/one write the preparer uses, recorded in call order."""
+    """The five reads/one write the preparer uses, recorded in call order."""
 
-    def __init__(self, rows, *, job_status: str | None = "pending", memory: Any = None):
+    def __init__(
+        self,
+        rows,
+        *,
+        job_status: str | None = "pending",
+        memory: Any = None,
+        later_turn: bool = False,
+        available_at: datetime | None = None,
+    ):
         self.rows = rows
         self.job_status = job_status
         self.memory = memory
+        self.later_turn = later_turn
+        self.available_at = available_at
         self.calls: list[str] = []
         self.tail_limits: list[int | None] = []
+        self.excluded: list[UUID | None] = []
+
+    def has_messages_after(self, conversation_id, after_sequence, *, excluding_message_id=None):
+        self.calls.append("later")
+        self.excluded.append(excluding_message_id)
+        return self.later_turn
 
     def get_owned_valid_memory(self, conversation_id: UUID, owner_id: UUID):
         self.calls.append("memory")
@@ -110,9 +127,11 @@ class FakeRepository:
         rows = [row for row in self.rows if row.sequence <= through_sequence]
         return rows[-limit:] if limit else rows
 
-    def get_job_status(self, conversation_id: UUID) -> str | None:
+    def get_job_state(self, conversation_id: UUID) -> SummaryJobState | None:
         self.calls.append("job")
-        return self.job_status
+        if self.job_status is None:
+            return None
+        return SummaryJobState(self.job_status, self.available_at)
 
     def request_backfill(self, conversation_id: UUID, requested_through_sequence=None) -> bool:
         self.calls.append("reopen")
@@ -159,9 +178,12 @@ def _preparer(repository, runner=None, **settings_overrides) -> ForkMemoryPrepar
     )
 
 
-async def _prepare(preparer: ForkMemoryPreparer, *, through: int | None = 40):
+async def _prepare(preparer: ForkMemoryPreparer, *, through: int | None = 40, current=None):
     return await preparer.aprepare(
-        conversation_id=CHILD, owner_id=OWNER, forked_through_sequence=through
+        conversation_id=CHILD,
+        owner_id=OWNER,
+        forked_through_sequence=through,
+        current_message_id=current,
     )
 
 
@@ -220,6 +242,27 @@ async def test_a_child_that_already_has_valid_memory_is_left_alone():
     assert runner.calls == []
 
 
+async def test_only_the_first_turn_is_prepared(caplog):
+    """Any row after the copied prefix, besides this turn's own message, ends preparation.
+
+    Each persisted reply re-queues the job with its attempts reset, so a
+    failing provider would otherwise cost a claim and a wait on every turn.
+    This also covers a later turn whose memory an edit invalidated.
+    """
+    repository = FakeRepository(_prefix(20), job_status="retry", later_turn=True)
+    runner = Runner(repository)
+    current = uuid4()
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = await _prepare(_preparer(repository, runner), current=current)
+
+    assert result == ForkMemoryPreparation("skipped", "not_first_turn")
+    assert repository.calls == ["later"]
+    assert repository.excluded == [current]
+    assert runner.calls == []
+    assert _warnings(caplog) == []
+
+
 async def test_a_prefix_inside_the_history_budget_needs_no_summary(caplog):
     repository = FakeRepository(_prefix(3))
     runner = Runner(repository)
@@ -242,7 +285,7 @@ async def test_a_prefix_over_the_message_budget_runs_the_childs_job_under_its_le
     # force: the prefix is over the *history* budget, which can be well below
     # the background trigger; an unforced run would skip and idle the job.
     assert runner.calls == [(CHILD, True)]
-    assert repository.calls == ["memory", "prefix", "job", "memory"]
+    assert repository.calls == ["later", "memory", "prefix", "job", "memory"]
 
 
 async def test_a_few_very_long_messages_exceed_the_token_budget():
@@ -264,7 +307,7 @@ async def test_a_job_the_background_worker_skipped_is_reopened_before_running():
     result = await _prepare(_preparer(repository, runner))
 
     assert result.status == "prepared"
-    assert repository.calls[:4] == ["memory", "prefix", "job", "reopen"]
+    assert repository.calls[:5] == ["later", "memory", "prefix", "job", "reopen"]
 
 
 async def test_preparation_only_counts_rows_through_the_cutoff():
@@ -327,7 +370,7 @@ async def test_a_lease_taken_between_the_check_and_the_claim_also_falls_back(cap
     _assert_fallback(caplog, result, "lease_busy")
 
 
-async def test_a_dead_job_is_not_revived_on_every_turn(caplog):
+async def test_a_first_turn_with_a_dead_job_falls_back_without_reviving_it(caplog):
     repository = FakeRepository(_prefix(20), job_status="dead")
     runner = Runner(repository)
 
@@ -336,6 +379,28 @@ async def test_a_dead_job_is_not_revived_on_every_turn(caplog):
     _assert_fallback(caplog, result, "summary_job_dead")
     assert runner.calls == []
     assert "reopen" not in repository.calls
+
+
+async def test_a_retry_still_in_backoff_is_not_claimed_early(caplog):
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    repository = FakeRepository(_prefix(20), job_status="retry", available_at=later)
+    runner = Runner(repository)
+
+    result = await _prepare(_preparer(repository, runner))
+
+    _assert_fallback(caplog, result, "summary_job_backoff")
+    assert runner.calls == []
+
+
+async def test_a_retry_whose_backoff_has_elapsed_runs():
+    earlier = datetime.now(UTC) - timedelta(seconds=1)
+    repository = FakeRepository(_prefix(20), job_status="retry", available_at=earlier)
+    runner = Runner(repository)
+
+    result = await _prepare(_preparer(repository, runner))
+
+    assert result.status == "prepared"
+    assert runner.calls == [(CHILD, True)]
 
 
 async def test_a_summary_provider_failure_falls_back(caplog):
@@ -518,9 +583,14 @@ async def test_streaming_prepares_memory_before_the_workflow_runs():
     assert order.index("prepare") < order.index("workflow")
     # The new summary changes the cache key anyway; dropping the entry is cheap.
     assert order.index("prepare") < order.index("invalidate", order.index("prepare"))
-    assert preparer.calls == [
-        {"conversation_id": CHILD, "owner_id": OWNER, "forked_through_sequence": 40}
-    ]
+    [call] = preparer.calls
+    assert (call["conversation_id"], call["owner_id"], call["forked_through_sequence"]) == (
+        CHILD,
+        OWNER,
+        40,
+    )
+    # The turn's own user row is the one row after the prefix that is allowed.
+    assert call["current_message_id"] == UUID(requests[0].user_message_id)
     assert requests[0].conversation_id == str(CHILD)
 
 
