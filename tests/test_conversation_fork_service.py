@@ -368,7 +368,9 @@ async def test_publisher_failure_does_not_fail_a_committed_fork(caplog):
         ).fork_conversation(source_conversation_id=SOURCE_ID, owner_id=uuid4(), request=_request())
 
     assert (read.id, created) == (child.id, True)
-    assert "broker_publish_failed" in caplog.text
+    [warning] = [record for record in caplog.records if "broker_publish_failed" in record.message]
+    assert f"conversation_id={child.id}" in warning.message
+    assert warning.exc_info is not None and warning.exc_info[0] is RuntimeError
 
 
 async def test_turn_coordinator_conflict_becomes_a_409_with_the_lowercase_code():

@@ -203,6 +203,15 @@ def test_autogenerate_reports_no_conversation_drift() -> None:
             check=False,
         )
     output = f"{result.stdout}\n{result.stderr}"
+    # A crash before the comparison prints neither verdict and would otherwise
+    # pass the drift assertion vacuously. The scratch database has known,
+    # unrelated drift (two document_chunks columns), so either verdict is valid.
+    compared_clean = "No new upgrade operations detected" in output
+    compared_with_drift = "New upgrade operations detected" in output
+    assert compared_clean or compared_with_drift, (
+        f"alembic check did not finish its comparison (exit {result.returncode}):\n{output[-2000:]}"
+    )
+    assert (result.returncode == 0) == compared_clean
     assert "conversations" not in output, "conversation drift detected"
 
 

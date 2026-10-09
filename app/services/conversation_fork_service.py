@@ -145,7 +145,11 @@ class ConversationForkService:
         try:
             self.compaction_publisher(child_id)
         except Exception:
-            logger.warning("Fork compaction notification failed code=broker_publish_failed")
+            logger.warning(
+                "Fork compaction notification failed code=broker_publish_failed conversation_id=%s",
+                child_id,
+                exc_info=True,
+            )
 
 
 def _http_error(code: ForkErrorCode) -> CustomHTTPException:
