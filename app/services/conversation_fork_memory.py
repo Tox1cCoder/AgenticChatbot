@@ -14,16 +14,17 @@ follows the copied prefix (besides the turn's own user message), later turns rel
 on background compaction and never wait or claim here. That bound matters
 because every persisted assistant reply re-queues the job with its attempts
 reset, so a failing provider would otherwise cost a wait on every turn. When the
-child has no valid memory and its copied prefix exceeds the tightest history
-budget, it runs the child's existing durable
-job through the ordinary worker (``run_conversation_compaction_now``): the same
-lease, CAS write and retry accounting a Celery worker uses, never a second
-summary path. The work runs in a thread because the worker's repository is
-synchronous, and it is bounded by
-``conversation_fork_memory_prepare_timeout_seconds``.
+child has no valid memory and its copied prefix exceeds the largest history
+budget of any answering agent, it runs the child's existing durable job through
+the ordinary worker (``run_conversation_compaction_now``): the same lease, CAS
+write and retry accounting a Celery worker uses, never a second summary path.
+When another run already holds the lease (usually the fork's own background
+run), it polls for that run's memory instead of taking a second lease. The
+repository work runs in threads because the worker's repository is synchronous,
+and everything is bounded by ``conversation_fork_memory_prepare_timeout_seconds``.
 
-Every way preparation cannot finish -- compaction disabled, a lease held by a
-worker, a dead job, a retry still in backoff, a timeout, a summary failure --
+Every way preparation cannot finish -- compaction disabled, a lease held past
+the timeout, a dead job, a retry still in backoff, a summary failure --
 proceeds with the ordinary bounded history and logs one structured warning.
 Preparation never fails a turn. Even when it succeeds the child gets the
 application's normal bounded memory (a summary plus recent rows), not its full
@@ -34,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -46,10 +47,11 @@ from app.models.conversation_summary_job import SummaryJobStatus
 
 logger = logging.getLogger(__name__)
 
-#: Every agent key that reads prompt history. Which specialist answers is not
-#: known until routing, and the router itself reads history first, so the
-#: tightest budget among them decides whether copied context would be cut.
-HISTORY_AGENT_KEYS = ("router", "chat", "rag", "search", "planning")
+#: Every agent key that answers from prompt history. Which one answers is not
+#: known until routing; preparation costs a summary call, so it runs only when
+#: even the roomiest of them would cut copied context. The router reads history
+#: too but never answers, so its small budget does not decide.
+ANSWERING_AGENT_KEYS = ("chat", "rag", "search", "planning")
 
 PreparationStatus = Literal["skipped", "prepared", "fallback"]
 
@@ -64,20 +66,32 @@ class ForkMemoryPreparation:
 
 
 def applicable_history_budget(settings: Any) -> tuple[int, int]:
-    """The smallest positive ``(max_messages, max_tokens)`` any agent applies; 0 = uncapped."""
-    messages: list[int] = []
-    tokens: list[int] = []
-    for agent_key in HISTORY_AGENT_KEYS:
-        config = HistoryBudgetConfig.for_agent(agent_key, settings)
-        if config.max_messages > 0:
-            messages.append(int(config.max_messages))
-        if config.max_tokens > 0:
-            tokens.append(int(config.max_tokens))
-    return min(messages, default=0), min(tokens, default=0)
+    """The largest ``(max_messages, max_tokens)`` an answering agent applies; 0 = uncapped.
+
+    Each dimension is taken separately, and one uncapped answering agent makes
+    that dimension uncapped.
+    """
+    configs = [HistoryBudgetConfig.for_agent(key, settings) for key in ANSWERING_AGENT_KEYS]
+    return (
+        _largest(int(config.max_messages) for config in configs),
+        _largest(int(config.max_tokens) for config in configs),
+    )
+
+
+def _largest(limits: Iterable[int]) -> int:
+    values = list(limits)
+    if not values or any(value <= 0 for value in values):
+        return 0
+    return max(values)
 
 
 def _in_future(moment: datetime | None) -> bool:
     return moment is not None and moment > datetime.now(UTC)
+
+
+#: Internal: another run holds (or just took) the child's lease. Never returned
+#: to a caller; ``aprepare`` waits on that run instead.
+_LEASE_BUSY = ForkMemoryPreparation("fallback", "lease_busy")
 
 
 class ForkMemoryPreparer:
@@ -89,10 +103,12 @@ class ForkMemoryPreparer:
         repository: Any,
         runner: Callable[..., Awaitable[Any]],
         settings: Any,
+        poll_interval_seconds: float = 0.25,
     ) -> None:
         self.repository = repository
         self.runner = runner
         self.settings = settings
+        self.poll_interval_seconds = float(poll_interval_seconds)
 
     async def aprepare(
         self,
@@ -107,16 +123,13 @@ class ForkMemoryPreparer:
             return ForkMemoryPreparation("skipped", "not_a_fork")
         timeout = float(self.settings.conversation_fork_memory_prepare_timeout_seconds)
         try:
-            # On timeout the thread is not interrupted: it holds the job's lease
-            # and finishes inside the worker's own provider timeout, so the
-            # summary is ready for a later turn instead of leaving a stale lease.
+            # On timeout a running summary thread is not interrupted: it holds
+            # the job's lease and finishes inside the worker's own provider
+            # timeout, so the summary is ready for a later turn instead of
+            # leaving a stale lease.
             result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._prepare_blocking,
-                    conversation_id,
-                    owner_id,
-                    forked_through_sequence,
-                    current_message_id,
+                self._aprepare_settled(
+                    conversation_id, owner_id, forked_through_sequence, current_message_id
                 ),
                 timeout=timeout,
             )
@@ -129,6 +142,51 @@ class ForkMemoryPreparer:
         if result.status == "fallback":
             self._warn(conversation_id, result)
         return result
+
+    async def _aprepare_settled(
+        self,
+        conversation_id: UUID,
+        owner_id: UUID,
+        through_sequence: int,
+        current_message_id: UUID | None,
+    ) -> ForkMemoryPreparation:
+        """Prepare; while another run holds the lease, wait for its result instead.
+
+        The fork's own background run usually claims the job right after the
+        fork commits, so the first message often finds the lease busy. Waiting
+        within the timeout lets that run's summary serve this turn without a
+        second lease. When the lease is released without memory, the ordinary
+        path decides again: a retry or dead job falls back, an idle one is run.
+        """
+        while True:
+            result = await asyncio.to_thread(
+                self._prepare_blocking,
+                conversation_id,
+                owner_id,
+                through_sequence,
+                current_message_id,
+            )
+            if result is not _LEASE_BUSY:
+                return result
+            if await self._await_lease_release(conversation_id, owner_id):
+                return ForkMemoryPreparation("prepared", "summary_ready")
+
+    async def _await_lease_release(self, conversation_id: UUID, owner_id: UUID) -> bool:
+        """Poll until the lease holder's memory exists (True) or the lease is released (False)."""
+        while True:
+            await asyncio.sleep(self.poll_interval_seconds)
+            state, memory = await asyncio.to_thread(self._lease_snapshot, conversation_id, owner_id)
+            if memory is not None:
+                return True
+            if state is None or state.status != SummaryJobStatus.PROCESSING.value:
+                return False
+
+    def _lease_snapshot(self, conversation_id: UUID, owner_id: UUID) -> tuple[Any, Any]:
+        # The job first, then memory: a worker writes memory before it releases
+        # the lease, so a released job read here never hides memory written
+        # between the two reads.
+        state = self.repository.get_job_state(conversation_id)
+        return state, self.repository.get_owned_valid_memory(conversation_id, owner_id)
 
     def _prepare_blocking(
         self,
@@ -182,7 +240,7 @@ class ForkMemoryPreparer:
             return ForkMemoryPreparation("fallback", "summary_job_missing")
         status = state.status
         if status == SummaryJobStatus.PROCESSING.value:
-            return ForkMemoryPreparation("fallback", "lease_busy")
+            return _LEASE_BUSY
         if status == SummaryJobStatus.DEAD.value:
             return ForkMemoryPreparation("fallback", "summary_job_dead")
         if status == SummaryJobStatus.RETRY.value and _in_future(state.available_at):
@@ -200,9 +258,18 @@ class ForkMemoryPreparer:
         status = str(getattr(outcome, "status", "") or "")
         code = str(getattr(outcome, "code", "") or "") or None
         if status == "noop" and code == "not_claimed":
-            return ForkMemoryPreparation("fallback", "lease_busy")
+            return _LEASE_BUSY
         if status == "disabled":
             return ForkMemoryPreparation("fallback", "compaction_disabled")
+        if status == "skipped":
+            # A forced run skips only with ``no_complete_turn`` (``code`` is the
+            # job's new status): a short fork with very long replies has no turn
+            # older than the ones the compactor keeps verbatim. No retry would
+            # change that, so it is not a failure worth a warning.
+            logger.debug(
+                "Fork memory preparation found no complete turn to summarize %s", conversation_id
+            )
+            return ForkMemoryPreparation("skipped", "no_complete_turn", code)
         memory = self.repository.get_owned_valid_memory(conversation_id, owner_id)
         if status == "completed" and memory is not None:
             return ForkMemoryPreparation("prepared", "summary_ready")
@@ -233,7 +300,7 @@ class ForkMemoryPreparer:
 
 
 __all__ = [
-    "HISTORY_AGENT_KEYS",
+    "ANSWERING_AGENT_KEYS",
     "ForkMemoryPreparation",
     "ForkMemoryPreparer",
     "applicable_history_budget",

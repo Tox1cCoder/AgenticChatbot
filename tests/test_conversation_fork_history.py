@@ -129,6 +129,7 @@ class FakeRepository:
 
     def get_job_state(self, conversation_id: UUID) -> SummaryJobState | None:
         self.calls.append("job")
+        self._on_job_read()
         if self.job_status is None:
             return None
         return SummaryJobState(self.job_status, self.available_at)
@@ -137,6 +138,41 @@ class FakeRepository:
         self.calls.append("reopen")
         self.job_status = "pending"
         return True
+
+    def _on_job_read(self) -> None:
+        """Hook for a lease held elsewhere; the plain fake's job never changes by itself."""
+
+
+class LeaseHeldElsewhere(FakeRepository):
+    """A worker holds the child's lease; after ``reads`` job reads it ends as ``ends_as``.
+
+    The ending is applied as one step (job status and memory together), the
+    order a real worker uses: memory is written before the lease is released.
+    """
+
+    def __init__(
+        self,
+        rows,
+        *,
+        reads: int | None,
+        ends_as: str = "idle",
+        writes_memory: bool = True,
+        available_at: datetime | None = None,
+    ):
+        super().__init__(rows, job_status="processing", available_at=available_at)
+        self.remaining = reads
+        self.ends_as = ends_as
+        self.writes_memory = writes_memory
+
+    def _on_job_read(self) -> None:
+        if self.remaining is None or self.job_status != "processing":
+            return
+        if self.remaining > 0:
+            self.remaining -= 1
+            return
+        self.job_status = self.ends_as
+        if self.writes_memory:
+            self.memory = SimpleNamespace(last_summarized_sequence=32)
 
 
 class Runner:
@@ -175,6 +211,7 @@ def _preparer(repository, runner=None, **settings_overrides) -> ForkMemoryPrepar
         repository=repository,
         runner=runner or Runner(repository),
         settings=_settings(**settings_overrides),
+        poll_interval_seconds=0.01,
     )
 
 
@@ -213,11 +250,18 @@ def test_the_container_gives_message_service_a_preparer_over_the_durable_worker(
     assert preparer_kwargs["runner"].provides is run_conversation_compaction_now
 
 
-def test_the_applicable_budget_is_the_tightest_one_any_agent_applies():
-    assert applicable_history_budget(_settings()) == (12, 3000)
+def test_the_applicable_budget_is_the_largest_one_an_answering_agent_applies():
+    """Preparation pays a summary call only when even the roomiest answering agent would cut.
+
+    The router does not answer, so its small budget never decides.
+    """
+    assert applicable_history_budget(_settings()) == (24, 9000)
     assert applicable_history_budget(
-        _settings(router_history_max_messages=0, rag_history_max_messages=0)
-    ) == (16, 3000)
+        _settings(router_history_max_messages=50, router_history_max_tokens=12000)
+    ) == (24, 9000)
+    assert applicable_history_budget(_settings(planning_history_max_tokens=20000)) == (24, 20000)
+    # An uncapped answering agent never cuts in that dimension.
+    assert applicable_history_budget(_settings(search_history_max_messages=0)) == (0, 9000)
 
 
 async def test_an_ordinary_conversation_is_never_inspected():
@@ -271,8 +315,32 @@ async def test_a_prefix_inside_the_history_budget_needs_no_summary(caplog):
 
     assert result == ForkMemoryPreparation("skipped", "within_history_budget")
     assert runner.calls == []
-    assert repository.tail_limits == [13]
+    assert repository.tail_limits == [25]
     assert _warnings(caplog) == []
+
+
+async def test_a_prefix_over_the_router_budget_but_within_every_answering_budget_is_not_prepared(
+    caplog,
+):
+    """16 rows: the router (12) and rag (12) cut, chat (24) does not; no summary call is paid."""
+    repository = FakeRepository(_prefix(8))
+    runner = Runner(repository)
+
+    result = await _prepare(_preparer(repository, runner), through=16)
+
+    assert result == ForkMemoryPreparation("skipped", "within_history_budget")
+    assert runner.calls == []
+    assert _warnings(caplog) == []
+
+
+async def test_a_prefix_over_the_largest_answering_budget_is_prepared():
+    repository = FakeRepository(_prefix(13))
+    runner = Runner(repository)
+
+    result = await _prepare(_preparer(repository, runner), through=26)
+
+    assert result == ForkMemoryPreparation("prepared", "summary_ready")
+    assert runner.calls == [(CHILD, True)]
 
 
 async def test_a_prefix_over_the_message_budget_runs_the_childs_job_under_its_lease():
@@ -351,23 +419,82 @@ async def test_disabled_compaction_falls_back_without_touching_the_job(caplog):
     assert "job" not in repository.calls
 
 
-async def test_a_busy_lease_falls_back_instead_of_competing_for_it(caplog):
-    repository = FakeRepository(_prefix(20), job_status="processing")
+async def test_a_busy_lease_is_waited_on_until_the_workers_summary_appears(caplog):
+    """The fork's own Celery run usually holds the lease when the first message arrives."""
+    repository = LeaseHeldElsewhere(_prefix(20), reads=2)
     runner = Runner(repository)
 
     result = await _prepare(_preparer(repository, runner))
 
-    _assert_fallback(caplog, result, "lease_busy")
+    assert result == ForkMemoryPreparation("prepared", "summary_ready")
+    assert runner.calls == []  # never a second lease
+    assert _warnings(caplog) == []
+
+
+async def test_a_lease_held_past_the_timeout_falls_back_within_the_timeout(caplog):
+    repository = LeaseHeldElsewhere(_prefix(20), reads=None)
+    runner = Runner(repository)
+    preparer = _preparer(repository, runner, conversation_fork_memory_prepare_timeout_seconds=0.3)
+
+    started = time.monotonic()
+    result = await _prepare(preparer)
+    elapsed = time.monotonic() - started
+
+    _assert_fallback(caplog, result, "timeout")
+    assert 0.3 <= elapsed < 1.5
+    assert runner.calls == []
+    assert repository.calls.count("job") > 2  # it kept polling, not one look and out
+
+
+@pytest.mark.parametrize(
+    ("ends_as", "reason"), [("retry", "summary_job_backoff"), ("dead", "summary_job_dead")]
+)
+async def test_a_lease_that_ends_in_failure_stops_the_wait(caplog, ends_as, reason):
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    repository = LeaseHeldElsewhere(
+        _prefix(20), reads=1, ends_as=ends_as, writes_memory=False, available_at=later
+    )
+    runner = Runner(repository)
+
+    started = time.monotonic()
+    result = await _prepare(_preparer(repository, runner))  # timeout is 5 s
+
+    _assert_fallback(caplog, result, reason)
+    assert time.monotonic() - started < 1.0
     assert runner.calls == []
 
 
-async def test_a_lease_taken_between_the_check_and_the_claim_also_falls_back(caplog):
-    repository = FakeRepository(_prefix(20))
-    runner = Runner(repository, WorkerOutcome("noop", "not_claimed"), produces_memory=False)
+async def test_a_lease_released_without_memory_is_then_run_through_the_ordinary_path():
+    """The background run found the prefix below its own trigger and idled the job."""
+    repository = LeaseHeldElsewhere(_prefix(20), reads=1, writes_memory=False)
+    runner = Runner(repository)
 
     result = await _prepare(_preparer(repository, runner))
 
-    _assert_fallback(caplog, result, "lease_busy")
+    assert result == ForkMemoryPreparation("prepared", "summary_ready")
+    assert runner.calls == [(CHILD, True)]
+    assert "reopen" in repository.calls
+
+
+async def test_a_lease_taken_between_the_check_and_the_claim_is_waited_on(caplog):
+    repository = LeaseHeldElsewhere(_prefix(20), reads=None)
+    repository.job_status = "pending"  # free when preparation looks
+
+    class LosesTheClaim(Runner):
+        async def __call__(self, conversation_id: UUID, *, force: bool = False):
+            self.calls.append((conversation_id, force))
+            # A Celery worker claimed the job just before us and is still running.
+            self.repository.job_status = "processing"
+            self.repository.remaining = 1
+            return WorkerOutcome("noop", "not_claimed")
+
+    runner = LosesTheClaim(repository)
+
+    result = await _prepare(_preparer(repository, runner))
+
+    assert result == ForkMemoryPreparation("prepared", "summary_ready")
+    assert runner.calls == [(CHILD, True)]
+    assert _warnings(caplog) == []
 
 
 async def test_a_first_turn_with_a_dead_job_falls_back_without_reviving_it(caplog):
@@ -413,14 +540,20 @@ async def test_a_summary_provider_failure_falls_back(caplog):
     assert result.detail == "generation_failed"
 
 
-async def test_a_run_that_completes_without_memory_falls_back(caplog):
-    repository = FakeRepository(_prefix(20))
+async def test_a_short_fork_with_no_complete_turn_to_summarize_is_a_quiet_skip(caplog):
+    """Two very long replies exceed the token budget, but the compactor keeps recent turns
+    verbatim, so a forced run has nothing to summarize: the worker reports ``skipped``
+    with the job's new status as its code. That is not a failure worth a warning.
+    """
+    repository = FakeRepository(_prefix(2, answer_chars=20_000))
     runner = Runner(repository, WorkerOutcome("skipped", "idle"), produces_memory=False)
 
-    result = await _prepare(_preparer(repository, runner))
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = await _prepare(_preparer(repository, runner), through=4)
 
-    _assert_fallback(caplog, result, "summary_failed")
-    assert result.detail == "idle"
+    assert result == ForkMemoryPreparation("skipped", "no_complete_turn", "idle")
+    assert runner.calls == [(CHILD, True)]
+    assert _warnings(caplog) == []
 
 
 async def test_an_unexpected_error_falls_back(caplog):
@@ -594,7 +727,7 @@ async def test_streaming_prepares_memory_before_the_workflow_runs():
     assert requests[0].conversation_id == str(CHILD)
 
 
-@pytest.mark.parametrize("reason", ["compaction_disabled", "lease_busy", "timeout"])
+@pytest.mark.parametrize("reason", ["compaction_disabled", "summary_job_dead", "timeout"])
 async def test_streaming_proceeds_with_bounded_history_when_preparation_falls_back(reason):
     order: list[str] = []
     preparer = _RecordingPreparer(order, ForkMemoryPreparation("fallback", reason))

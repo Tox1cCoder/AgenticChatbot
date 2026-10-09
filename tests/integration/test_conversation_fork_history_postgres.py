@@ -294,11 +294,82 @@ def _claim_elsewhere(memory: Memory, child: UUID) -> None:
     assert claim is not None
 
 
+async def test_a_busy_lease_is_waited_on_and_its_summary_serves_the_first_turn(pg, caplog):
+    """64 copied rows: the fork's own background run claims the job before the first message.
+
+    The first turn waits for that run instead of falling back at once, and
+    never takes a second lease.
+    """
+    source = _long_source(pg, turns=32)
+    child = await _fork_at(pg, source, 64)
+    memory = Memory(pg, summarizer=FakeSummarizer(delay=0.6))
+    background = asyncio.create_task(memory.run(child.id))  # what Celery does after the fork
+    await _until(lambda: _job(pg, child.id).status == "processing")
+    turns = ChildTurns(pg, memory, child.id, source.owner_id)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        events = await turns.stream("What is my locker code?")
+
+    assert [event.type for event in events][-1] == "complete"
+    assert (await background).status == "completed"
+    [(_request_, context)] = turns.seen
+    assert context.memory is not None and FACT in context.memory.content
+    assert memory.runs == [False]  # only the background run: no second lease
+    assert len(memory.summarizer.transcripts) == 1
+    assert [record for record in caplog.records if record.name == LOGGER] == []
+
+
+async def test_a_lease_held_past_the_timeout_falls_back_within_the_timeout(pg, caplog):
+    source = _long_source(pg, turns=32)
+    child = await _fork_at(pg, source, 64)
+    memory = Memory(pg, conversation_fork_memory_prepare_timeout_seconds=0.5)
+    _claim_elsewhere(memory, child.id)  # a worker that holds the lease for 120 s
+    turns = ChildTurns(pg, memory, child.id, source.owner_id)
+
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        events = await turns.stream("What is my locker code?")
+    elapsed = time.monotonic() - started
+
+    assert [event.type for event in events][-1] == "complete"
+    assert 0.5 <= elapsed < 2.0
+    assert memory.runs == []
+    assert _job(pg, child.id).status == "processing"
+    [(_request_, context)] = turns.seen
+    assert context.memory is None and FACT not in " ".join(_texts(context))
+    [warning] = [record for record in caplog.records if record.name == LOGGER]
+    assert warning.fork_memory["reason"] == "timeout"
+
+
+async def test_a_short_fork_with_two_very_long_replies_skips_quietly(pg, caplog):
+    """Over the token budget, but the compactor keeps both turns verbatim: no_complete_turn."""
+    owner_id = _user(pg)
+    source = Source(owner_id, _conversation(pg, owner_id, title="Long replies"), {})
+    _completed_turn(pg, source, 1, FACT, "a" * 40_000)
+    _completed_turn(pg, source, 3, "question 1", "b" * 40_000)
+    child = await _fork_at(pg, source, 4)
+    memory = Memory(pg)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = await memory.preparer.aprepare(
+            conversation_id=child.id, owner_id=owner_id, forked_through_sequence=4
+        )
+
+    assert (result.status, result.reason) == ("skipped", "no_complete_turn")
+    assert memory.runs == [True]
+    assert memory.summarizer.transcripts == []  # no provider call was made
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == LOGGER and record.levelno >= logging.WARNING
+    ]
+    assert warnings == []
+
+
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
         ("disabled", "compaction_disabled"),
-        ("busy_lease", "lease_busy"),
         ("provider_failure", "summary_failed"),
         ("timeout", "timeout"),
     ],
@@ -316,8 +387,6 @@ async def test_every_preparation_failure_proceeds_with_bounded_history(pg, caplo
         conversation_summary_enabled=case != "disabled",
         conversation_fork_memory_prepare_timeout_seconds=0.3 if case == "timeout" else 10.0,
     )
-    if case == "busy_lease":
-        _claim_elsewhere(memory, child.id)
     turns = ChildTurns(pg, memory, child.id, source.owner_id)
 
     with caplog.at_level(logging.WARNING, logger=LOGGER):
