@@ -14,6 +14,7 @@ import types
 from typing import Any
 
 import pytest
+import requests
 
 from app.ui import conversation_fork as fork
 
@@ -165,8 +166,16 @@ def harness(monkeypatch):
     refreshed: list[bool] = []
     monkeypatch.setattr(demo, "refresh_conversations_list", lambda: refreshed.append(True))
     api = _Api([{"success": True, "data": _child()}], st)
+    real_make_api_request = demo.make_api_request
     monkeypatch.setattr(demo, "make_api_request", api)
-    return types.SimpleNamespace(demo=demo, st=st, api=api, refreshed=refreshed, state=state)
+    return types.SimpleNamespace(
+        demo=demo,
+        st=st,
+        api=api,
+        refreshed=refreshed,
+        state=state,
+        real_make_api_request=real_make_api_request,
+    )
 
 
 def test_success_navigates_to_the_child_and_reloads_server_history(harness):
@@ -317,6 +326,10 @@ def test_lineage_label_renders_a_switch_button_only_when_linked(harness):
         ({"content": "unsaved streamed text"}, {}, False, False),
         ({"id": MESSAGE_ID, "content": ""}, {}, False, False),
         ({"id": MESSAGE_ID, "content": "x"}, {"paused": True}, False, False),
+        # A copied reply the server recorded as no valid fork point answers 409.
+        ({"id": MESSAGE_ID, "content": "x"}, {"fork_cutoff_eligible": False}, False, False),
+        ({"id": MESSAGE_ID, "content": "x"}, {"fork_cutoff_eligible": True}, False, True),
+        ({"id": MESSAGE_ID, "content": "x"}, {"fork_history": True}, False, True),
     ],
 )
 def test_control_visibility_rules(message, metadata, is_user, expected):
@@ -332,6 +345,48 @@ def test_the_control_renders_only_for_forkable_rows(harness):
     harness.demo.render_fork_control(msg, {}, SOURCE_ID, is_user=False)
     assert [b["label"] for b in harness.st.buttons] == ["Fork conversation"]
 
+    harness.st.buttons.clear()
+    copied = {"fork_history": True, "fork_cutoff_eligible": False}
+    harness.demo.render_fork_control(msg, copied, SOURCE_ID, is_user=False)
+    assert harness.st.buttons == []
+
+
+class _Response:
+    """What ``requests`` hands back for one HTTP status and JSON body."""
+
+    def __init__(self, status_code: int, payload: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(response=self)
+
+    def json(self) -> dict[str, Any]:
+        return self.payload
+
+
+def test_a_failed_fork_shows_one_message(harness, monkeypatch):
+    """The shared request helper already reports the server's message; no second one."""
+    payload = {
+        "success": False,
+        "code": "FORK_POINT_NOT_COMPLETED",
+        "message": "Only a completed assistant reply can be forked",
+    }
+    session = types.SimpleNamespace(request=lambda *_args, **_kwargs: _Response(409, payload))
+    monkeypatch.setattr(harness.demo, "make_api_request", harness.real_make_api_request)
+    monkeypatch.setattr(harness.demo, "get_http_session", lambda: session)
+    harness.st.button_returns[f"fork_conversation_{MESSAGE_ID}"] = True
+
+    harness.demo.render_fork_control(
+        {"id": MESSAGE_ID, "content": "answer"}, {}, SOURCE_ID, is_user=False
+    )
+
+    assert harness.st.toasts + harness.st.errors == [
+        "Only a completed assistant reply can be forked"
+    ]
+    assert harness.state.current_conversation_id == SOURCE_ID
+
 
 def test_the_control_is_disabled_while_its_fork_is_pending(harness):
     attempts = harness.state.setdefault(fork.FORK_ATTEMPTS_KEY, {})
@@ -342,9 +397,3 @@ def test_the_control_is_disabled_while_its_fork_is_pending(harness):
     )
 
     assert harness.st.buttons[0]["disabled"] is True
-
-
-def test_known_error_codes_map_to_actionable_text():
-    assert "completed" in fork.fork_error_message("FORK_POINT_NOT_COMPLETED", "x")
-    assert fork.fork_error_message("conversation_turn_conflict", "x").endswith("moment.")
-    assert fork.fork_error_message("something_else", "server text") == "server text"

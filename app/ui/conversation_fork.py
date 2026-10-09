@@ -17,18 +17,6 @@ FORK_ATTEMPTS_KEY = "fork_attempts"
 # answer it differently; these outcomes are final for that id.
 _TERMINAL_ERROR_CODES = frozenset({"FORK_RESULT_DELETED", "FORK_REQUEST_CONFLICT"})
 
-_ERROR_MESSAGES = {
-    "FORK_MESSAGE_NOT_FOUND": "That reply no longer exists in this conversation.",
-    "FORK_POINT_NOT_COMPLETED": "Only a completed assistant reply can be forked.",
-    "FORK_REQUEST_CONFLICT": "This fork request was already used for a different reply.",
-    "FORK_RESULT_DELETED": "The conversation created by this fork was deleted.",
-    "FORK_DOCUMENT_CONTEXT_UNSUPPORTED": (
-        "Conversations with attached documents cannot be forked yet."
-    ),
-    "FORK_HISTORY_TOO_LARGE": "The history up to this reply is too large to fork.",
-    "conversation_turn_conflict": "A reply is still being generated. Try again in a moment.",
-}
-
 _FORK_NAVIGATION_POPPED_KEYS = (
     "generation_snapshot",
     "pending_interrupt",
@@ -36,17 +24,16 @@ _FORK_NAVIGATION_POPPED_KEYS = (
 )
 
 
-def fork_error_message(code: str | None, fallback: str) -> str:
-    """Return the user-facing text for a fork failure code."""
-    return _ERROR_MESSAGES.get(code or "", fallback)
-
-
 def can_fork_message(message: dict[str, Any], metadata: dict[str, Any], *, is_user: bool) -> bool:
     """A fork point is a persisted assistant reply, never a user or placeholder row.
 
     The server stays authoritative (it rejects unfinished or continued replies).
+    A copied row it recorded as no valid fork point (``fork_cutoff_eligible`` is
+    False) would only earn a 409, so it gets no control.
     """
     if is_user or not message.get("id") or metadata.get("paused"):
+        return False
+    if metadata.get("fork_cutoff_eligible") is False:
         return False
     return bool(str(message.get("content") or "").strip())
 
@@ -125,9 +112,10 @@ def fork_lineage(
 ) -> ForkLineage | None:
     """Describe where a forked conversation came from, or None if it is not a fork.
 
-    The server nulls ``forkedFromConversationId`` when the source is deleted, but a
-    ``forkedThroughSequence`` remains; a stale list can also lack a live source.
-    Both cases render as a non-linked historical label.
+    Deletion is soft, so ``forkedFromConversationId`` may still be set after the
+    source is deleted (it then points at a conversation that answers 404). Link
+    only when the source is in the user's conversation list; otherwise, including
+    a null id or a stale list, render a non-linked historical label.
     """
     if not conversation or conversation.get("forkedThroughSequence") is None:
         return None

@@ -3444,13 +3444,10 @@ def render_fork_control(
         disabled=pending,
     ):
         return
+    # A failure was already reported by make_api_request's toast (the server's
+    # message); a second message here would repeat it.
     if fork_conversation_from_message(str(conversation_id), message_id):
         st.rerun()
-        return
-    error_code = st.session_state.get("_last_api_error_code")
-    st.error(
-        conversation_fork.fork_error_message(error_code, _last_api_error_message("Fork failed"))
-    )
 
 
 def render_fork_lineage(conversation: dict[str, Any] | None) -> None:

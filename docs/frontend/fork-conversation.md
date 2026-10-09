@@ -21,8 +21,10 @@ There is no `/ai/conversations/.../fork` alias; AI SDK clients call the route ab
   `requestId` is replayed (same child returned).
 - Omitting `title` yields `"<source title> (fork)"`; no LLM is involved.
 - `ConversationRead` carries lineage: `forkedFromConversationId`, `forkedFromMessageId`,
-  `forkedThroughSequence`. The first two become `null` if the source or message is later deleted;
-  `forkedThroughSequence` stays set, so `forkedThroughSequence != null` means "this is a fork".
+  `forkedThroughSequence`. Deletion is soft, so the first two may still be set after the source
+  or message is deleted, pointing at a resource that answers 404: link only when the source is in
+  the user's conversation list. `forkedThroughSequence` stays set, so
+  `forkedThroughSequence != null` means "this is a fork".
 
 ## Request id rules
 
@@ -68,14 +70,37 @@ Every copied message has `metadata.fork_history = true`. Copied rows are inert: 
 replaced by a text label. Clients must suppress interactive controls on rows with
 `fork_history = true`: no Approve/Reject, no Continue, no live-widget mount, no re-run.
 `metadata.fork_cutoff_eligible` (boolean) is the server's record of whether a copied reply was a
-valid fork point in the source; a nested fork re-validates server-side, so treat it as informational.
+valid fork point in the source. A nested fork re-validates server-side; hide the fork control on a
+copied row whose `fork_cutoff_eligible` is `false`, since the server answers 409 for it.
 These fields reach AI SDK clients through the message metadata projection unchanged.
 
 ## Lineage display
 
-Show "Forked from <source title>" and link to the source when `forkedFromConversationId` is in the
-user's list. When it is `null` (or not in the list) but `forkedThroughSequence` is set, show a
-non-linked "Forked from a deleted conversation" label; the child remains fully usable.
+Show "Forked from <source title>" and link to the source only when `forkedFromConversationId` is in
+the user's conversation list. The id may still be set after the source is deleted, so do not link
+on its presence alone. When it is `null` or not in the list but `forkedThroughSequence` is set,
+show a non-linked "Forked from a deleted conversation" label; the child remains fully usable.
+
+## Limits and measured cost
+
+Measured with `scripts/benchmark_conversation_fork.py` against a local PostgreSQL 18.3 on one
+Windows 11 host (32 logical CPUs, Python 3.13.7), through the real fork service and repository,
+no model calls, about 9 KiB of metadata per assistant row; median of 3 timed forks after a warm-up.
+These are single local host numbers; re-measure on the deployment target before raising
+the 5,000-row / 32 MiB fork limits.
+
+| Messages | Latency median (min-max) | Peak Python alloc | Rows copied | Bytes copied | SQL statements |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 78 ms (77-79) | 1.3 MiB | 100 | 0.5 MiB | 16 (1 executemany) |
+| 1,000 | 215 ms (211-318) | 11.3 MiB | 1,000 | 5.2 MiB | 16 (1 executemany) |
+| 5,000 | 895 ms (879-942) | 56.7 MiB | 5,000 | 26.0 MiB | 16 (1 executemany) |
+
+The statement count does not grow with the prefix; latency and allocation grow linearly (about
+0.17 ms and 11 KiB per row). Concurrent near-limit forks, a remote database and container memory
+limits were not measured.
+
+`tool_render` items of type `mcp_app` are copied as inert static results; any future iframe
+mounting must respect `fork_history`.
 
 ## Streamlit demo
 
