@@ -1,8 +1,13 @@
+import json
+
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from client_backend.api import conversations as conversations_api
+from client_backend.core.auth import require_local_session
+from client_backend.main import create_app
 
 
 def _build_app() -> FastAPI:
@@ -131,3 +136,86 @@ def test_list_conversations_forwards_pagination_sorting(monkeypatch):
             },
         }
     ]
+
+
+class _FakeUpstreamResponse:
+    def __init__(self, payload: dict, status_code: int) -> None:
+        self.status_code = status_code
+        self.headers = {"content-type": "application/json"}
+        self.content = json.dumps(payload).encode("utf-8")
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeServerClient:
+    def __init__(self, payload: dict, status_code: int) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+        self._response = _FakeUpstreamResponse(payload, status_code)
+
+    async def request_response(self, method, path, **kwargs):
+        self.calls.append((method, path, kwargs))
+        return self._response
+
+
+def _sidecar(monkeypatch, payload: dict, status_code: int, *, signed_in: bool = True):
+    server = _FakeServerClient(payload, status_code)
+    monkeypatch.setattr("client_backend.api.common.get_server_client", lambda: server)
+    app = create_app()
+    if signed_in:
+        app.dependency_overrides[require_local_session] = lambda: object()
+    return TestClient(app), server
+
+
+_FORK_BODY = {"messageId": "m-1", "requestId": "r-1", "title": "Alt"}
+
+
+@pytest.mark.parametrize("prefix", ["", "/api"])
+@pytest.mark.parametrize("status_code", [201, 200])
+def test_fork_is_proxied_at_both_aliases_keeping_the_upstream_status(
+    monkeypatch, prefix, status_code
+):
+    payload = {"success": True, "data": {"id": "child-1"}}
+    client, server = _sidecar(monkeypatch, payload, status_code)
+
+    with client:
+        response = client.post(f"{prefix}/conversations/conv-1/fork", json=_FORK_BODY)
+
+    assert response.status_code == status_code
+    assert response.json() == payload
+    method, path, kwargs = server.calls[0]
+    assert (method, path) == ("POST", "/conversations/conv-1/fork")
+    assert kwargs["json"] == _FORK_BODY
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code"),
+    [
+        (409, "conversation_turn_conflict"),
+        (409, "FORK_POINT_NOT_COMPLETED"),
+        (410, "FORK_RESULT_DELETED"),
+        (413, "FORK_HISTORY_TOO_LARGE"),
+        (404, "FORK_MESSAGE_NOT_FOUND"),
+    ],
+)
+def test_fork_upstream_error_envelopes_pass_through_unchanged(monkeypatch, status_code, code):
+    envelope = {"success": False, "code": code, "message": "refused"}
+    client, _ = _sidecar(monkeypatch, envelope, status_code)
+
+    with client:
+        response = client.post("/api/conversations/conv-1/fork", json=_FORK_BODY)
+
+    assert response.status_code == status_code
+    assert response.json() == envelope
+
+
+@pytest.mark.parametrize("prefix", ["", "/api"])
+def test_fork_without_a_local_session_is_rejected_and_never_forwarded(monkeypatch, prefix):
+    client, server = _sidecar(monkeypatch, {"success": True}, 201, signed_in=False)
+
+    with client:
+        response = client.post(f"{prefix}/conversations/conv-1/fork", json=_FORK_BODY)
+
+    assert response.status_code in (401, 403)
+    assert server.calls == []

@@ -66,6 +66,18 @@ async def create_conversation(
     return await proxy_server_request(request, upstream_path="/conversations/")
 
 
+@router.post("/{conversation_id}/fork", status_code=status.HTTP_201_CREATED)
+async def fork_conversation(
+    conversation_id: str,
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),  # noqa: B008
+) -> Response:
+    """Fork a conversation; upstream answers 201 (new) or 200 (replay)."""
+    return await proxy_server_request(
+        request, upstream_path=f"/conversations/{conversation_id}/fork"
+    )
+
+
 @router.get("/{conversation_id}")
 async def get_conversation(
     conversation_id: str,

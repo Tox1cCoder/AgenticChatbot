@@ -109,6 +109,10 @@ async def sidecar(monkeypatch):
         ("GET", "/conversations/%2E%2E/messages"),
         ("PATCH", "/conversations/%2E%2E"),
         ("DELETE", "/conversations/%2E%2E"),
+        ("POST", "/conversations/%2E%2E/fork"),
+        ("POST", "/conversations/%2e/fork"),
+        ("POST", "/conversations/a%252Fb/fork"),
+        ("POST", "/conversations/abc%3Fall=1/fork"),
         ("GET", "/conversations/%252E%252E"),
         ("GET", "/conversations/a%252Fb"),
         ("GET", "/conversations/abc%3Fall=1"),
@@ -129,6 +133,18 @@ async def test_a_dot_segment_path_parameter_is_refused_and_never_forwarded(sidec
 
     assert response.status_code == 404
     assert forwarded == []
+
+
+async def test_a_fork_forwards_one_encoded_path_segment_and_the_json_body(sidecar):
+    client, forwarded = sidecar
+    body = {"messageId": "m-1", "requestId": "r-1", "title": "Alt"}
+
+    response = await client.post("/conversations/3f2a.b-1/fork", json=body)
+
+    assert response.status_code == 200
+    assert [request.url.raw_path for request in forwarded] == [b"/conversations/3f2a.b-1/fork"]
+    assert [request.method for request in forwarded] == ["POST"]
+    assert json.loads(forwarded[0].content) == body
 
 
 @pytest.mark.parametrize("path", ["/api/chat/%2E%2E", "/ai/chat/%2E%2E"])

@@ -1,7 +1,7 @@
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel
 
 from app.core.dependency_injection import AppAutoInjector
@@ -9,6 +9,7 @@ from app.interfaces.conversation_service_interface import IConversationService
 from app.interfaces.message_service_interface import IMessageService
 from app.schemas.conversation import (
     ConversationCreate,
+    ConversationForkRequest,
     ConversationRead,
     ConversationUpdate,
 )
@@ -17,6 +18,7 @@ from app.schemas.pagination import ConversationPaginationParams, MessagePaginati
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.services.ai_service import AIService
+from app.services.conversation_fork_service import ConversationForkService
 from app.services.project_service import ProjectService
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -60,6 +62,36 @@ def create_conversation(
     """Create a new conversation for authenticated user"""
     result = conversation_service.create_conversation(conversation_data, user_id)
     return ApiResponse(success=True, message="Conversation created successfully", data=result)
+
+
+@router.post(
+    "/{conversation_id}/fork",
+    response_model=ApiResponse[ConversationRead],
+    status_code=status.HTTP_201_CREATED,
+    responses={status.HTTP_200_OK: {"model": ApiResponse[ConversationRead]}},
+)
+@AppAutoInjector.auto_inject()
+async def fork_conversation(
+    conversation_id: UUID,
+    fork_request: ConversationForkRequest,
+    response: Response,
+    fork_service: ConversationForkService,
+    user_id: UUID,
+) -> ApiResponse[ConversationRead]:
+    """Fork a conversation through a completed assistant reply.
+
+    201 for a new child; 200 when the same ``requestId`` already produced one.
+    """
+    child, created = await fork_service.fork_conversation(
+        source_conversation_id=conversation_id, owner_id=user_id, request=fork_request
+    )
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return ApiResponse(
+        success=True,
+        message="Conversation forked successfully" if created else "Conversation fork replayed",
+        data=child,
+    )
 
 
 @router.get("/{conversation_id}", response_model=ApiResponse[ConversationRead])
