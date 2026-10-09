@@ -45,6 +45,7 @@ from app.models.generation import (
     GenerationCommandAction,
     GenerationStatus,
 )
+from app.models.message import Message
 from app.models.user import User
 from app.repositories.generation import GenerationRepository
 from app.schemas.generation import CreateGeneration
@@ -87,6 +88,7 @@ def engines():
         tables=[
             User.__table__,
             Conversation.__table__,
+            Message.__table__,
             Generation.__table__,
             GenerationCommand.__table__,
         ],

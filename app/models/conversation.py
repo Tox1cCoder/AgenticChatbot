@@ -10,6 +10,7 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -26,6 +27,19 @@ class Conversation(Base):
         CheckConstraint(
             "next_message_sequence > 0",
             name="ck_conversations_next_message_sequence_positive",
+        ),
+        CheckConstraint(
+            "forked_through_sequence IS NULL OR forked_through_sequence > 0",
+            name="ck_conversations_forked_through_sequence_positive",
+        ),
+        CheckConstraint(
+            "(fork_request_id IS NULL) = (fork_request_fingerprint IS NULL)",
+            name="ck_conversations_fork_request_fields_together",
+        ),
+        # Includes soft-deleted rows on purpose: a retry must find the deleted
+        # child (and answer 410) instead of creating a second one.
+        UniqueConstraint(
+            "owner_id", "fork_request_id", name="uq_conversations_owner_fork_request"
         ),
         Index(
             "ix_conversations_project_updated",
@@ -58,10 +72,43 @@ class Conversation(Base):
     project_id = Column(
         UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True, index=True
     )
+    # Lineage. SET NULL: hard-deleting the source must not delete or block the
+    # fork; ``forked_through_sequence`` keeps the cutoff once the references go.
+    # ``use_alter``: conversations and messages now reference each other.
+    forked_from_conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "conversations.id",
+            ondelete="SET NULL",
+            name="fk_conversations_forked_from_conversation_id",
+        ),
+        nullable=True,
+        index=True,
+    )
+    forked_from_message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "messages.id",
+            ondelete="SET NULL",
+            name="fk_conversations_forked_from_message_id",
+            use_alter=True,
+        ),
+        nullable=True,
+        index=True,
+    )
+    forked_through_sequence = Column(BigInteger, nullable=True)
+    # Idempotency key and canonical request hash; internal, never serialized.
+    fork_request_id = Column(UUID(as_uuid=True), nullable=True)
+    fork_request_fingerprint = Column(String(64), nullable=True)
 
     # Relationships
     user = relationship("User", back_populates="conversations")
-    messages = relationship("Message", back_populates="conversation")
+    # ``foreign_keys``: ``forked_from_message_id`` is a second path to messages.
+    messages = relationship(
+        "Message",
+        back_populates="conversation",
+        foreign_keys="Message.conversation_id",
+    )
     documents = relationship("Document", back_populates="conversation")
     task_plans = relationship("TaskPlan", back_populates="conversation")
     memory_summary = relationship(

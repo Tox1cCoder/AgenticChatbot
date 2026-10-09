@@ -68,6 +68,13 @@ class ConversationService(IConversationService):
             "planning_mode_enabled": getattr(conversation_entity, "planning_mode_enabled", False),
             "plan_lifecycle": getattr(conversation_entity, "plan_lifecycle", None),
             "project_id": getattr(conversation_entity, "project_id", None),
+            "forked_from_conversation_id": getattr(
+                conversation_entity, "forked_from_conversation_id", None
+            ),
+            "forked_from_message_id": getattr(conversation_entity, "forked_from_message_id", None),
+            "forked_through_sequence": getattr(
+                conversation_entity, "forked_through_sequence", None
+            ),
         }
 
         if hasattr(conversation_entity, "message_count"):

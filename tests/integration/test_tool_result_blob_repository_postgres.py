@@ -21,6 +21,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.base import Base
 from app.models.conversation import Conversation
+from app.models.message import Message
 from app.models.tool_result_blob import ToolResultBlob
 from app.models.user import User
 from app.repositories.tool_result_blob import ToolResultBlobRepository
@@ -36,7 +37,12 @@ def session_factory():
     engine = create_engine(database_url)
     Base.metadata.create_all(
         engine,
-        tables=[User.__table__, Conversation.__table__, ToolResultBlob.__table__],
+        tables=[
+            User.__table__,
+            Conversation.__table__,
+            Message.__table__,
+            ToolResultBlob.__table__,
+        ],
     )
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     try:

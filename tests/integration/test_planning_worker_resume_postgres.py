@@ -52,6 +52,7 @@ from app.ai.workflow.planning_execution import (
 from app.ai.workflow.state import WorkflowState, build_checkpoint_thread_id
 from app.models.base import Base
 from app.models.conversation import Conversation
+from app.models.message import Message
 from app.models.tool_execution_receipt import ReceiptStatus, ToolExecutionReceipt
 from app.models.user import User
 from app.repositories.tool_execution_receipt import ToolExecutionReceiptRepository
@@ -122,7 +123,12 @@ def engines():
     engine = create_engine(database_url)
     Base.metadata.create_all(
         engine,
-        tables=[User.__table__, Conversation.__table__, ToolExecutionReceipt.__table__],
+        tables=[
+            User.__table__,
+            Conversation.__table__,
+            Message.__table__,
+            ToolExecutionReceipt.__table__,
+        ],
     )
     async_engine = create_async_engine(_orm_url(database_url))
     factory = sessionmaker(bind=engine, expire_on_commit=False)

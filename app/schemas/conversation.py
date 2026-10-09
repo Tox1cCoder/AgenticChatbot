@@ -54,6 +54,16 @@ class ConversationUpdate(BaseModel):
         return value
 
 
+class ConversationForkRequest(BaseModel):
+    message_id: UUID = Field(..., description="Assistant message to fork through (inclusive)")
+    request_id: UUID = Field(..., description="Client-generated ID making a retry idempotent")
+    title: str | None = Field(
+        default=None, min_length=1, max_length=255, description="Optional child title"
+    )
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
 class ConversationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True, alias_generator=to_camel, populate_by_name=True)
 
@@ -89,6 +99,15 @@ class ConversationRead(BaseModel):
     project_id: UUID | None = Field(
         default=None, description="Project this conversation belongs to, if any"
     )
+    forked_from_conversation_id: UUID | None = Field(
+        default=None, description="Conversation this one was forked from, if any"
+    )
+    forked_from_message_id: UUID | None = Field(
+        default=None, description="Source message this fork was cut at, if any"
+    )
+    forked_through_sequence: int | None = Field(
+        default=None, description="Inclusive source sequence copied into this fork"
+    )
 
 
 class ConversationInDB(BaseModel):
@@ -115,6 +134,15 @@ class ConversationInDB(BaseModel):
     )
     project_id: UUID | None = Field(
         default=None, description="Project this conversation belongs to, if any"
+    )
+    forked_from_conversation_id: UUID | None = Field(
+        default=None, description="Conversation this one was forked from, if any"
+    )
+    forked_from_message_id: UUID | None = Field(
+        default=None, description="Source message this fork was cut at, if any"
+    )
+    forked_through_sequence: int | None = Field(
+        default=None, description="Inclusive source sequence copied into this fork"
     )
 
 

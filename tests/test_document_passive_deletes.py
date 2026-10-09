@@ -30,6 +30,7 @@ from app.models.document_chunk import DocumentChunk
 from app.models.document_image import DocumentImage
 from app.models.document_index_generation import DocumentIndexGeneration
 from app.models.document_parse_artifact import DocumentParseArtifact
+from app.models.message import Message
 from app.models.project import Project
 from app.models.user import User
 from app.repositories.document import DocumentRepository
@@ -59,6 +60,7 @@ def engine() -> Iterator:
             User.__table__,
             Project.__table__,
             Conversation.__table__,
+            Message.__table__,
             Document.__table__,
             DocumentParseArtifact.__table__,
             DocumentIndexGeneration.__table__,

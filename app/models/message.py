@@ -37,7 +37,11 @@ class Message(Base):
     sequence = Column(BigInteger, nullable=False)
 
     # Relationships
-    conversation = relationship("Conversation", back_populates="messages")
+    conversation = relationship(
+        "Conversation",
+        back_populates="messages",
+        foreign_keys=[conversation_id],
+    )
     # Eager, because ``MessageRead`` reads it after the session has closed. Not
     # ``joined``: that outer-joined feedbacks into every message read, and
     # PostgreSQL refuses ``FOR UPDATE`` on the nullable side of an outer join.

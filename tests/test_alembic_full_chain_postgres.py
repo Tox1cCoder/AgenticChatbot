@@ -24,7 +24,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "9b132832d676"
+_HEAD = "c4f1a7b9d2e6"
 #: The revision just below the constraint revision, where its pre-checks are
 #: exercised against seeded violating rows.
 _PRE_CONSTRAINTS_HEAD = "c0033ee1e8cd"

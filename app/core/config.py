@@ -224,6 +224,21 @@ class Settings(BaseSettings):
         description="Additional async connections allowed above db_pool_size under burst.",
     )
 
+    # Conversation fork limits
+    conversation_fork_max_messages: int = Field(
+        default=5000,
+        ge=1,
+        description="Maximum messages copied into a forked conversation (413 above this).",
+    )
+    conversation_fork_max_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        ge=1,
+        description=(
+            "Maximum combined UTF-8 content and serialized metadata bytes copied "
+            "into a forked conversation (413 above this)."
+        ),
+    )
+
     # API settings
     api_host: str = Field(
         default="127.0.0.1",
