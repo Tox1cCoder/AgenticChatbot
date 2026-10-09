@@ -29,6 +29,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from app.services.event_streaming.tool_state import infer_tool_state, normalize_tool_phase
+from app.ui import conversation_fork
 from app.ui.clipboard_image_capture import capture_pasted_images
 from app.ui.hitl_decisions import (
     approval_tool_label,
@@ -3374,6 +3375,110 @@ def refresh_conversations_list() -> None:
         }
 
 
+def _navigate_away_from_source() -> None:
+    """Switch the view to another conversation without carrying source-only state.
+
+    ``reset_conversation_state`` keeps the generation snapshot on purpose (same-
+    conversation Continue), so a conversation switch has to drop it explicitly.
+    """
+    reset_conversation_state()
+    conversation_fork.clear_source_state_for_fork_navigation(st.session_state)
+
+
+def fork_conversation_from_message(source_id: str, message_id: str) -> bool:
+    """Fork ``source_id`` at ``message_id`` and open the child. True on navigation."""
+    attempts = st.session_state.setdefault(conversation_fork.FORK_ATTEMPTS_KEY, {})
+    request_id = conversation_fork.acquire_fork_request(attempts, source_id, message_id)
+    if request_id is None:
+        return False
+
+    child: Any = None
+    try:
+        response = make_api_request(
+            "POST",
+            f"/conversations/{source_id}/fork",
+            conversation_fork.build_fork_request(message_id, request_id),
+        )
+        data = response.get("data") if response else None
+        child = data if isinstance(data, dict) and data.get("id") else None
+    finally:
+        conversation_fork.release_fork_request(
+            attempts,
+            source_id,
+            message_id,
+            succeeded=child is not None,
+            error_code=st.session_state.get("_last_api_error_code"),
+        )
+    if child is None:
+        return False
+
+    # Read before anything is cleared: the stop must still name the SOURCE stream.
+    source_stream = conversation_fork.capture_source_identity(st.session_state)
+    if source_stream is not None:
+        make_api_request(
+            "POST", "/messages/stop", conversation_fork.build_stop_request(source_stream)
+        )
+    upsert_conversation_in_state(child)
+    st.session_state.current_conversation_id = child["id"]
+    _navigate_away_from_source()
+    refresh_conversations_list()
+    return True
+
+
+def render_fork_control(
+    msg: dict[str, Any],
+    metadata: dict[str, Any],
+    conversation_id: str | None,
+    *,
+    is_user: bool,
+) -> None:
+    """Offer a fork beside a persisted assistant reply (the server stays authoritative)."""
+    if not conversation_id or conversation_id == "pending_new":
+        return
+    if not conversation_fork.can_fork_message(msg, metadata, is_user=is_user):
+        return
+    message_id = str(msg["id"])
+    attempts = st.session_state.setdefault(conversation_fork.FORK_ATTEMPTS_KEY, {})
+    pending = conversation_fork.is_fork_pending(attempts, str(conversation_id), message_id)
+    if not st.button(
+        "Fork conversation",
+        key=f"fork_conversation_{message_id}",
+        icon=":material/fork_right:",
+        help="Start a new conversation from this reply",
+        disabled=pending,
+    ):
+        return
+    if fork_conversation_from_message(str(conversation_id), message_id):
+        st.rerun()
+        return
+    error_code = st.session_state.get("_last_api_error_code")
+    st.error(
+        conversation_fork.fork_error_message(error_code, _last_api_error_message("Fork failed"))
+    )
+
+
+def render_fork_lineage(conversation: dict[str, Any] | None) -> None:
+    """Say where a forked conversation came from, linking when the source is listed."""
+    lineage = conversation_fork.fork_lineage(
+        conversation, st.session_state.get("conversations_list", [])
+    )
+    if lineage is None:
+        return
+    label = conversation_fork.lineage_label(lineage)
+    if not lineage.linked:
+        st.caption(label)
+        return
+    if st.button(
+        label,
+        key=f"fork_lineage_open_{(conversation or {}).get('id')}",
+        icon=":material/arrow_back:",
+        type="tertiary",
+    ):
+        st.session_state.current_conversation_id = lineage.source_id
+        _navigate_away_from_source()
+        st.rerun()
+
+
 @st.cache_resource(show_spinner=False)
 def get_http_session() -> requests.Session:
     """Reuse HTTP connections to reduce API call latency across reruns."""
@@ -3475,6 +3580,9 @@ def _handle_api_error_status(status_code: int | None, payload: Any) -> dict:
     """Record a failed response and surface it, returning the empty result."""
     error_message = _extract_api_error_message(status_code, payload)
     st.session_state["_last_api_error_message"] = error_message
+    st.session_state["_last_api_error_code"] = (
+        extract_error_code(payload) if isinstance(payload, dict) else None
+    )
     if status_code == 401:
         _transition_to_login()
         st.toast("Please log in", icon=":material/lock:")
@@ -3527,6 +3635,7 @@ def _handle_api_response(response: requests.Response, *, mutation: bool) -> dict
         error_code = response_data.get("code", "unknown_error")
         error_message = response_data.get("message", "An unknown error occurred.")
         st.session_state["_last_api_error_message"] = error_message
+        st.session_state["_last_api_error_code"] = error_code
         if error_code == "unauthenticated":
             _transition_to_login()
             st.toast("Please log in", icon=":material/lock:")
@@ -3548,6 +3657,7 @@ def make_api_request(
 ) -> dict:
     method = method.strip().upper()
     st.session_state["_last_api_error_message"] = None
+    st.session_state["_last_api_error_code"] = None
 
     try:
         if method == "GET" and data is None and use_cache:
@@ -8438,6 +8548,12 @@ def render_message_bubble(
                 include_images=not view.is_v1,
             )
             render_message_feedback_inline(msg)
+            render_fork_control(
+                msg,
+                message_metadata,
+                st.session_state.get("current_conversation_id"),
+                is_user=False,
+            )
 
         st.caption(timestamp)
 
@@ -11099,6 +11215,7 @@ def render_chat_view():
             st.info(f"**Instructions queued:** {persona_preview(queued_persona, 100)}")
     elif current_conv:
         st.markdown(f"# {current_conv['title']}")
+        render_fork_lineage(current_conv)
         active_persona = current_conv.get("personaPrompt")
         if active_persona:
             st.info(f"**Instructions active:** {persona_preview(active_persona, 100)}")

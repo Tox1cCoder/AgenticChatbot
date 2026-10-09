@@ -517,6 +517,38 @@
           "response": []
         },
         {
+          "name": "Fork Conversation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}/fork"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"messageId\": \"{{message_id}}\",\n  \"requestId\": \"{{$guid}}\",\n  \"title\": \"Explore an alternative\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Copies the source history up to and including a completed assistant reply into a new conversation. 201 for a new fork, 200 when the same requestId is retried. Reuse one requestId across retries; omit title to get '<source title> (fork)'."
+          },
+          "response": []
+        },
+        {
           "name": "Delete Conversation",
           "request": {
             "method": "DELETE",

@@ -1237,6 +1237,7 @@ The server mounts 15 routers; the client backend mirrors most of them and proxie
 | `GET` | `/conversations/{id}` | Retrieve |
 | `GET` | `/conversations/{id}/messages` | Paginated messages |
 | `PATCH` | `/conversations/{id}` | Update title / persona / planning mode |
+| `POST` | `/conversations/{id}/fork` | Copy history through a completed assistant reply into a new conversation ([contract](docs/frontend/fork-conversation.md)) |
 | `DELETE` | `/conversations/{id}` | Delete |
 
 ### Messages ([`/messages`](app/api/messages.py))
