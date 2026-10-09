@@ -770,6 +770,49 @@ def remove_inline_rich_reference(markdown: str, item_id: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip("\n")
 
 
+def replace_inline_rich_references(
+    markdown: str, replacements: dict[str, str]
+) -> tuple[str, set[str]]:
+    """Replace each marker naming a key of ``replacements`` with its text.
+
+    Returns the new markdown and the ids whose markers were found. Matching is
+    deliberately tolerant (``_ANY_MARKER_RE`` plus surrounding whitespace in
+    the id): this is the deletion side of the grammar, and a marker the strict
+    parser cannot see would otherwise survive the removal of its item. Code
+    fences, indented code, and inline code spans are preserved so a documented
+    example of the marker grammar is not rewritten.
+    """
+    if not markdown or not replacements or "<!--rich:" not in markdown:
+        return markdown, set()
+    normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    in_fence = _strip_fenced_code_blocks(lines)
+    found: set[str] = set()
+    output: list[str] = []
+    for line, inside in zip(lines, in_fence, strict=False):
+        if inside or _is_indented_code(line) or "<!--rich:" not in line:
+            output.append(line)
+            continue
+        code_ranges = _inline_code_ranges(line)
+        pieces: list[str] = []
+        cursor = 0
+        for match in _ANY_MARKER_RE.finditer(line):
+            item_id = match.group(1).strip()
+            if item_id not in replacements:
+                continue
+            if _overlaps_any_range(match.start(), match.end(), code_ranges):
+                continue
+            pieces.append(line[cursor : match.start()])
+            pieces.append(replacements[item_id])
+            cursor = match.end()
+            found.add(item_id)
+        pieces.append(line[cursor:])
+        output.append("".join(pieces))
+    if not found:
+        return markdown, found
+    return "\n".join(output), found
+
+
 # ---------------------------------------------------------------------------
 # Validation warnings
 # ---------------------------------------------------------------------------
@@ -1057,6 +1100,7 @@ __all__ = [
     "build_rich_item_inventory_block",
     "parse_inline_rich_references",
     "remove_inline_rich_reference",
+    "replace_inline_rich_references",
     "sanitize_public_image_fields",
     "sanitize_public_rich_item",
     "sanitize_public_rich_metadata",

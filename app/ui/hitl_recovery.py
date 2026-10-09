@@ -28,6 +28,27 @@ def should_suppress_pending_interrupt(
     return bool(interrupt_id and interrupt_id == reconciling_interrupt_id)
 
 
+def recoverable_interrupt(metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The approval a reloaded page should restore from an assistant row, if any.
+
+    Only a paused ``tool_approval_required`` row with an interrupt payload
+    qualifies. A row copied into a forked conversation never does: its
+    approval belongs to the source conversation's execution.
+    """
+    if not isinstance(metadata, Mapping) or metadata.get("fork_history"):
+        return None
+    if not (metadata.get("paused") and metadata.get("pause_reason") == "tool_approval_required"):
+        return None
+    interrupt = metadata.get("interrupt")
+    if not interrupt or not isinstance(interrupt, Mapping):
+        return None
+    recovered = dict(interrupt)
+    thread_id = metadata.get("thread_id")
+    if thread_id and not recovered.get("thread_id"):
+        recovered["thread_id"] = thread_id
+    return recovered
+
+
 def reconciliation_action(
     status: str | None,
 ) -> Literal["restore_form", "show_processing", "refresh_history", "require_new_message"]:

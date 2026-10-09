@@ -313,6 +313,20 @@ def _split_body_into_segments(
     return segments, referenced
 
 
+def _renderable_rich_items(metadata: dict[str, Any]) -> list[Any]:
+    raw_items = metadata.get("rich_items") or []
+    if not metadata.get("fork_history"):
+        return raw_items
+    # A row copied into a fork is history: it never opens a live widget
+    # connection, even if a descriptor reached it by a path the fork snapshot
+    # missed.
+    return [
+        item
+        for item in raw_items
+        if not (isinstance(item, dict) and item.get("type") == "live_widget")
+    ]
+
+
 def build_rich_response_view(
     content: str | None,
     metadata: dict[str, Any] | None,
@@ -333,7 +347,7 @@ def build_rich_response_view(
     metadata = metadata if isinstance(metadata, dict) else {}
     body = content or ""
     is_v1 = metadata.get("rich_items_version") == RICH_ITEMS_VERSION
-    raw_items = metadata.get("rich_items") or []
+    raw_items = _renderable_rich_items(metadata)
     items_by_id: dict[str, dict[str, Any]] = {}
     for item in raw_items:
         if not isinstance(item, dict):

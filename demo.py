@@ -42,6 +42,7 @@ from app.ui.hitl_recovery import (
     extract_error_code,
     is_recoverable_resume_conflict,
     reconciliation_action,
+    recoverable_interrupt,
     should_suppress_pending_interrupt,
 )
 from app.ui.rag_artifacts import (
@@ -6642,7 +6643,8 @@ def render_live_widgets(
     Inline items omit attachment chrome so they sit cleanly between markdown
     segments in a rich response.
     """
-    if not message_metadata:
+    if not message_metadata or message_metadata.get("fork_history"):
+        # Rows copied into a fork are history; their widgets belong to the source.
         return
 
     widgets = message_metadata.get("live_widgets") or []
@@ -11066,29 +11068,17 @@ def render_chat_view():
             _msgs = st.session_state.get("messages", [])
             for _msg in reversed(_msgs):
                 if _msg.get("role") == "assistant":
-                    _meta = get_message_metadata(_msg)
-                    if (
-                        _meta.get("paused")
-                        and _meta.get("pause_reason") == "tool_approval_required"
-                    ):
-                        _interrupt_data = _meta.get("interrupt")
-                        _thread_id = _meta.get("thread_id")
-                        if _interrupt_data and isinstance(_interrupt_data, dict):
-                            # thread_id may be stored separately in metadata
-                            if _thread_id and not _interrupt_data.get("thread_id"):
-                                _interrupt_data = {
-                                    **_interrupt_data,
-                                    "thread_id": _thread_id,
-                                }
-                            recovered_interrupt_id = _interrupt_data.get(
-                                "interrupt_id"
-                            ) or _interrupt_data.get("interruptId")
-                            reconciliation_marker = st.session_state.get(_hitl_reconciliation_key())
-                            if not should_suppress_pending_interrupt(
-                                recovered_interrupt_id, reconciliation_marker
-                            ):
-                                st.session_state.pending_interrupt = _interrupt_data
-                                st.session_state.interrupt_conversation_id = conversation_id
+                    _interrupt_data = recoverable_interrupt(get_message_metadata(_msg))
+                    if _interrupt_data is not None:
+                        recovered_interrupt_id = _interrupt_data.get(
+                            "interrupt_id"
+                        ) or _interrupt_data.get("interruptId")
+                        reconciliation_marker = st.session_state.get(_hitl_reconciliation_key())
+                        if not should_suppress_pending_interrupt(
+                            recovered_interrupt_id, reconciliation_marker
+                        ):
+                            st.session_state.pending_interrupt = _interrupt_data
+                            st.session_state.interrupt_conversation_id = conversation_id
                     break  # only check the most recent assistant message
 
     if not st.session_state.get("pending_interrupt"):
