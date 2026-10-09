@@ -102,45 +102,6 @@ def build_fork_request(message_id: str, request_id: str) -> dict[str, str]:
     return {"messageId": message_id, "requestId": request_id}
 
 
-@dataclass(frozen=True)
-class SourceIdentity:
-    """What a cancellation must still target after the UI moves to the child."""
-
-    conversation_id: str
-    user_message_id: str
-    generation_id: str
-    version: str
-
-
-def capture_source_identity(state: MutableMapping[str, Any]) -> SourceIdentity | None:
-    """Snapshot the in-flight stream's identity, or None when nothing is streaming."""
-    if not state.get("stream_inflight"):
-        return None
-    conversation_id = str(state.get("stream_conversation_id") or "")
-    if not conversation_id or conversation_id == "pending_new":
-        return None
-    snapshot = state.get("generation_snapshot") or {}
-    return SourceIdentity(
-        conversation_id=conversation_id,
-        user_message_id=str(state.get("stream_user_message_id") or ""),
-        generation_id=str(snapshot.get("generation_id") or ""),
-        version=str(snapshot.get("version") or ""),
-    )
-
-
-def build_stop_request(identity: SourceIdentity) -> dict[str, Any]:
-    """The stop body for the source stream, mirroring the in-conversation Stop."""
-    body: dict[str, Any] = {"conversationId": identity.conversation_id}
-    if identity.generation_id:
-        body["generationId"] = identity.generation_id
-        body["idempotencyKey"] = f"stop-{identity.generation_id}-{identity.version or '0'}"
-        if identity.version:
-            body["expectedVersion"] = int(identity.version)
-    else:
-        body["userMessageId"] = identity.user_message_id
-    return body
-
-
 def clear_source_state_for_fork_navigation(state: MutableMapping[str, Any]) -> None:
     """Drop source-only UI state the shared reset deliberately retains.
 

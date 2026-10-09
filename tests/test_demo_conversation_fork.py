@@ -247,27 +247,22 @@ def test_a_second_submit_while_pending_sends_nothing(harness):
     assert harness.api.calls == []
 
 
-def test_the_source_stream_identity_is_captured_before_state_is_cleared(harness):
+def test_a_paused_source_with_stale_stream_state_is_never_stopped(harness):
+    """The server forks only when no turn is active, so a stop could only hit a paused
+    (continuable) source generation and mutate it."""
     state = harness.state
     state.stream_inflight = True
     state.stream_conversation_id = SOURCE_ID
     state.stream_user_message_id = "user-msg-1"
 
-    harness.demo.fork_conversation_from_message(SOURCE_ID, MESSAGE_ID)
-
-    stop_calls = [(m, e, d) for m, e, d in harness.api.calls if e == "/messages/stop"]
-    assert len(stop_calls) == 1
-    body = stop_calls[0][2]
-    assert body["conversationId"] == SOURCE_ID
-    assert body["generationId"] == "gen-1"
-    assert body["expectedVersion"] == 5
-    assert state.stream_inflight is False
-
-
-def test_no_stop_is_sent_when_nothing_is_streaming(harness):
-    harness.demo.fork_conversation_from_message(SOURCE_ID, MESSAGE_ID)
+    assert harness.demo.fork_conversation_from_message(SOURCE_ID, MESSAGE_ID) is True
 
     assert [e for _, e, _ in harness.api.calls] == [f"/conversations/{SOURCE_ID}/fork"]
+    assert state.current_conversation_id == CHILD_ID
+    assert state.stream_inflight is False
+    assert "generation_snapshot" not in state
+    assert state.live_widget_mounts == {}
+    assert "pending_interrupt" not in state
 
 
 def test_same_conversation_inflight_clear_still_keeps_the_snapshot(harness):

@@ -57,9 +57,9 @@ There is no `/ai/conversations/.../fork` alias; AI SDK clients call the route ab
 5. Send every later request (`/messages`, `/ai/...` chat, stop, continue) to the child id.
 6. Discard source-scoped client state when switching: the generation snapshot (Continue/Stop),
    pending approval/interrupt UI, mounted live widgets and their subscriptions, composer
-   attachments, and any message cache keyed by the source. Capture the source stream's
-   conversation/generation id *before* discarding if you still need to cancel it; a stop must
-   target the source id, never the child.
+   attachments, and any message cache keyed by the source. Do not send a stop/cancel for
+   the source as part of forking: the server rejects a fork while a source turn is active, so a
+   stop could only alter a paused or stale source generation.
 
 ## Copied rows are history
 

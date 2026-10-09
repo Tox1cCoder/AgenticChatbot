@@ -3412,12 +3412,8 @@ def fork_conversation_from_message(source_id: str, message_id: str) -> bool:
     if child is None:
         return False
 
-    # Read before anything is cleared: the stop must still name the SOURCE stream.
-    source_stream = conversation_fork.capture_source_identity(st.session_state)
-    if source_stream is not None:
-        make_api_request(
-            "POST", "/messages/stop", conversation_fork.build_stop_request(source_stream)
-        )
+    # No stop is sent: the server accepts a fork only when no source turn is active, so a
+    # stop could only mutate a stale or paused source generation.
     upsert_conversation_in_state(child)
     st.session_state.current_conversation_id = child["id"]
     _navigate_away_from_source()
