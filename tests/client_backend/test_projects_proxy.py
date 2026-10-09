@@ -152,6 +152,25 @@ def test_project_custom_agents_forward(monkeypatch):
     assert ("PUT", "/projects/p1/custom-agents") in paths
 
 
+def test_project_agent_device_context_reaches_server(monkeypatch):
+    server = _fake_server([])
+    client, _ = _projects_router_client(monkeypatch, server)
+    with client:
+        assert client.get("/projects/p1?deviceId=device-a").status_code == 200
+        assert client.get("/projects/p1/custom-agents?deviceId=device-b").status_code == 200
+        assert (
+            client.put(
+                "/projects/p1/custom-agents?deviceId=device-c", json={"customAgentIds": []}
+            ).status_code
+            == 200
+        )
+    assert [dict(call[2]["params"]) for call in server.calls] == [
+        {"deviceId": "device-a"},
+        {"deviceId": "device-b"},
+        {"deviceId": "device-c"},
+    ]
+
+
 def test_project_conversation_membership_forwards(monkeypatch):
     server = _fake_server({"ok": True})
     client, _ = _projects_router_client(monkeypatch, server)

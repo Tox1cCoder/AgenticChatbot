@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from app.services.client_device_service import ClientDeviceService
+from app.services.custom_agent_capability_resolver import skill_refs_match
 
 logger = logging.getLogger(__name__)
 
@@ -110,11 +111,7 @@ def _normalize_lookup_names(skills: list[ResolvedSkill]) -> list[ResolvedSkill]:
 
 
 def _ref_matches_skill(ref: dict[str, Any], skill: ResolvedSkill) -> bool:
-    if str(ref.get("source") or "") != skill.source:
-        return False
-    lookup_name = ref.get("lookup_name")
-    name = ref.get("name")
-    return skill.lookup_name in (lookup_name, name) or skill.name in (lookup_name, name)
+    return skill_refs_match(ref, skill)
 
 
 def filter_skills_by_refs(

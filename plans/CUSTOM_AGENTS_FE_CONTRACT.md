@@ -2,7 +2,7 @@
 
 **Audience:** Frontend developers integrating custom-agent management with the AI SDK chat UI.
 
-**Contract status:** Documents the backend implementation as of 2026-07-22. Where intended behavior and current wire behavior differ, this document describes the current wire behavior and calls out the discrepancy in [Implementation review](#implementation-review).
+**Contract status:** Projects inheritance, device capability fields, and disabled-agent behavior updated and verified on 2026-10-09. The original broader implementation review dates from 2026-07-22; unresolved findings remain listed in [Implementation review](#implementation-review). For project settings and their save workflow, see the [Projects Frontend Contract](PROJECTS_FE_CONTRACT.md).
 
 ## Integration decision
 
@@ -14,18 +14,18 @@ All HTTP routes require:
 Authorization: Bearer <jwt>
 ```
 
-When the browser talks through `client_backend`, the local sidecar session supplies the upstream bearer token and injects the active `deviceId` on options/create/update requests. A browser calling the main API directly must supply both itself.
+When the browser talks through `client_backend`, the local sidecar session supplies the upstream bearer token and replaces `deviceId` with its active registered device on custom-agent list/read/options/create/update requests. A browser calling the main API directly must supply both itself. This injection is specific to custom-agent proxy routes: Projects routes require the frontend to pass `deviceId` explicitly.
 
 ## Endpoint summary
 
 | Recommended endpoint | Method | Purpose | Success |
 |---|---:|---|---:|
-| `/ai/custom-agents` | `GET` | List the authenticated user's live custom agents, newest first. | `200` |
-| `/ai/custom-agents` | `POST` | Create a custom agent. | `201` |
+| `/ai/custom-agents?deviceId={deviceId}` | `GET` | List live agents, newest first, with device availability. | `200` |
+| `/ai/custom-agents?deviceId={deviceId}` | `POST` | Create a custom agent; validate local refs against the device. | `201` |
 | `/ai/custom-agents/options?deviceId={deviceId}` | `GET` | Load current provider/model, server tool, active client tool, client server, and skill options. | `200` |
-| `/ai/custom-agents/{customAgentId}` | `GET` | Read one owned custom agent. | `200` |
+| `/ai/custom-agents/{customAgentId}?deviceId={deviceId}` | `GET` | Read one owned custom agent with device availability. | `200` |
 | `/ai/custom-agents/{customAgentId}?deviceId={deviceId}` | `PATCH` | Partially update an owned custom agent. | `200` |
-| `/ai/custom-agents/{customAgentId}` | `DELETE` | Soft-delete an agent and detach it from all conversations. | `200` |
+| `/ai/custom-agents/{customAgentId}` | `DELETE` | Soft-delete an agent; remove conversation attachments and project defaults. | `200` |
 | `/ai/conversations/{conversationId}/custom-agents` | `GET` | Read the conversation's attached agents in attachment order. | `200` |
 | `/ai/conversations/{conversationId}/custom-agents` | `PUT` | Replace the conversation's complete ordered attachment set. | `200` |
 | `/ai/conversations` | `POST` | Create a conversation before attaching agents. | `201` |
@@ -108,7 +108,7 @@ Unknown additive response fields and unknown stream event types must be ignored.
 
 Request schemas accept camelCase and snake_case. Use camelCase for new request code.
 
-Top-level response models use camelCase, but catalog entries and persisted `toolRefs`/`skillRefs` are currently untyped dictionaries whose nested keys remain snake_case. The mixed casing is current wire behavior:
+Typed response models, including nested `availability` and `deviceSnapshot`, use camelCase. Catalog entries and persisted `toolRefs`/`skillRefs` are currently untyped dictionaries whose nested keys remain snake_case. The mixed casing is current wire behavior:
 
 ```json
 {
@@ -117,7 +117,7 @@ Top-level response models use camelCase, but catalog entries and persisted `tool
   "toolRefs": [
     {
       "type": "client",
-      "device_id": "desktop-1",
+      "device_id": "cf24a938-c0a7-46dc-afc7-d57b6c9568f5",
       "qualified_tool_id": "client__csv__profile"
     }
   ]
@@ -154,6 +154,20 @@ type CustomAgent = {
   skillRefs: SkillRefWire[];
   enabled: boolean;
   runtimeAgentId: `custom_agent:${string}`;
+  availability: CustomAgentAvailability | null;
+};
+
+type CustomAgentAvailability = {
+  status: "ready" | "degraded" | "device_unavailable";
+  deviceId: string | null;
+  sessionId: string | null;
+  missingTools: {
+    serverName: string;
+    qualifiedToolId: string;
+    toolName: string | null;
+  }[];
+  missingSkills: { lookupName: string; name: string }[];
+  warnings: string[];
 };
 ```
 
@@ -166,10 +180,12 @@ The frontend should use:
 - `name` for display.
 - `slug` only as informational data; there is no slug-addressed endpoint.
 
+Custom-agent list/read and project detail/default-agent responses compute `availability`. Create/update and conversation-attachment responses currently leave it `null`; refetch a device-aware read for capability badges. `null` means unknown, not ready. `enabled` is a separate next-turn runtime switch.
+
 ## Options endpoint
 
 ```http
-GET /ai/custom-agents/options?deviceId=desktop-1
+GET /ai/custom-agents/options?deviceId=cf24a938-c0a7-46dc-afc7-d57b6c9568f5
 ```
 
 `deviceId` is optional at the HTTP layer but required to receive active client-side tools and client-side skills. The sidecar injects its active device automatically. Direct API clients must pass it.
@@ -184,6 +200,15 @@ type CustomAgentOptions = {
   clientTools: ClientToolOptionWire[];
   clientServers: ClientServerOptionWire[];
   skills: SkillOptionWire[];
+  deviceSnapshot: DeviceCatalogSnapshot;
+};
+
+type DeviceCatalogSnapshot = {
+  deviceId: string | null;
+  sessionId: string | null;
+  toolCatalogVersion: number | null;
+  skillCatalogVersion: number | null;
+  status: "ready" | "unavailable";
 };
 
 type ProviderOptionWire = {
@@ -230,7 +255,7 @@ type SkillOptionWire = {
 };
 ```
 
-Example:
+Example (illustrative IDs and catalog entries; submit options returned for the current registered device):
 
 ```json
 {
@@ -259,8 +284,8 @@ Example:
     "clientTools": [
       {
         "type": "client",
-        "device_id": "desktop-1",
-        "session_id": "session-1",
+        "device_id": "cf24a938-c0a7-46dc-afc7-d57b6c9568f5",
+        "session_id": "d2e4977f-9ff5-4533-86fd-7c857b79894f",
         "catalog_version": "7",
         "tool_instance_id": "csv-profile-instance",
         "server_name": "csv",
@@ -269,11 +294,18 @@ Example:
       }
     ],
     "clientServers": [
-      { "server_name": "csv", "device_id": "desktop-1", "tool_count": 1 }
+      { "server_name": "csv", "device_id": "cf24a938-c0a7-46dc-afc7-d57b6c9568f5", "tool_count": 1 }
     ],
     "skills": [
-      { "source": "server", "lookup_name": "data-analysis", "name": "Data Analysis" }
-    ]
+      { "source": "client", "lookup_name": "data-analysis", "name": "Data Analysis" }
+    ],
+    "deviceSnapshot": {
+      "deviceId": "cf24a938-c0a7-46dc-afc7-d57b6c9568f5",
+      "sessionId": "d2e4977f-9ff5-4533-86fd-7c857b79894f",
+      "toolCatalogVersion": 7,
+      "skillCatalogVersion": 3,
+      "status": "ready"
+    }
   },
   "error": null
 }
@@ -328,16 +360,16 @@ type SkillRefRequest = {
 
 `ToolRefWire` and `SkillRefWire` in read responses contain the same data but currently use nested snake_case keys.
 
-Client tool refs are exact, device-scoped identities. Create/update validation requires the tool to be present in the active device catalog. At runtime the backend can rebase volatile `session_id`, `catalog_version`, and `tool_instance_id` fields after the same device reconnects, using `(device_id, qualified_tool_id)` as the stable identity. A tool missing from the current session is skipped, and the final assistant metadata may contain `custom_agent_warnings`.
+Newly submitted client tool refs require the complete identity from the active device catalog. Saved selections are account-wide intent: availability and runtime resolve `(server_name, qualified_tool_id)` against the requesting device's catalog, binding its current device/session/catalog/tool-instance identity. A tool missing from that device's current session is skipped, and the final assistant metadata may contain `custom_agent_warnings`.
 
-Skill refs are restrictive: only selected, currently resolvable skills appear in the custom agent's prompt and can be activated.
+Skill refs are restrictive: only selected, currently resolvable skills appear in the custom agent's prompt and can be activated. Current options expose client-owned skills. Use the option's `source` when saving a new selection. Existing legacy `source: "server"` refs can be retained on update and resolve to the corresponding client-owned skill for compatibility; a new server-source ref is not a current selectable option.
 
 Backend MCP refs currently are not restrictive at runtime. See [IR-2](#ir-2-server-mcp-selection-does-not-restrict-runtime-access-high).
 
 ## Create
 
 ```http
-POST /ai/custom-agents?deviceId=desktop-1
+POST /ai/custom-agents?deviceId=cf24a938-c0a7-46dc-afc7-d57b6c9568f5
 Content-Type: application/json
 ```
 
@@ -359,8 +391,8 @@ Content-Type: application/json
     },
     {
       "type": "client",
-      "deviceId": "desktop-1",
-      "sessionId": "session-1",
+      "deviceId": "cf24a938-c0a7-46dc-afc7-d57b6c9568f5",
+      "sessionId": "d2e4977f-9ff5-4533-86fd-7c857b79894f",
       "catalogVersion": "7",
       "toolInstanceId": "csv-profile-instance",
       "serverName": "csv",
@@ -370,7 +402,7 @@ Content-Type: application/json
   ],
   "skillRefs": [
     {
-      "source": "server",
+      "source": "client",
       "lookupName": "data-analysis",
       "name": "Data Analysis"
     }
@@ -389,8 +421,8 @@ Content-Type: application/json
 | `temperature` | no | `null` or number from `0` through `2`. |
 | `reasoningEffort` | no | `null` or string up to 32 characters. The schema does not publish an allowed enum. |
 | `toolRefs` | no | Defaults to `[]`; duplicate refs are silently collapsed, preserving first occurrence. |
-| `skillRefs` | no | Defaults to `[]`; each ref must exist in the current server/active-device skill catalog. |
-| `enabled` | no | Defaults to `true`, but is not enforced by the runtime; see [IR-1](#ir-1-enabled-is-persisted-but-not-enforced-critical). |
+| `skillRefs` | no | Defaults to `[]`; newly selected refs must resolve in the active-device skill catalog. Retain unavailable saved refs on unrelated edits. |
+| `enabled` | no | Defaults to `true`. Disabled definitions stay saved and attached but are excluded from new runtime rosters; see IR-1 below. |
 
 The successful `data` is a complete `CustomAgent`.
 
@@ -399,8 +431,8 @@ Name uniqueness is slug-based and user-scoped. Names such as `Data Analyst`, `da
 ## List and read
 
 ```http
-GET /ai/custom-agents
-GET /ai/custom-agents/{customAgentId}
+GET /ai/custom-agents?deviceId={deviceId}
+GET /ai/custom-agents/{customAgentId}?deviceId={deviceId}
 ```
 
 List response `data` is `CustomAgent[]`, ordered newest first. The endpoint is not paginated.
@@ -410,7 +442,7 @@ Read response `data` is one `CustomAgent`. A live agent owned by another user re
 ## Update
 
 ```http
-PATCH /ai/custom-agents/{customAgentId}?deviceId=desktop-1
+PATCH /ai/custom-agents/{customAgentId}?deviceId=cf24a938-c0a7-46dc-afc7-d57b6c9568f5
 Content-Type: application/json
 ```
 
@@ -431,7 +463,7 @@ Rules:
 - `description: null`, `temperature: null`, and `reasoningEffort: null` clear those optional values.
 - Never send `null` for `name`, `prompt`, `providerType`, `model`, or `enabled`; omit an unchanged field. Current validation allows some of these values through to a later failure. See [IR-7](#ir-7-patch-nullability-can-produce-server-errors-high).
 - Updating `providerType` or `model` validates the resulting pair.
-- Updating a tool or skill list revalidates the entire supplied list against the current catalogs.
+- Updating tools or skills validates newly selected local refs against the current catalog. Existing local selections may be retained even when unavailable; omitted lists stay unchanged. Backend MCP refs are still checked against the server catalog.
 - An empty body succeeds and returns the unchanged agent.
 - Update returns `409 CUSTOM_AGENT_IN_USE` while that runtime agent is active or paused according to the backend lock registry.
 - Editing is live: future turns resolve the latest saved configuration. Existing in-flight execution does not mutate in place.
@@ -442,7 +474,7 @@ Rules:
 DELETE /ai/custom-agents/{customAgentId}
 ```
 
-Delete is a soft delete and removes every conversation attachment for this agent in the same database transaction. There is no restore endpoint.
+Delete is a soft delete and removes every conversation attachment and project default for this agent in the same database transaction. There is no restore endpoint. Refresh affected project defaults as well as the global agent list and conversation attachments.
 
 Delete returns `409 CUSTOM_AGENT_IN_USE` while the agent is active or paused according to the lock registry. The frontend should require confirmation because the operation affects all conversations and cannot be undone through the API.
 
@@ -695,15 +727,15 @@ Recommended invalidation:
 
 ## Implementation review
 
-These findings are based on the current routes, schemas, services, runtime policy, stream adapter, and tests. They are backend issues or contract hazards; the frontend mitigations below do not replace backend fixes.
+The original review covered routes, schemas, services, runtime policy, stream adapter, and tests on 2026-07-22. IR-1 was resolved and verified on 2026-10-09. Other findings are retained from that review and have not all been re-audited in this Projects update; frontend mitigations do not replace backend fixes.
 
-### IR-1: `enabled` is persisted but not enforced (critical)
+### IR-1: `enabled` runtime enforcement (resolved 2026-10-09)
 
-`enabled` is accepted, stored, returned, and patchable, but list/attachment/runtime-state queries do not filter it and workflow state does not carry it. An attached agent with `enabled: false` can still be routed to and executed.
+`enabled` is accepted, stored, returned, and patchable. Disabled definitions remain in management lists, project defaults, and conversation attachments, but runtime projection excludes them. Routing, handoff, and construction also reject explicitly disabled entries.
 
-Frontend mitigation: do not present `enabled` as a working runtime switch. Hide the toggle or label it unavailable until the backend filters disabled agents consistently. Do not rely on it for safety or access control.
+The toggle takes effect when the next turn loads live settings. It does not cancel an already-running turn. Re-enabling restores execution through the existing attachment without reattaching it.
 
-Recommended backend fix: define disabled semantics, prevent new attachments/routing for disabled agents, and decide whether disabling should detach existing attachments or merely suppress them.
+Saved disabled defaults can still be inherited as dormant attachments, preserving the project's ordered configuration while suppressing execution.
 
 ### IR-2: Server MCP selection does not restrict runtime access (high)
 
@@ -798,7 +830,7 @@ Recommended backend fix: if non-discoverability is a requirement, query by `(own
 - Handles terminal `CUSTOM_AGENT_RESUME_CONFLICT` in resume streams.
 - Resolves live custom-agent names from the runtime-ID cache.
 - Displays final `custom_agent_warnings` as nonfatal message warnings.
-- Does not present `enabled` or server MCP selections as enforced runtime/security controls until backend issues IR-1 and IR-2 are fixed.
+- Presents `enabled` as a next-turn runtime switch and server MCP selections as hints, not permissions (IR-2).
 - Ignores unknown additive response fields and unknown SSE event types.
 
 ## Device capability resolution (account-wide intent, device-local execution)
@@ -812,6 +844,9 @@ availability and runtime binding. The frontend MUST follow these rules:
 - Match saved client MCP selections by `(server_name, qualified_tool_id)`.
 - Require the full current device/session/catalog/tool-instance/tool-name identity for newly submitted client refs.
 - Show `availability.status=degraded`/`device_unavailable` as non-blocking.
+- `ready` means selected local capabilities resolve, or no local dependencies exist; it does not guarantee provider/backend MCP health or imply `enabled=true`.
+- `degraded` means a ready device is missing selected tools/skills; `device_unavailable` means local dependencies have no usable device snapshot. Missing, invalid, foreign-owned, offline, and not-yet-synced devices have no usable local catalog.
+- Keep capability caches separate by user and device; discard responses from a previous device and refresh after session/catalog changes. Never mark null availability as ready.
 - Preserve missing saved refs on unrelated edits; do not silently clear them.
 - Provide an explicit control to remove retained unavailable refs.
 - Never merge catalogs or HITL settings from two devices.

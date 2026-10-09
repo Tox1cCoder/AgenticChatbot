@@ -8,10 +8,17 @@ from uuid import UUID
 
 from sqlalchemy import delete, func, or_, select, update
 
+from app.core.exceptions import AuthorizationException, ResourceNotFoundException
+from app.core.exceptions.project import (
+    ProjectConversationNotFoundError,
+    ProjectForbiddenError,
+    ProjectNotFoundError,
+)
 from app.models.conversation import Conversation
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
 from app.models.project import Project, ProjectCustomAgent
 from app.models.user_memory import UserMemory
+from app.repositories.custom_agent import CustomAgentRepository
 from app.repositories.session_transport import RepositorySessionMixin
 from app.repositories.utils.pagination import Paginator
 
@@ -143,6 +150,84 @@ class ProjectRepository(RepositorySessionMixin):
 
     # ---------------------------------------------------------------- writes
 
+    @staticmethod
+    def _lock_owned_project(session: Any, owner_id: UUID, project_id: UUID) -> Project:
+        project = session.execute(
+            select(Project)
+            .where(Project.id == project_id, Project.deleted_at.is_(None))
+            .with_for_update()
+        ).scalar_one_or_none()
+        if project is None:
+            raise ProjectNotFoundError()
+        if project.owner_id != owner_id:
+            raise ProjectForbiddenError()
+        return project
+
+    @staticmethod
+    def _owned_conversation(
+        session: Any, owner_id: UUID, conversation_id: UUID, *, lock: bool = True
+    ) -> Conversation:
+        statement = select(Conversation).where(
+            Conversation.id == conversation_id, Conversation.deleted_at.is_(None)
+        )
+        if lock:
+            statement = statement.with_for_update()
+        conversation = session.execute(statement).scalar_one_or_none()
+        if conversation is None:
+            raise ResourceNotFoundException(
+                detail="Conversation not found", error_code="CONVERSATION_NOT_FOUND"
+            )
+        if conversation.owner_id != owner_id:
+            raise AuthorizationException(
+                detail="Access denied to this conversation", error_code="CONVERSATION_ACCESS_DENIED"
+            )
+        return conversation
+
+    def create_conversation(
+        self, owner_id: UUID, project_id: UUID, fields: dict[str, Any]
+    ) -> Conversation:
+        """Create a project member and inherit defaults in one transaction."""
+        with self.session_factory() as session:
+            self._lock_owned_project(session, owner_id, project_id)
+            conversation = Conversation(
+                **{**fields, "owner_id": owner_id, "project_id": project_id}
+            )
+            session.add(conversation)
+            session.flush()
+            self._seed_agents_in_session(session, owner_id, project_id, conversation.id)
+            session.commit()
+            session.refresh(conversation)
+            session.expunge(conversation)
+            return conversation
+
+    def attach_conversation(self, owner_id: UUID, project_id: UUID, conversation_id: UUID) -> None:
+        """Serialize membership and inheritance against moves and project deletion."""
+        with self.session_factory() as session:
+            self._lock_owned_project(session, owner_id, project_id)
+            conversation = self._owned_conversation(session, owner_id, conversation_id)
+            conversation.project_id = project_id
+            self._seed_agents_in_session(session, owner_id, project_id, conversation_id)
+            session.commit()
+
+    def detach_conversation(self, owner_id: UUID, project_id: UUID, conversation_id: UUID) -> None:
+        """Only detach the expected live, owner-scoped membership."""
+        with self.session_factory() as session:
+            self._lock_owned_project(session, owner_id, project_id)
+            result = session.execute(
+                update(Conversation)
+                .where(
+                    Conversation.id == conversation_id,
+                    Conversation.owner_id == owner_id,
+                    Conversation.deleted_at.is_(None),
+                    Conversation.project_id == project_id,
+                )
+                .values(project_id=None)
+            )
+            if result.rowcount == 0:
+                self._owned_conversation(session, owner_id, conversation_id, lock=False)
+                raise ProjectConversationNotFoundError()
+            session.commit()
+
     def create(self, owner_id: UUID, fields: dict[str, Any]) -> Project:
         with self.session_factory() as session:
             project = Project(owner_id=owner_id, **fields)
@@ -155,11 +240,13 @@ class ProjectRepository(RepositorySessionMixin):
     def update(self, owner_id: UUID, project_id: UUID, fields: dict[str, Any]) -> Project | None:
         with self.session_factory() as session:
             project = session.execute(
-                select(Project).where(
+                select(Project)
+                .where(
                     Project.id == project_id,
                     Project.owner_id == owner_id,
                     Project.deleted_at.is_(None),
                 )
+                .with_for_update()
             ).scalar_one_or_none()
             if project is None:
                 return None
@@ -183,11 +270,13 @@ class ProjectRepository(RepositorySessionMixin):
         """
         with self.session_factory() as session:
             project = session.execute(
-                select(Project).where(
+                select(Project)
+                .where(
                     Project.id == project_id,
                     Project.owner_id == owner_id,
                     Project.deleted_at.is_(None),
                 )
+                .with_for_update()
             ).scalar_one_or_none()
             if project is None:
                 return False
@@ -214,6 +303,12 @@ class ProjectRepository(RepositorySessionMixin):
         happens at create and attach time only.
         """
         with self.session_factory() as session:
+            self._lock_owned_project(session, owner_id, project_id)
+            live_ids = CustomAgentRepository.lock_owned_agent_ids(
+                session, owner_id, custom_agent_ids
+            )
+            if set(live_ids) != set(custom_agent_ids):
+                raise ProjectForbiddenError(detail="One or more custom agents are unavailable")
             session.execute(
                 delete(ProjectCustomAgent).where(
                     ProjectCustomAgent.project_id == project_id,
@@ -241,70 +336,75 @@ class ProjectRepository(RepositorySessionMixin):
         Shared by conversation creation and by attach.
         """
         with self.session_factory() as session:
-            project_agent_ids = list(
-                session.execute(
-                    select(ProjectCustomAgent.custom_agent_id)
-                    .join(
-                        CustomAgent,
-                        CustomAgent.id == ProjectCustomAgent.custom_agent_id,
-                    )
-                    .where(
-                        ProjectCustomAgent.project_id == project_id,
-                        ProjectCustomAgent.owner_id == owner_id,
-                        CustomAgent.deleted_at.is_(None),
-                    )
-                    .order_by(ProjectCustomAgent.agent_order.asc())
-                )
-                .scalars()
-                .all()
-            )
-            if not project_agent_ids:
-                return 0
-
-            existing = set(
-                session.execute(
-                    select(ConversationCustomAgent.custom_agent_id).where(
-                        ConversationCustomAgent.conversation_id == conversation_id
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            next_order = (
-                session.execute(
-                    select(func.coalesce(func.max(ConversationCustomAgent.agent_order), -1)).where(
-                        ConversationCustomAgent.conversation_id == conversation_id
-                    )
-                ).scalar_one()
-                + 1
-            )
-
-            inserted = 0
-            for custom_agent_id in project_agent_ids:
-                if custom_agent_id in existing:
-                    continue
-                session.add(
-                    ConversationCustomAgent(
-                        owner_id=owner_id,
-                        conversation_id=conversation_id,
-                        custom_agent_id=custom_agent_id,
-                        agent_order=next_order,
-                    )
-                )
-                next_order += 1
-                inserted += 1
+            self._lock_owned_project(session, owner_id, project_id)
+            self._owned_conversation(session, owner_id, conversation_id)
+            inserted = self._seed_agents_in_session(session, owner_id, project_id, conversation_id)
             session.commit()
             return inserted
 
-    def set_conversation_project(self, conversation_id: UUID, project_id: UUID | None) -> None:
-        """Point a conversation at a project, or release it when ``None``."""
-        with self.session_factory() as session:
+    @staticmethod
+    def _seed_agents_in_session(
+        session: Any, owner_id: UUID, project_id: UUID, conversation_id: UUID
+    ) -> int:
+        """Caller holds project/conversation locks; lock agents before child writes."""
+        project_agent_ids = list(
             session.execute(
-                update(Conversation)
-                .where(Conversation.id == conversation_id)
-                .values(project_id=project_id)
+                select(ProjectCustomAgent.custom_agent_id)
+                .join(
+                    CustomAgent,
+                    CustomAgent.id == ProjectCustomAgent.custom_agent_id,
+                )
+                .where(
+                    ProjectCustomAgent.project_id == project_id,
+                    ProjectCustomAgent.owner_id == owner_id,
+                    CustomAgent.owner_id == owner_id,
+                    CustomAgent.deleted_at.is_(None),
+                )
+                .order_by(ProjectCustomAgent.agent_order.asc())
             )
-            session.commit()
+            .scalars()
+            .all()
+        )
+        live_ids = set(
+            CustomAgentRepository.lock_owned_agent_ids(session, owner_id, project_agent_ids)
+        )
+        project_agent_ids = [agent_id for agent_id in project_agent_ids if agent_id in live_ids]
+        if not project_agent_ids:
+            return 0
+
+        existing = set(
+            session.execute(
+                select(ConversationCustomAgent.custom_agent_id).where(
+                    ConversationCustomAgent.conversation_id == conversation_id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        next_order = (
+            session.execute(
+                select(func.coalesce(func.max(ConversationCustomAgent.agent_order), -1)).where(
+                    ConversationCustomAgent.conversation_id == conversation_id
+                )
+            ).scalar_one()
+            + 1
+        )
+
+        inserted = 0
+        for custom_agent_id in project_agent_ids:
+            if custom_agent_id in existing:
+                continue
+            session.add(
+                ConversationCustomAgent(
+                    owner_id=owner_id,
+                    conversation_id=conversation_id,
+                    custom_agent_id=custom_agent_id,
+                    agent_order=next_order,
+                )
+            )
+            next_order += 1
+            inserted += 1
+        return inserted
 
     def conversation_project_id(self, conversation_id: UUID) -> UUID | None:
         """The project a conversation currently belongs to, if any."""

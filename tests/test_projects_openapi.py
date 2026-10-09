@@ -47,3 +47,16 @@ def test_sidecar_projects_openapi_describes_request_and_response_shapes():
         "application/json"
     ]["schema"]
     assert "name" in patch_schema["properties"]
+
+
+def test_project_agent_reads_document_device_context_on_both_servers():
+    app = FastAPI()
+    app.include_router(projects_router)
+    for schema in (app.openapi(), create_sidecar_app().openapi()):
+        for path, method in (
+            ("/projects/{project_id}", "get"),
+            ("/projects/{project_id}/custom-agents", "get"),
+            ("/projects/{project_id}/custom-agents", "put"),
+        ):
+            params = schema["paths"][path][method]["parameters"]
+            assert any(p["name"] == "deviceId" and not p["required"] for p in params)

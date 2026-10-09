@@ -56,6 +56,18 @@ LIST_PROJECTS_PARAMETERS = {
     ]
 }
 
+AGENT_DEVICE_PARAMETERS = {
+    "parameters": [
+        {
+            "name": "deviceId",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string"},
+            "description": "Active device for agent availability",
+        }
+    ]
+}
+
 
 @router.get(
     "", response_model=PaginatedApiResponse[ProjectRead], openapi_extra=LIST_PROJECTS_PARAMETERS
@@ -82,7 +94,9 @@ async def create_project(
     return await proxy_server_request(request, upstream_path="/projects")
 
 
-@router.get("/{project_id}", response_model=ApiResponse[ProjectRead])
+@router.get(
+    "/{project_id}", response_model=ApiResponse[ProjectRead], openapi_extra=AGENT_DEVICE_PARAMETERS
+)
 async def get_project(
     project_id: str,
     request: Request,
@@ -116,7 +130,11 @@ async def delete_project(
     return await proxy_server_request(request, upstream_path=f"/projects/{project_id}")
 
 
-@router.get("/{project_id}/custom-agents", response_model=ApiResponse[list[CustomAgentRead]])
+@router.get(
+    "/{project_id}/custom-agents",
+    response_model=ApiResponse[list[CustomAgentRead]],
+    openapi_extra=AGENT_DEVICE_PARAMETERS,
+)
 async def list_project_custom_agents(
     project_id: str,
     request: Request,
@@ -131,7 +149,7 @@ async def list_project_custom_agents(
 @router.put(
     "/{project_id}/custom-agents",
     response_model=ApiResponse[list[CustomAgentRead]],
-    openapi_extra=_request_body(ProjectCustomAgentsUpdate),
+    openapi_extra={**_request_body(ProjectCustomAgentsUpdate), **AGENT_DEVICE_PARAMETERS},
 )
 async def set_project_custom_agents(
     project_id: str,

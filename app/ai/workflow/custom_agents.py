@@ -28,7 +28,9 @@ class CustomAgentsMixin:
         """Live hand_off targets: every reachable agent except the active one."""
         targets = list(getattr(self, "agents", {}))
         targets.extend(
-            cid for cid in GraphStateView(state).custom_agents() if cid != active_agent_id
+            cid
+            for cid, entry in GraphStateView(state).custom_agents().items()
+            if cid != active_agent_id and isinstance(entry, dict) and entry.get("enabled", True)
         )
         return [target for target in targets if target != active_agent_id]
 
@@ -50,7 +52,11 @@ class CustomAgentsMixin:
                 descriptions[agent_id] = blurb
         # Other attached custom agents.
         for cid, entry in GraphStateView(state).custom_agents().items():
-            if cid == runtime_agent_id or not isinstance(entry, dict):
+            if (
+                cid == runtime_agent_id
+                or not isinstance(entry, dict)
+                or not entry.get("enabled", True)
+            ):
                 continue
             name = str(entry.get("name") or "Custom Agent").strip() or "Custom Agent"
             detail = str(entry.get("description") or "").strip()
@@ -159,7 +165,7 @@ class CustomAgentsMixin:
         neither the ``hand_off`` tool nor the delegation prompt.
         """
         entry = GraphStateView(state).custom_agents().get(runtime_agent_id)
-        if not entry:
+        if not entry or not entry.get("enabled", True):
             return None
         spec = build_custom_agent_runtime_spec(
             entry,

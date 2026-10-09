@@ -97,6 +97,24 @@ def test_get_conversations_accepts_a_project_filter(monkeypatch):
     assert "project_id" in inspect.signature(demo.get_conversations).parameters
 
 
+def test_project_agent_helpers_send_active_device(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    sys.modules["streamlit"].session_state.device_id = "device-a"
+    calls = []
+
+    def request(method, path, data=None):
+        calls.append((method, path))
+        return {"success": True, "data": {"id": "project-a"}}
+
+    monkeypatch.setattr(demo, "make_api_request", request)
+    demo.get_project("project-a")
+    demo.set_project_custom_agents("project-a", [])
+    assert calls == [
+        ("GET", "/projects/project-a?deviceId=device-a"),
+        ("PUT", "/projects/project-a/custom-agents?deviceId=device-a"),
+    ]
+
+
 def test_list_projects_calls_the_endpoint(monkeypatch):
     demo = _import_demo_with_ui_stubs(monkeypatch)
     calls = []

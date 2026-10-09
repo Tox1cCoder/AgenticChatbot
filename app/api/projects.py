@@ -42,7 +42,7 @@ MEMBERSHIP_RESPONSES = {
 
 @router.get("", response_model=PaginatedApiResponse[ProjectRead])
 @AppAutoInjector.auto_inject()
-async def list_projects(
+def list_projects(
     project_service: ProjectService,
     user_id: UUID,
     page: int = Query(1, ge=1, description="Page number (1-based)"),
@@ -58,7 +58,7 @@ async def list_projects(
 
 @router.post("", response_model=ApiResponse[ProjectRead], status_code=status.HTTP_201_CREATED)
 @AppAutoInjector.auto_inject()
-async def create_project(
+def create_project(
     payload: ProjectCreate,
     project_service: ProjectService,
     user_id: UUID,
@@ -72,13 +72,18 @@ async def create_project(
     "/{project_id}", response_model=ApiResponse[ProjectRead], responses=PROJECT_ACCESS_RESPONSES
 )
 @AppAutoInjector.auto_inject()
-async def get_project(
+def get_project(
     project_id: UUID,
     project_service: ProjectService,
     user_id: UUID,
+    device_id: str | None = Query(
+        None, alias="deviceId", description="Active device for agent availability"
+    ),
 ) -> ApiResponse[ProjectRead]:
     """Read one project, including its default agent ids."""
-    result = project_service.get_project(user_id, project_id, include_agents=True)
+    result = project_service.get_project(
+        user_id, project_id, include_agents=True, device_id=device_id
+    )
     return ApiResponse(success=True, message="Project retrieved", data=result)
 
 
@@ -86,7 +91,7 @@ async def get_project(
     "/{project_id}", response_model=ApiResponse[ProjectRead], responses=PROJECT_ACCESS_RESPONSES
 )
 @AppAutoInjector.auto_inject()
-async def update_project(
+def update_project(
     project_id: UUID,
     payload: ProjectUpdate,
     project_service: ProjectService,
@@ -99,7 +104,7 @@ async def update_project(
 
 @router.delete("/{project_id}", response_model=ApiResponse[Any], responses=PROJECT_ACCESS_RESPONSES)
 @AppAutoInjector.auto_inject()
-async def delete_project(
+def delete_project(
     project_id: UUID,
     project_service: ProjectService,
     user_id: UUID,
@@ -115,13 +120,16 @@ async def delete_project(
     responses=PROJECT_ACCESS_RESPONSES,
 )
 @AppAutoInjector.auto_inject()
-async def list_project_custom_agents(
+def list_project_custom_agents(
     project_id: UUID,
     project_service: ProjectService,
     user_id: UUID,
+    device_id: str | None = Query(
+        None, alias="deviceId", description="Active device for agent availability"
+    ),
 ) -> ApiResponse[list[CustomAgentRead]]:
     """The project's ordered default agents."""
-    result = project_service.list_agents(user_id, project_id)
+    result = project_service.list_agents(user_id, project_id, device_id=device_id)
     return ApiResponse(success=True, message="Project agents retrieved", data=result)
 
 
@@ -131,14 +139,19 @@ async def list_project_custom_agents(
     responses=PROJECT_ACCESS_RESPONSES,
 )
 @AppAutoInjector.auto_inject()
-async def set_project_custom_agents(
+def set_project_custom_agents(
     project_id: UUID,
     payload: ProjectCustomAgentsUpdate,
     project_service: ProjectService,
     user_id: UUID,
+    device_id: str | None = Query(
+        None, alias="deviceId", description="Active device for agent availability"
+    ),
 ) -> ApiResponse[list[CustomAgentRead]]:
     """Replace the default set. Conversations already in the project are untouched."""
-    result = project_service.set_agents(user_id, project_id, payload.custom_agent_ids)
+    result = project_service.set_agents(
+        user_id, project_id, payload.custom_agent_ids, device_id=device_id
+    )
     return ApiResponse(success=True, message="Project agents updated", data=result)
 
 
@@ -148,7 +161,7 @@ async def set_project_custom_agents(
     responses=MEMBERSHIP_RESPONSES,
 )
 @AppAutoInjector.auto_inject()
-async def attach_conversation(
+def attach_conversation(
     project_id: UUID,
     conversation_id: UUID,
     project_service: ProjectService,
@@ -165,7 +178,7 @@ async def attach_conversation(
     responses=MEMBERSHIP_RESPONSES,
 )
 @AppAutoInjector.auto_inject()
-async def detach_conversation(
+def detach_conversation(
     project_id: UUID,
     conversation_id: UUID,
     project_service: ProjectService,

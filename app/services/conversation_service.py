@@ -46,9 +46,7 @@ class ConversationService(IConversationService):
         # conversation is deleted. Wired through the DI container.
         self.ai_service = ai_service
         self.checkpoint_manager = checkpoint_manager
-        # Optional: wired through the DI container (Task 7). When absent
-        # (e.g. tests constructing this service directly), project_id on
-        # create is stored but not validated or seeded.
+        # Project creation must fail closed when this dependency is absent.
         self.project_service = project_service
 
     # Static so the fork service builds its response with this same mapping.
@@ -106,16 +104,19 @@ class ConversationService(IConversationService):
     ) -> ConversationRead:
         self.user_validation_utils.validate_user_exists(owner_id)
         project_id = conversation_create_data.project_id
-        if project_id is not None and self.project_service is not None:
+        if project_id is not None:
+            if self.project_service is None:
+                raise RuntimeError("Project service is required to create a project conversation")
             self.project_service.require_owned(owner_id, project_id)
         conversation_entity = ConversationFactory.create_from_schema(
             conversation_create_data, owner_id
         )
-        created_conversation = self.repository.create(conversation_entity)
-        if project_id is not None and self.project_service is not None:
-            self.project_service.repository.seed_conversation_agents(
-                owner_id, project_id, created_conversation.id
+        if project_id is not None:
+            created_conversation = self.project_service.repository.create_conversation(
+                owner_id, project_id, conversation_entity
             )
+        else:
+            created_conversation = self.repository.create(conversation_entity)
         return self._convert_to_read_schema(created_conversation, include=[])
 
     def get_by_id(self, conversation_id: UUID) -> ConversationRead:

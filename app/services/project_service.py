@@ -6,7 +6,6 @@ import logging
 from uuid import UUID
 
 from app.core.exceptions.project import (
-    ProjectConversationNotFoundError,
     ProjectForbiddenError,
     ProjectNotFoundError,
 )
@@ -16,6 +15,7 @@ from app.repositories.project import ProjectRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.custom_agent import CustomAgentRead
 from app.schemas.project import ProjectCreate, ProjectRead, ProjectUpdate
+from app.services.custom_agent_service import CustomAgentService
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 
 logger = logging.getLogger(__name__)
@@ -29,10 +29,14 @@ class ProjectService:
         repository: ProjectRepository,
         custom_agent_repository: CustomAgentRepository,
         conversation_validation_utils: ConversationValidationUtils,
+        custom_agent_service: CustomAgentService | None = None,
     ):
         self.repository = repository
         self.custom_agent_repository = custom_agent_repository
         self.conversation_validation_utils = conversation_validation_utils
+        self.custom_agent_service = custom_agent_service or CustomAgentService(
+            custom_agent_repository, conversation_validation_utils, model_config_service=None
+        )
 
     # ------------------------------------------------------------ ownership
 
@@ -70,15 +74,19 @@ class ProjectService:
         return self._to_read(project, 0)
 
     def get_project(
-        self, owner_id: UUID, project_id: UUID, *, include_agents: bool = False
+        self,
+        owner_id: UUID,
+        project_id: UUID,
+        *,
+        include_agents: bool = False,
+        device_id: str | None = None,
     ) -> ProjectRead:
         project = self.require_owned(owner_id, project_id)
         counts = self.repository.conversation_counts(owner_id)
         agents = (
-            [
-                CustomAgentRead.model_validate(agent)
-                for agent in self.repository.list_agents(owner_id, project_id)
-            ]
+            self.custom_agent_service.describe_agents(
+                owner_id, self.repository.list_agents(owner_id, project_id), device_id=device_id
+            )
             if include_agents
             else None
         )
@@ -102,15 +110,21 @@ class ProjectService:
 
     # --------------------------------------------------------------- agents
 
-    def list_agents(self, owner_id: UUID, project_id: UUID) -> list[CustomAgentRead]:
+    def list_agents(
+        self, owner_id: UUID, project_id: UUID, *, device_id: str | None = None
+    ) -> list[CustomAgentRead]:
         self.require_owned(owner_id, project_id)
-        return [
-            CustomAgentRead.model_validate(agent)
-            for agent in self.repository.list_agents(owner_id, project_id)
-        ]
+        return self.custom_agent_service.describe_agents(
+            owner_id, self.repository.list_agents(owner_id, project_id), device_id=device_id
+        )
 
     def set_agents(
-        self, owner_id: UUID, project_id: UUID, custom_agent_ids: list[UUID]
+        self,
+        owner_id: UUID,
+        project_id: UUID,
+        custom_agent_ids: list[UUID],
+        *,
+        device_id: str | None = None,
     ) -> list[CustomAgentRead]:
         """Replace the default set. Does not touch conversations already in the project."""
         self.require_owned(owner_id, project_id)
@@ -120,7 +134,7 @@ class ProjectService:
                     detail=f"Custom agent {custom_agent_id} is not available to this user"
                 )
         self.repository.replace_agents(owner_id, project_id, custom_agent_ids)
-        return self.list_agents(owner_id, project_id)
+        return self.list_agents(owner_id, project_id, device_id=device_id)
 
     # ----------------------------------------------------------- membership
 
@@ -132,16 +146,13 @@ class ProjectService:
         """
         self.require_owned(owner_id, project_id)
         self.conversation_validation_utils.validate_conversation_access(owner_id, conversation_id)
-        self.repository.set_conversation_project(conversation_id, project_id)
-        self.repository.seed_conversation_agents(owner_id, project_id, conversation_id)
+        self.repository.attach_conversation(owner_id, project_id, conversation_id)
 
     def detach_conversation(self, owner_id: UUID, project_id: UUID, conversation_id: UUID) -> None:
         """Release a conversation from the project, keeping its seeded agents."""
         self.require_owned(owner_id, project_id)
         self.conversation_validation_utils.validate_conversation_access(owner_id, conversation_id)
-        if self.repository.conversation_project_id(conversation_id) != project_id:
-            raise ProjectConversationNotFoundError()
-        self.repository.set_conversation_project(conversation_id, None)
+        self.repository.detach_conversation(owner_id, project_id, conversation_id)
 
     # -------------------------------------------------------------- helpers
 

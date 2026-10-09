@@ -77,6 +77,14 @@ class CustomAgentService:
     # ------------------------------------------------------------------ reads
 
     def list_agents(self, owner_id: UUID, *, device_id: str | None = None) -> list[CustomAgentRead]:
+        return self.describe_agents(
+            owner_id, self.repository.list_by_owner(owner_id), device_id=device_id
+        )
+
+    def describe_agents(
+        self, owner_id: UUID, agents: list[CustomAgent], *, device_id: str | None = None
+    ) -> list[CustomAgentRead]:
+        """Project ordered saved definitions against one owner-scoped device snapshot."""
         snapshot, live_tools, live_skills = self._load_device_context(owner_id, device_id)
         return [
             self._to_read(
@@ -88,7 +96,7 @@ class CustomAgentService:
                     live_skills=live_skills,
                 ),
             )
-            for agent in self.repository.list_by_owner(owner_id)
+            for agent in agents
         ]
 
     def get_agent(
@@ -413,6 +421,8 @@ class CustomAgentService:
         """Pure projection of attachment rows into graph state. No database access."""
         state: dict[str, dict[str, Any]] = {}
         for attachment, agent in attachments:
+            if not getattr(agent, "enabled", True):
+                continue
             runtime_id = runtime_agent_id_for(agent.id)
             entry = CustomAgentState(
                 id=str(agent.id),

@@ -9,7 +9,17 @@ from app.schemas.custom_agent import CustomAgentRead
 from app.utils.case_conversion import to_camel_case as to_camel
 
 
-class ProjectCreate(BaseModel):
+class _ProjectNameModel(BaseModel):
+    @field_validator("name", check_fields=False)
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("name must not be empty")
+        return value
+
+
+class ProjectCreate(_ProjectNameModel):
     name: str = Field(..., min_length=1, max_length=255, description="Project name")
     description: str | None = Field(None, max_length=2000, description="Short description")
     instructions: str | None = Field(
@@ -21,7 +31,7 @@ class ProjectCreate(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class ProjectUpdate(BaseModel):
+class ProjectUpdate(_ProjectNameModel):
     # Omitted means unchanged. Pydantic does not validate the default, while an
     # explicit null fails string validation and OpenAPI correctly shows a string.
     name: str = Field(None, min_length=1, max_length=255)

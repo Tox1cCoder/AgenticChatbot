@@ -703,11 +703,21 @@ class Container(containers.DeclarativeContainer):
 
     ai_service = providers.ThreadSafeSingleton(_create_ai_service)
 
+    # Shared capability projection for agent settings and project defaults.
+    custom_agent_service = providers.Factory(
+        CustomAgentService,
+        repository=custom_agent_repository,
+        conversation_validation_utils=conversation_validation_utils,
+        model_config_service=model_config_service,
+        generation_registry=providers.Callable(get_generation_registry),
+    )
+
     project_service = providers.Factory(
         ProjectService,
         repository=project_repository,
         custom_agent_repository=custom_agent_repository,
         conversation_validation_utils=conversation_validation_utils,
+        custom_agent_service=custom_agent_service,
     )
 
     project_context_service = providers.Factory(
@@ -724,17 +734,6 @@ class Container(containers.DeclarativeContainer):
         ai_service=ai_service,
         checkpoint_manager=providers.Callable(_get_conversation_checkpoint_manager),
         project_service=project_service,
-    )
-
-    # Custom agents (per-user, per-conversation). generation_registry is the
-    # module-level singleton so locks see the same in-flight/paused entries the
-    # streaming and resume paths register.
-    custom_agent_service = providers.Factory(
-        CustomAgentService,
-        repository=custom_agent_repository,
-        conversation_validation_utils=conversation_validation_utils,
-        model_config_service=model_config_service,
-        generation_registry=providers.Callable(get_generation_registry),
     )
 
     hitl_settings_service = providers.Factory(

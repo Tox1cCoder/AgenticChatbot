@@ -1287,7 +1287,7 @@ def list_projects() -> list[dict[str, Any]]:
 
 
 def get_project(project_id: str) -> dict[str, Any] | None:
-    response = make_api_request("GET", f"/projects/{project_id}")
+    response = make_api_request("GET", f"/projects/{project_id}{_custom_agent_device_query()}")
     if not response or not response.get("success"):
         return None
     return response.get("data")
@@ -1318,7 +1318,7 @@ def delete_project(project_id: str) -> bool:
 def set_project_custom_agents(project_id: str, custom_agent_ids: list[str]) -> bool:
     response = make_api_request(
         "PUT",
-        f"/projects/{project_id}/custom-agents",
+        f"/projects/{project_id}/custom-agents{_custom_agent_device_query()}",
         {"customAgentIds": custom_agent_ids},
     )
     return bool(response and response.get("success"))

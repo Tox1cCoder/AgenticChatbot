@@ -9,6 +9,8 @@ from uuid import UUID
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import CustomAgentForbiddenError
+from app.models.conversation import Conversation
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
 from app.models.project import ProjectCustomAgent
 from app.repositories.session_transport import RepositorySessionMixin
@@ -68,6 +70,26 @@ class CustomAgentRepository(RepositorySessionMixin):
 
     # --------------------------------------------------------------- writes
 
+    @staticmethod
+    def lock_owned_agent_ids(session: Session, owner_id: UUID, agent_ids: list[UUID]) -> list[UUID]:
+        """Lock live definitions in UUID order before changing attachment rows."""
+        if not agent_ids:
+            return []
+        return list(
+            session.execute(
+                select(CustomAgent.id)
+                .where(
+                    CustomAgent.id.in_(agent_ids),
+                    CustomAgent.owner_id == owner_id,
+                    CustomAgent.deleted_at.is_(None),
+                )
+                .order_by(CustomAgent.id)
+                .with_for_update(read=True)
+            )
+            .scalars()
+            .all()
+        )
+
     def create(self, owner_id: UUID, fields: dict[str, Any]) -> CustomAgent:
         with self.session_factory() as session:
             agent = CustomAgent(owner_id=owner_id, **fields)
@@ -100,7 +122,15 @@ class CustomAgentRepository(RepositorySessionMixin):
         get seeded a fresh attachment pointing at the now-deleted agent.
         """
         with self.session_factory() as session:
-            agent = self._get_owned(session, owner_id, custom_agent_id)
+            agent = session.execute(
+                select(CustomAgent)
+                .where(
+                    CustomAgent.id == custom_agent_id,
+                    CustomAgent.owner_id == owner_id,
+                    CustomAgent.deleted_at.is_(None),
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
             if agent is None:
                 return False
             session.execute(
@@ -160,6 +190,20 @@ class CustomAgentRepository(RepositorySessionMixin):
     ) -> None:
         """Replace the conversation's attachment set with the given ordered ids."""
         with self.session_factory() as session:
+            conversation = session.execute(
+                select(Conversation)
+                .where(
+                    Conversation.id == conversation_id,
+                    Conversation.owner_id == owner_id,
+                    Conversation.deleted_at.is_(None),
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if conversation is None:
+                raise CustomAgentForbiddenError(detail="Conversation is unavailable")
+            live_ids = self.lock_owned_agent_ids(session, owner_id, custom_agent_ids)
+            if set(live_ids) != set(custom_agent_ids):
+                raise CustomAgentForbiddenError(detail="One or more custom agents are unavailable")
             session.execute(
                 delete(ConversationCustomAgent).where(
                     ConversationCustomAgent.conversation_id == conversation_id,
