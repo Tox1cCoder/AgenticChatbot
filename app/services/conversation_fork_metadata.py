@@ -231,8 +231,160 @@ def _is_hidden_pause_row(source: dict[str, Any]) -> bool:
     return source.get("paused") is True or bool(source.get("interrupt"))
 
 
+# ---------------------------------------------------------------------------
+# Media references
+# ---------------------------------------------------------------------------
+
+CHAT_IMAGE = "chat_image"
+WEB_IMAGE = "web_image"
+
+#: Protected same-origin delivery routes and the asset kind each one serves.
+_MEDIA_ROUTES: tuple[tuple[str, str], ...] = (
+    ("/chat-images/", CHAT_IMAGE),
+    ("/api/chat-images/", CHAT_IMAGE),
+    ("/web-images/", WEB_IMAGE),
+    ("/api/web-images/", WEB_IMAGE),
+)
+
+#: Legacy gallery and user-upload lists whose entries carry one image each.
+_MEDIA_LIST_KEYS = ("images", "attachments")
+
+_IMAGE_ITEM_TYPES = frozenset({RichItemType.image.value, RichItemType.image_group.value})
+
+MediaReference = tuple[str, UUID]
+
+
+def media_references(metadata: dict[str, Any] | None) -> set[MediaReference]:
+    """Every owner-scoped image a message's metadata points at.
+
+    Remote ``https`` URLs and inline bytes are not references to an owned
+    asset, so they are not returned and never need validation.
+    """
+    if not isinstance(metadata, dict):
+        return set()
+    references: set[MediaReference] = set()
+    for key in _MEDIA_LIST_KEYS:
+        for entry in _dict_entries(metadata.get(key)):
+            references.update(_entry_references(entry))
+    for item in _dict_entries(metadata.get("rich_items")):
+        for cell in _image_cells(item):
+            references.update(_url_references(cell.get("url")))
+    return references
+
+
+def drop_unavailable_media(
+    content: str,
+    metadata: dict[str, Any],
+    *,
+    available: set[MediaReference],
+) -> dict[str, Any]:
+    """Return ``metadata`` without references outside ``available``.
+
+    ``available`` is what the fork repository found the source owner still
+    owns: live chat images and *selected* web images. A pending web image is
+    a candidate the source turn never committed to, and its expiry job would
+    release it under the child, so it is treated as unavailable.
+
+    A dropped inline image keeps its ``<!--rich:...-->`` marker; the marker is
+    listed in ``rich_reference_warnings`` and renders as an unavailable block
+    instead of deleting the surrounding text. Pure: the input is not mutated.
+    """
+    if not media_references(metadata) - available:
+        return metadata
+    result = copy.deepcopy(metadata)
+    for key in _MEDIA_LIST_KEYS:
+        if key not in result or not isinstance(result[key], list):
+            continue
+        kept = [
+            entry
+            for entry in result[key]
+            if not isinstance(entry, dict) or _entry_references(entry) <= available
+        ]
+        if kept:
+            result[key] = kept
+        else:
+            del result[key]
+    if isinstance(result.get("rich_items"), list):
+        result["rich_items"] = _available_rich_items(result["rich_items"], available)
+        result["rich_reference_warnings"] = validate_rich_references(
+            content, result["rich_items"]
+        )
+    return result
+
+
+def _available_rich_items(items: list[Any], available: set[MediaReference]) -> list[Any]:
+    """Drop unavailable image cells, and any image item left with none."""
+    kept: list[Any] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") not in _IMAGE_ITEM_TYPES:
+            kept.append(item)
+            continue
+        if item["type"] == RichItemType.image.value:
+            if _url_references((item.get("payload") or {}).get("url")) <= available:
+                kept.append(item)
+            continue
+        cells = [
+            cell for cell in _image_cells(item) if _url_references(cell.get("url")) <= available
+        ]
+        if cells:
+            item["payload"]["items"] = cells
+            kept.append(item)
+    return kept
+
+
+def _image_cells(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """The URL-bearing payloads of an image or image-group item."""
+    payload = item.get("payload")
+    if not isinstance(payload, dict):
+        return []
+    if item.get("type") == RichItemType.image.value:
+        return [payload]
+    if item.get("type") == RichItemType.image_group.value:
+        return _dict_entries(payload.get("items"))
+    return []
+
+
+def _entry_references(entry: dict[str, Any]) -> set[MediaReference]:
+    references = _url_references(entry.get("url"))
+    if not references:
+        # A gallery entry with only ``image_id`` was stored by the chat-image
+        # service, which is the only producer of bare ids.
+        image_id = _as_uuid(entry.get("image_id"))
+        if image_id is not None:
+            references.add((CHAT_IMAGE, image_id))
+    return references
+
+
+def _url_references(url: Any) -> set[MediaReference]:
+    if not isinstance(url, str):
+        return set()
+    for prefix, kind in _MEDIA_ROUTES:
+        if url.startswith(prefix):
+            asset_id = _as_uuid(url[len(prefix) :].split("?", 1)[0].split("/", 1)[0])
+            return {(kind, asset_id)} if asset_id is not None else set()
+    return set()
+
+
+def _as_uuid(value: Any) -> UUID | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
+def _dict_entries(raw: Any) -> list[dict[str, Any]]:
+    return [entry for entry in raw if isinstance(entry, dict)] if isinstance(raw, list) else []
+
+
 __all__ = [
+    "CHAT_IMAGE",
     "FORK_CUTOFF_ELIGIBLE_KEY",
     "FORK_HISTORY_KEY",
+    "WEB_IMAGE",
+    "MediaReference",
+    "drop_unavailable_media",
+    "media_references",
     "snapshot_fork_message",
 ]
