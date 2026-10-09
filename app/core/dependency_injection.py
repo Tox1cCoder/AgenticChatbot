@@ -20,6 +20,7 @@ from app.interfaces import (
 from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.services.ai_service import AIService
+from app.services.conversation_fork_service import ConversationForkService
 from app.services.custom_agent_service import CustomAgentService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.hitl_settings_service import HitlSettingsService
@@ -60,6 +61,7 @@ class AppAutoInjector(AutoInjector):
             HitlSettingsService: container_ref.hitl_settings_service,
             HITLInterruptRepository: container_ref.hitl_interrupt_repository,
             ProjectService: container_ref.project_service,
+            ConversationForkService: container_ref.conversation_fork_service,
         }
 
     @classmethod

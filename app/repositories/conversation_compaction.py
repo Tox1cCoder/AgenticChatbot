@@ -151,6 +151,30 @@ class ConversationCompactionRepository(RepositorySessionMixin):
             },
         )
 
+    @classmethod
+    def enqueue_job_in_session(
+        cls,
+        session: Session,
+        *,
+        conversation_id: UUID,
+        requested_through_sequence: int,
+    ) -> None:
+        """Request compaction through ``requested_through_sequence`` in the caller's transaction.
+
+        For writers that must make the job durable atomically with their own
+        rows (a fork creates the conversation, its messages and its job in one
+        commit). The caller commits and publishes the notification afterwards;
+        until then the job is invisible, and if publishing fails the
+        reconciliation sweep (``reconcile_due_jobs``) still dispatches it.
+        """
+        session.execute(
+            cls._job_upsert_statement(
+                conversation_id=conversation_id,
+                requested_through_sequence=requested_through_sequence,
+                now=cls._utcnow(),
+            )
+        )
+
     @staticmethod
     def _claim_select_statement(
         *,

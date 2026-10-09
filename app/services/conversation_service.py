@@ -51,9 +51,9 @@ class ConversationService(IConversationService):
         # create is stored but not validated or seeded.
         self.project_service = project_service
 
-    def _convert_to_read_schema(
-        self, conversation_entity, include: list[str] = None
-    ) -> ConversationRead:
+    # Static so the fork service builds its response with this same mapping.
+    @staticmethod
+    def _convert_to_read_schema(conversation_entity, include: list[str] = None) -> ConversationRead:
         if include is None:
             include = []
 

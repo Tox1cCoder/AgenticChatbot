@@ -42,6 +42,7 @@ from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.chat_image import ChatImageRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.conversation_compaction import ConversationCompactionRepository
+from app.repositories.conversation_fork import ConversationForkRepository
 from app.repositories.conversation_search import ConversationSearchRepository
 from app.repositories.custom_agent import CustomAgentRepository
 from app.repositories.document import DocumentRepository
@@ -67,6 +68,7 @@ from app.repositories.web_image_reference import WebImageReferenceRepository
 from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
 from app.services.chat_image_service import ChatImageStorageService
+from app.services.conversation_fork_service import ConversationForkService
 from app.services.conversation_service import ConversationService
 from app.services.conversation_turn_coordinator import (
     ConversationTurnCoordinator,
@@ -589,6 +591,24 @@ class Container(containers.DeclarativeContainer):
         ),
         timeout_seconds=providers.Object(settings.conversation_turn_lock_timeout_seconds),
         production=providers.Object(True),
+    )
+
+    # Fork: one repeatable-read snapshot transaction on the async transport,
+    # taken under the same turn lock that serializes generation.
+    conversation_fork_repository = providers.Factory(
+        ConversationForkRepository,
+        session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
+    )
+
+    conversation_fork_service = providers.Factory(
+        ConversationForkService,
+        repository=conversation_fork_repository,
+        turn_coordinator=conversation_turn_coordinator,
+        compaction_publisher=providers.Object(publish_conversation_compaction),
+        lock_timeout_seconds=providers.Object(settings.conversation_turn_lock_timeout_seconds),
+        max_messages=providers.Object(settings.conversation_fork_max_messages),
+        max_bytes=providers.Object(settings.conversation_fork_max_bytes),
     )
 
     # Routing-v2: the sole owner of new-turn classification. Resolved strictly
