@@ -14,6 +14,8 @@ from sqlalchemy import create_engine, delete, update
 from sqlalchemy.orm import sessionmaker
 
 from app.ai.schemas import InterruptDecision
+from app.models.base import Base
+from app.models.client_device import ClientDevice
 from app.models.hitl_interrupt import HITLInterrupt, HITLInterruptStatus
 from app.models.message import Message
 from app.models.user import User
@@ -39,6 +41,21 @@ from tests.integration.test_generation_turn_release_postgres import (
 )
 
 pytestmark = pytest.mark.selector_event_loop
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _approval_tables(pg_engines):
+    """Create the tables this module uses beyond the shared turn fixture's.
+
+    ``pg_engines`` is borrowed from the turn-release module, which creates only
+    the tables it needs; without this every test here failed on a fresh
+    database with ``relation "hitl_interrupts" does not exist``.
+    """
+    session_factory, _ = pg_engines
+    Base.metadata.create_all(
+        session_factory.kw["bind"],
+        tables=[ClientDevice.__table__, HITLInterrupt.__table__],
+    )
 
 
 @pytest.fixture
