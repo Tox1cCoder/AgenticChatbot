@@ -368,6 +368,11 @@ class WebResearchSession:
             text_result = await text_task
             image_result = await image_task if image_task is not None else ((), (), ())
         except BaseException:
+            # Cancelled, or failed, while awaiting the text half: the image half
+            # is not awaited yet and would keep calling its paid provider.
+            for task in (text_task, image_task):
+                if task is not None:
+                    task.cancel()
             self.budget.release_search(normalized.query, scope=search_scope)
             raise
 

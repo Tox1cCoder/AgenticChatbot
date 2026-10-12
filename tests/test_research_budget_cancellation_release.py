@@ -28,6 +28,8 @@ from app.ai.web_research.providers import ProviderResolver, TavilyTextSearchProv
 from app.ai.web_research.service import WebResearchService
 
 CONVERSATION_ID = "77777777-7777-7777-7777-777777777777"
+
+
 class _Hanging:
     name = "tavily_search"
 
@@ -95,6 +97,59 @@ async def test_a_cancelled_search_does_not_refuse_a_later_unrelated_query():
     assert budget.reserve_search("an entirely unrelated subject") is None
     budget.record_search("an entirely unrelated subject", "R")
     assert budget.reserve_search("a second unrelated subject") is None
+
+
+class _HangingImages:
+    """An image provider that records whether its search was ever stopped."""
+
+    name = "brave_images"
+    health_key = "brave:images"
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.stopped = False
+
+    async def search(self, _request):
+        self.started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            self.stopped = True
+            raise
+        return ()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_search_stops_its_image_search_too():
+    """The image search runs beside the text search, against a paid provider.
+
+    Cancelled while awaiting the text half, the search released its budget
+    slot and left the image half running, unawaited, still calling the
+    provider.
+    """
+    images = _HangingImages()
+    session = WebResearchService().new_session(
+        ResearchScope(
+            conversation_id=CONVERSATION_ID,
+            user_id="11111111-1111-1111-1111-111111111111",
+            logical_turn_id="turn",
+        ),
+        ResearchBudget(),
+        mode="quick",
+        resolver=ProviderResolver(text=(TavilyTextSearchProvider(_Hanging()),), images=(images,)),
+    )
+    task = asyncio.create_task(
+        session.search(
+            ResearchRequest(query="pictures of a hang", objective="never", visual_intent="gallery")
+        )
+    )
+    await asyncio.wait_for(images.started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.05)
+
+    assert images.stopped, "the image search kept running after its search was cancelled"
 
 
 @pytest.mark.asyncio
