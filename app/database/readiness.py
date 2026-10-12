@@ -29,7 +29,7 @@ _RESERVED_CONNECTIONS = 10
 
 @dataclass(frozen=True)
 class ConnectionBudget:
-    """Worst-case connection demand across both engines."""
+    """Worst-case connection demand across every engine."""
 
     per_worker: int
     workers: int
@@ -55,10 +55,11 @@ def resolve_connection_budget(
     sync_overflow: int,
     async_pool: int,
     async_overflow: int,
+    turn_lock_pool: int,
     workers: int,
 ) -> ConnectionBudget:
-    """Compute worst-case demand. Both pools count: they are separate pools."""
-    per_worker = sync_pool + sync_overflow + async_pool + async_overflow
+    """Compute worst-case demand. Every pool counts: they are separate pools."""
+    per_worker = sync_pool + sync_overflow + async_pool + async_overflow + turn_lock_pool
     worker_count = max(1, workers)
     return ConnectionBudget(
         per_worker=per_worker,

@@ -238,6 +238,7 @@ async def _verify_async_database_ready() -> None:
         sync_overflow=sync_engine.pool._max_overflow,  # noqa: SLF001 - no public accessor
         async_pool=settings.db_pool_size,
         async_overflow=settings.db_max_overflow,
+        turn_lock_pool=settings.conversation_turn_lock_pool_size,
         workers=1,
     )
     description = budget.describe(max_connections=readiness.max_connections)

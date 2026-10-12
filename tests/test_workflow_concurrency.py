@@ -481,8 +481,71 @@ async def test_the_postgres_backend_holds_one_session_from_acquire_to_release():
 
     await backend.release("conversation-1")
     assert sessions[0].closed is True
-    assert any("pg_try_advisory_lock" in s for s in sessions[0].statements)
-    assert any("pg_advisory_unlock" in s for s in sessions[0].statements)
+    # Transaction-scoped, so closing the session is the release; a
+    # session-scoped lock would survive the close on the pooled connection.
+    assert any("pg_try_advisory_xact_lock" in s for s in sessions[0].statements)
+
+
+async def test_a_cancelled_acquire_closes_its_session_only_after_the_attempt_ends():
+    """A client disconnect mid-attempt must not strand a lock the thread then takes.
+
+    The attempt keeps running in its thread after the caller is cancelled, and
+    may succeed. Closing alongside it would use one Session from two threads;
+    never closing it would leave the lock held.
+    """
+    import threading
+
+    started, finish = threading.Event(), threading.Event()
+    events: list[str] = []
+
+    class SlowSession(FakeSession):
+        def execute(self, statement, _params=None):
+            if "advisory" in str(statement):
+                started.set()
+                finish.wait(5)
+                events.append("attempt-done")
+            return super().execute(statement, _params)
+
+        def close(self) -> None:
+            events.append("closed")
+            super().close()
+
+    session = SlowSession()
+    backend = PostgresAdvisoryLockBackend(session_factory=lambda: session)
+
+    task = asyncio.create_task(backend.acquire("conversation-1", timeout_seconds=5.0))
+    assert await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert events == [], "the session was closed while its attempt was still running"
+
+    finish.set()
+    for _ in range(100):
+        if session.closed:
+            break
+        await asyncio.sleep(0.01)
+
+    assert events == ["attempt-done", "closed"]
+    await backend.release("conversation-1")  # never recorded as held: a no-op
+
+
+def test_the_container_draws_turn_locks_from_their_own_pool():
+    """A turn holds its lock connection for its whole duration.
+
+    Drawn from the sync repositories' pool, a burst of turns took every
+    connection and stalled every sync repository call in the process.
+    """
+    from app.core import container as container_module
+    from app.database.session import engine, turn_lock_engine
+
+    session = container_module._turn_lock_session()
+    try:
+        assert session.get_bind() is turn_lock_engine
+        assert turn_lock_engine is not engine
+        assert turn_lock_engine.pool is not engine.pool
+    finally:
+        session.close()
 
 
 async def test_the_postgres_backend_rejects_a_context_manager_session_factory():

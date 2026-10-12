@@ -25,26 +25,59 @@ pytestmark = pytest.mark.selector_event_loop
 class TestConnectionBudget:
     def test_totals_both_pools(self):
         budget = resolve_connection_budget(
-            sync_pool=5, sync_overflow=10, async_pool=20, async_overflow=10, workers=1
+            sync_pool=5,
+            sync_overflow=10,
+            async_pool=20,
+            async_overflow=10,
+            turn_lock_pool=0,
+            workers=1,
         )
         assert budget.per_worker == 45
         assert budget.total == 45
 
+    def test_counts_the_turn_lock_pool(self):
+        """Every in-flight turn holds a turn-lock connection, so that pool counts too."""
+        budget = resolve_connection_budget(
+            sync_pool=5,
+            sync_overflow=10,
+            async_pool=20,
+            async_overflow=10,
+            turn_lock_pool=20,
+            workers=2,
+        )
+        assert budget.per_worker == 65
+        assert budget.total == 130
+
     def test_scales_with_worker_count(self):
         budget = resolve_connection_budget(
-            sync_pool=5, sync_overflow=10, async_pool=20, async_overflow=10, workers=4
+            sync_pool=5,
+            sync_overflow=10,
+            async_pool=20,
+            async_overflow=10,
+            turn_lock_pool=0,
+            workers=4,
         )
         assert budget.total == 180
 
     def test_is_within_limit_when_headroom_remains(self):
         budget = resolve_connection_budget(
-            sync_pool=5, sync_overflow=5, async_pool=10, async_overflow=5, workers=1
+            sync_pool=5,
+            sync_overflow=5,
+            async_pool=10,
+            async_overflow=5,
+            turn_lock_pool=0,
+            workers=1,
         )
         assert budget.exceeds(max_connections=100) is False
 
     def test_flags_a_budget_that_cannot_fit(self):
         budget = resolve_connection_budget(
-            sync_pool=20, sync_overflow=20, async_pool=20, async_overflow=20, workers=4
+            sync_pool=20,
+            sync_overflow=20,
+            async_pool=20,
+            async_overflow=20,
+            turn_lock_pool=0,
+            workers=4,
         )
         assert budget.exceeds(max_connections=100) is True
 
@@ -52,7 +85,12 @@ class TestConnectionBudget:
         """A budget equal to max_connections leaves nothing for psql, Celery, or
         the migration runner, so it must be flagged."""
         budget = resolve_connection_budget(
-            sync_pool=50, sync_overflow=0, async_pool=50, async_overflow=0, workers=1
+            sync_pool=50,
+            sync_overflow=0,
+            async_pool=50,
+            async_overflow=0,
+            turn_lock_pool=0,
+            workers=1,
         )
         assert budget.total == 100
         assert budget.exceeds(max_connections=100) is True

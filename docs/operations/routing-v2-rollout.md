@@ -414,6 +414,25 @@ that code, not surface it as a failure.
 The in-process backend exists for tests and is **rejected** when
 `production=True`, because it coordinates nothing between workers.
 
+What operators need to know about the lock:
+
+- **It is transaction-scoped** (`pg_try_advisory_xact_lock`). Ending the
+  lock's transaction releases it, however the transaction ends: release,
+  client disconnect, worker crash, or a dropped connection. It is compatible
+  with PgBouncer in transaction pooling mode, which the earlier session-scoped
+  lock was not.
+- **Each in-flight turn holds one connection for the whole turn**, taken from
+  a dedicated pool of `conversation_turn_lock_pool_size` (default 20) per
+  worker. That caps a worker's concurrent turns; past it, a turn waits up to
+  `conversation_turn_lock_timeout_seconds` for a connection, then fails. The
+  pool is counted in the boot-time connection budget log line.
+- **The lock's transaction is idle for the whole turn by design.** It sets
+  `idle_in_transaction_session_timeout = 0` for itself with `SET LOCAL`, so a
+  server or role default cannot end it mid-turn. A proxy-level idle-transaction
+  timeout (PgBouncer `idle_transaction_timeout`, RDS Proxy) cannot be
+  overridden from SQL; keep it longer than the longest turn, or a long turn
+  silently loses its lock.
+
 ## Generation controls: Stop and Continue
 
 The durable generation lifecycle (`generations`, `generation_commands`) is what

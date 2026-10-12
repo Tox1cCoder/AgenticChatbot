@@ -21,7 +21,7 @@ from app.ai.workflow.routing import RoutingContextBuilder, RoutingService
 from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector
 from app.database.database import Database
-from app.database.session import SessionLocal
+from app.database.session import TurnLockSessionLocal
 from app.interfaces import (
     IAuthService,
     IConversationService,
@@ -151,11 +151,14 @@ def _turn_lock_session():
     advisory lock it was opened to hold. This factory hands back a Session the
     backend keeps open from acquire to release.
 
-    A module-level function rather than ``SessionLocal`` itself because the
+    Bound to the turn-lock engine's own pool, not ``SessionLocal``'s: every
+    in-flight turn holds one of these connections for its whole duration.
+
+    A module-level function rather than the ``sessionmaker`` itself because the
     container deep-copies its provider arguments, and a ``sessionmaker`` is not
     copyable.
     """
-    return SessionLocal()
+    return TurnLockSessionLocal()
 
 
 class Container(containers.DeclarativeContainer):

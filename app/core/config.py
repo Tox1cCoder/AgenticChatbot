@@ -494,6 +494,16 @@ class Settings(BaseSettings):
             "contended conversation into a hung request."
         ),
     )
+    conversation_turn_lock_pool_size: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Connections reserved per worker for conversation turn locks. Each "
+            "in-flight turn holds one for its whole duration, so this caps a "
+            "worker's concurrent turns; it is a separate pool so a burst of turns "
+            "cannot starve the sync repositories."
+        ),
+    )
     image_generator_tool_model: str = Field(
         default="gemini-3-flash-preview",
         description="Gemini model identifier used for image-agent tool calling",
