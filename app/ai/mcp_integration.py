@@ -28,6 +28,7 @@ from app.core.mcp_adapter_utils import (
     normalize_mcp_transport,
     sanitize_mcp_schema,
 )
+from app.utils.cancellation import keep_until_done
 
 from .utils import get_error_recovery_hint
 
@@ -308,6 +309,7 @@ class MCPManager:
             return self._server_tools[server_name]
 
         session_info: dict[str, Any] | None = None
+        close_requested: asyncio.Event | None = None
         try:
             session_context = self.client.session(server_name)
             loop = asyncio.get_running_loop()
@@ -321,6 +323,7 @@ class MCPManager:
                     close_requested=close_requested,
                 )
             )
+            keep_until_done(owner_task)
             session = await ready
             session_info = {
                 "close_requested": close_requested,
@@ -341,6 +344,14 @@ class MCPManager:
             )
             return cleaned_tools
 
+        except asyncio.CancelledError:
+            # The owner task opens and holds the session on its own. Cancelled
+            # before the session was registered, nothing would ever tell it to
+            # close, and the session — often a subprocess — stayed open for
+            # the life of the process. It closes as soon as it has opened.
+            if close_requested is not None:
+                close_requested.set()
+            raise
         except ValueError as exc:
             raise ServerNotFoundError(server_name) from exc
         except Exception as exc:

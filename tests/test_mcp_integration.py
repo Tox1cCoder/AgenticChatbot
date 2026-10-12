@@ -284,6 +284,59 @@ async def test_server_mcp_manager_closes_session_opened_by_another_task_without_
     assert "Error closing session for time" not in caplog.text
 
 
+@pytest.mark.parametrize("cancel_at", ["opening", "loading_tools"])
+@pytest.mark.asyncio
+async def test_a_cancelled_tool_load_closes_the_session_it_opened(tmp_path, monkeypatch, cancel_at):
+    """A request cancelled mid-load must not leave the MCP session (a subprocess) open.
+
+    The session is owned by a task that waits to be told to close it. A
+    cancel landing while it opens, or while its tools load, skipped the
+    ``except Exception`` that tells it, so the session stayed open forever.
+    """
+    from app.ai import mcp_integration
+
+    config_path = tmp_path / "mcp_config.json"
+    config_path.write_text(
+        json.dumps({"servers": {"slow": {"enabled": True, "transport": "stdio"}}}),
+        encoding="utf-8",
+    )
+    opening, opened, loading = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    closed: list[str] = []
+
+    class SlowSession:
+        async def __aenter__(self):
+            opening.set()
+            await opened.wait()
+            return object()
+
+        async def __aexit__(self, *exc_info):
+            closed.append("slow")
+
+    async def load_tools_slowly(_session):
+        loading.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(mcp_integration, "load_mcp_tools", load_tools_slowly)
+    manager = MCPManager(config_path=str(config_path))
+    manager.client = SimpleNamespace(session=lambda _name: SlowSession())
+
+    load = asyncio.create_task(manager.get_server_tools("slow"))
+    await asyncio.wait_for(opening.wait(), timeout=5)
+    if cancel_at == "loading_tools":
+        opened.set()
+        await asyncio.wait_for(loading.wait(), timeout=5)
+    load.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await load
+    opened.set()
+
+    for _ in range(100):
+        if closed:
+            break
+        await asyncio.sleep(0.01)
+    assert closed == ["slow"], "the cancelled load left its MCP session open"
+
+
 @pytest.mark.asyncio
 async def test_server_mcp_tool_cancellation_does_not_escape_as_unbound_local_error(
     tmp_path,
