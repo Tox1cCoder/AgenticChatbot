@@ -16,21 +16,6 @@ engine = create_engine(
 # Create SessionLocal class
 SessionLocal = sessionmaker(autoflush=False, expire_on_commit=False, bind=engine)
 
-# The conversation turn lock holds one connection for the whole of every
-# in-flight turn. Drawn from the pool above, a burst of turns took all of its
-# connections and stalled every sync repository call in the process, so locks
-# get their own pool. A checkout waits no longer than a lock does.
-turn_lock_engine = create_engine(
-    settings.database_url,
-    pool_size=settings.conversation_turn_lock_pool_size,
-    max_overflow=0,
-    pool_timeout=settings.conversation_turn_lock_timeout_seconds,
-    pool_pre_ping=True,
-    pool_recycle=300,
-    echo=settings.api_debug,
-)
-TurnLockSessionLocal = sessionmaker(autoflush=False, expire_on_commit=False, bind=turn_lock_engine)
-
 
 def get_db() -> Generator[Session, None, None]:
     """

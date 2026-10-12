@@ -422,10 +422,13 @@ What operators need to know about the lock:
   with PgBouncer in transaction pooling mode, which the earlier session-scoped
   lock was not.
 - **Each in-flight turn holds one connection for the whole turn**, taken from
-  a dedicated pool of `conversation_turn_lock_pool_size` (default 20) per
+  a dedicated async pool of `conversation_turn_lock_pool_size` (default 20) per
   worker. That caps a worker's concurrent turns; past it, a turn waits up to
-  `conversation_turn_lock_timeout_seconds` for a connection, then fails. The
-  pool is counted in the boot-time connection budget log line.
+  `conversation_turn_lock_timeout_seconds` for a connection, then gets the
+  retriable `conversation_turn_conflict` with `details.reason =
+  "turn_lock_capacity"` (a busy conversation has `"turn_already_running"`).
+  The wait is on the event loop and holds no thread. The pool is counted in the
+  boot-time connection budget log line.
 - **The lock's transaction is idle for the whole turn by design.** It sets
   `idle_in_transaction_session_timeout = 0` for itself with `SET LOCAL`, so a
   server or role default cannot end it mid-turn. A proxy-level idle-transaction

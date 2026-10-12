@@ -20,8 +20,8 @@ from app.ai.web_research.service import WebResearchService
 from app.ai.workflow.routing import RoutingContextBuilder, RoutingService
 from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector
+from app.database.async_session import TurnLockSessionLocal
 from app.database.database import Database
-from app.database.session import TurnLockSessionLocal
 from app.interfaces import (
     IAuthService,
     IConversationService,
@@ -144,12 +144,12 @@ def _build_document_chunk_builder(
 
 
 def _turn_lock_session():
-    """A raw sync Session for the conversation turn lock.
+    """A raw AsyncSession for the conversation turn lock.
 
-    Deliberately not ``db.provided.session``: that is a ``@contextmanager``,
-    and a context-managed session closes when its block exits — releasing the
-    advisory lock it was opened to hold. This factory hands back a Session the
-    backend keeps open from acquire to release.
+    Deliberately not ``db.provided.async_session``: that is an
+    ``@asynccontextmanager``, and a context-managed session closes when its
+    block exits — releasing the advisory lock it was opened to hold. This
+    factory hands back a session the backend keeps open from acquire to release.
 
     Bound to the turn-lock engine's own pool, not ``SessionLocal``'s: every
     in-flight turn holds one of these connections for its whole duration.

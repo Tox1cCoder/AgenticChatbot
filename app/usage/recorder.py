@@ -43,7 +43,7 @@ from app.usage.types import (
     UsageOperation,
     UsageStatus,
 )
-from app.utils.threads import run_to_completion
+from app.utils.cancellation import run_to_completion
 
 logger = logging.getLogger("app.usage.model_usage_recorder")
 

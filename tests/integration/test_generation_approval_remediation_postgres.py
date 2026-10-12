@@ -10,8 +10,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, delete, update
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import delete, update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ai.schemas import InterruptDecision
 from app.models.base import Base
@@ -29,6 +29,7 @@ from app.services.event_streaming.events import make_event
 from app.services.generation_registry import get_generation_registry
 from tests.integration.test_generation_turn_release_postgres import (
     _approval_pause,
+    _async_url,
     _budget_pause,
     _drain,
     _interrupt_event,
@@ -69,7 +70,7 @@ def turns(pg_engines):
     value.service.hitl_interrupt_repository = hitl
     backend.control._hitl_interrupt_repository = hitl
     value.service._turn_coordinator = ConversationTurnCoordinator(
-        backend=PostgresAdvisoryLockBackend(session_factory),
+        backend=PostgresAdvisoryLockBackend(async_session_factory),
         timeout_seconds=0.05,
     )
     registry = get_generation_registry()
@@ -216,22 +217,24 @@ async def test_stopping_approval_expires_only_its_owned_thread(turns):
 
 def _hold_worker_lock(url, conversation_id, ready, release):
     """A separate process with its own pool and advisory-lock connection."""
-    engine = create_engine(url)
 
     async def hold():
-        backend = PostgresAdvisoryLockBackend(sessionmaker(bind=engine))
-        if not await backend.acquire(conversation_id, timeout_seconds=5):
-            raise RuntimeError("worker failed to acquire lock")
-        ready.set()
+        engine = create_async_engine(_async_url(url))
+        backend = PostgresAdvisoryLockBackend(async_sessionmaker(bind=engine))
         try:
-            await asyncio.to_thread(release.wait, 10)
+            if not await backend.acquire(conversation_id, timeout_seconds=5):
+                raise RuntimeError("worker failed to acquire lock")
+            ready.set()
+            try:
+                await asyncio.to_thread(release.wait, 10)
+            finally:
+                await backend.release(conversation_id)
         finally:
-            await backend.release(conversation_id)
+            await engine.dispose()
 
-    try:
-        asyncio.run(hold())
-    finally:
-        engine.dispose()
+    # psycopg's async mode needs a SelectorEventLoop, which Windows does not
+    # default to.
+    asyncio.run(hold(), loop_factory=asyncio.SelectorEventLoop)
 
 
 async def test_other_process_busy_lock_leaves_approval_pending(turns):

@@ -53,6 +53,28 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
+# The conversation turn lock holds one connection for the whole of every
+# in-flight turn, so locks get their own pool: drawn from the request pool, a
+# burst of turns would starve every other query. A checkout waits no longer
+# than a lock does.
+turn_lock_engine: AsyncEngine = create_async_engine(
+    async_database_url(),
+    pool_size=settings.conversation_turn_lock_pool_size,
+    max_overflow=0,
+    pool_timeout=settings.conversation_turn_lock_timeout_seconds,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    echo=settings.api_debug,
+)
+TurnLockSessionLocal = async_sessionmaker(
+    bind=turn_lock_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+)
+
+
 async def dispose_async_engine() -> None:
     """Close pooled async connections. Called on application shutdown."""
     await async_engine.dispose()
+    await turn_lock_engine.dispose()

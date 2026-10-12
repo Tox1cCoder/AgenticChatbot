@@ -1116,7 +1116,7 @@ async def test_held_source_row_lock_yields_a_bounded_turn_conflict(pg):
 async def test_running_turn_holding_the_advisory_lock_refuses_the_fork(pg):
     source = _six_message_source(pg)
     coordinator = ConversationTurnCoordinator(
-        backend=PostgresAdvisoryLockBackend(pg.sync, poll_interval_seconds=0.02),
+        backend=PostgresAdvisoryLockBackend(pg.async_factory, poll_interval_seconds=0.02),
         timeout_seconds=0.3,
     )
     service = _service(pg, coordinator=coordinator)

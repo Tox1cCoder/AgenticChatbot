@@ -444,24 +444,24 @@ def test_the_container_wires_the_generation_control_service():
 #
 # The backend's other tests pass ``lambda: None`` and never call acquire, so
 # they cannot see what the container actually hands it. The container's
-# ``db.provided.session`` is a ``@contextmanager``, which returns a context
-# manager rather than a Session — and a context-managed session would be closed
-# on exit, releasing the very lock it was taken to hold.
+# ``db.provided.async_session`` is an ``@asynccontextmanager``, which returns a
+# context manager rather than a session — and a context-managed session would be
+# closed on exit, releasing the very lock it was taken to hold.
 
 
 class FakeSession:
-    """A sync Session stand-in that records the statements it ran."""
+    """An AsyncSession stand-in that records the statements it ran."""
 
     def __init__(self, *, acquired: bool = True) -> None:
         self._acquired = acquired
         self.statements: list[str] = []
         self.closed = False
 
-    def execute(self, statement, _params=None):
+    async def execute(self, statement, _params=None):
         self.statements.append(str(statement))
         return SimpleNamespace(scalar=lambda: self._acquired)
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self.closed = True
 
 
@@ -486,70 +486,120 @@ async def test_the_postgres_backend_holds_one_session_from_acquire_to_release():
     assert any("pg_try_advisory_xact_lock" in s for s in sessions[0].statements)
 
 
-async def test_a_cancelled_acquire_closes_its_session_only_after_the_attempt_ends():
-    """A client disconnect mid-attempt must not strand a lock the thread then takes.
+async def test_a_refused_acquire_closes_its_session():
+    session = FakeSession(acquired=False)
+    backend = PostgresAdvisoryLockBackend(
+        session_factory=lambda: session, poll_interval_seconds=0.01
+    )
 
-    The attempt keeps running in its thread after the caller is cancelled, and
-    may succeed. Closing alongside it would use one Session from two threads;
-    never closing it would leave the lock held.
+    assert await backend.acquire("conversation-1", timeout_seconds=0.05) is False
+    assert session.closed is True
+
+
+async def test_a_cancelled_acquire_closes_its_session():
+    """A client disconnect mid-attempt must not strand a lock the attempt took.
+
+    Closing ends the transaction, and with it any lock the in-flight attempt
+    may have taken.
     """
-    import threading
-
-    started, finish = threading.Event(), threading.Event()
-    events: list[str] = []
+    started = asyncio.Event()
 
     class SlowSession(FakeSession):
-        def execute(self, statement, _params=None):
+        async def execute(self, statement, _params=None):
             if "advisory" in str(statement):
                 started.set()
-                finish.wait(5)
-                events.append("attempt-done")
-            return super().execute(statement, _params)
-
-        def close(self) -> None:
-            events.append("closed")
-            super().close()
+                await asyncio.sleep(10)
+            return await super().execute(statement, _params)
 
     session = SlowSession()
     backend = PostgresAdvisoryLockBackend(session_factory=lambda: session)
 
     task = asyncio.create_task(backend.acquire("conversation-1", timeout_seconds=5.0))
-    assert await asyncio.to_thread(started.wait, 5)
+    await started.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert events == [], "the session was closed while its attempt was still running"
 
-    finish.set()
+    assert session.closed is True
+    await backend.release("conversation-1")  # never recorded as held: a no-op
+
+
+async def test_a_release_cancelled_again_while_closing_still_closes():
+    """anyio re-cancels every await on the way out of a disconnected stream."""
+    close_started, finish_close = asyncio.Event(), asyncio.Event()
+
+    class SlowClose(FakeSession):
+        async def close(self) -> None:
+            close_started.set()
+            await finish_close.wait()
+            await super().close()
+
+    session = SlowClose()
+    backend = PostgresAdvisoryLockBackend(session_factory=lambda: session)
+    assert await backend.acquire("conversation-1", timeout_seconds=1.0) is True
+
+    release = asyncio.create_task(backend.release("conversation-1"))
+    await close_started.wait()
+    release.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release
+    assert session.closed is False
+
+    finish_close.set()
     for _ in range(100):
         if session.closed:
             break
         await asyncio.sleep(0.01)
-
-    assert events == ["attempt-done", "closed"]
-    await backend.release("conversation-1")  # never recorded as held: a no-op
+    assert session.closed is True, "the cancelled release abandoned the close"
 
 
-def test_the_container_draws_turn_locks_from_their_own_pool():
+async def test_an_exhausted_lock_pool_is_a_retriable_conflict_not_a_crash():
+    """Pool exhaustion means the worker is at capacity, not that the turn failed.
+
+    A raw ``sqlalchemy.exc.TimeoutError`` escaped the stream's typed-error
+    handling and broke the SSE response instead of returning a retriable code.
+    """
+    from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+    class NoConnection(FakeSession):
+        async def execute(self, statement, _params=None):
+            raise PoolTimeoutError("QueuePool limit of size 20 overflow 0 reached")
+
+    session = NoConnection()
+    coordinator = ConversationTurnCoordinator(
+        backend=PostgresAdvisoryLockBackend(session_factory=lambda: session),
+        timeout_seconds=1.0,
+    )
+
+    with pytest.raises(WorkflowRoutingException) as exc:
+        async with coordinator.hold("conversation-1", request_id="r1"):
+            pytest.fail("the turn body ran without a lock")
+
+    assert exc.value.error.code == "conversation_turn_conflict"
+    assert exc.value.error.retriable is True
+    assert exc.value.error.details == {"reason": "turn_lock_capacity"}
+    assert session.closed is True
+
+
+def test_the_container_draws_turn_locks_from_their_own_async_pool():
     """A turn holds its lock connection for its whole duration.
 
-    Drawn from the sync repositories' pool, a burst of turns took every
-    connection and stalled every sync repository call in the process.
+    Drawn from the request pool, a burst of turns would take every connection;
+    on a sync pool, each turn waiting for one also held an executor thread.
     """
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from app.core import container as container_module
-    from app.database.session import engine, turn_lock_engine
+    from app.database.async_session import async_engine, turn_lock_engine
 
     session = container_module._turn_lock_session()
-    try:
-        assert session.get_bind() is turn_lock_engine
-        assert turn_lock_engine is not engine
-        assert turn_lock_engine.pool is not engine.pool
-    finally:
-        session.close()
+    assert isinstance(session, AsyncSession)
+    assert session.bind is turn_lock_engine
+    assert turn_lock_engine.pool is not async_engine.pool
 
 
 async def test_the_postgres_backend_rejects_a_context_manager_session_factory():
-    """``db.provided.session`` is a @contextmanager — passing it is a wiring bug.
+    """``db.provided.async_session`` is an @asynccontextmanager — a wiring bug.
 
     It must fail with a message naming the problem, not an AttributeError on
     the first query, which is what happens when the wrong factory reaches
@@ -557,8 +607,8 @@ async def test_the_postgres_backend_rejects_a_context_manager_session_factory():
     """
     import contextlib
 
-    @contextlib.contextmanager
-    def factory():
+    @contextlib.asynccontextmanager
+    async def factory():
         yield FakeSession()
 
     backend = PostgresAdvisoryLockBackend(session_factory=factory)
@@ -567,6 +617,21 @@ async def test_the_postgres_backend_rejects_a_context_manager_session_factory():
         await backend.acquire("conversation-1", timeout_seconds=1.0)
 
     assert "session factory" in str(exc.value).lower()
+
+
+async def test_the_postgres_backend_rejects_a_sync_session():
+    """A sync Session would block the event loop on every lock query."""
+
+    class SyncSession:
+        def execute(self, statement, _params=None):
+            return SimpleNamespace(scalar=lambda: True)
+
+    backend = PostgresAdvisoryLockBackend(session_factory=SyncSession)
+
+    with pytest.raises(TypeError) as exc:
+        await backend.acquire("conversation-1", timeout_seconds=1.0)
+
+    assert "asyncsession" in str(exc.value).lower()
 
 
 def test_the_container_gives_the_lock_backend_a_raw_session_factory():
@@ -579,7 +644,7 @@ def test_the_container_gives_the_lock_backend_a_raw_session_factory():
         1
     ].split("\n    )")[0]
     assert "PostgresAdvisoryLockBackend" in coordinator_block
-    assert "db.provided.session" not in coordinator_block, (
-        "db.provided.session is a @contextmanager; the advisory lock needs a "
+    assert "db.provided" not in coordinator_block, (
+        "db.provided sessions are context managers; the advisory lock needs a "
         "raw session factory it can hold open past the call"
     )
