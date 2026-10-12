@@ -66,6 +66,7 @@ from app.services.client_device_service import ClientDeviceService
 from app.services.event_streaming.events import V3StreamEvent, make_event
 from app.services.generation_registry import get_generation_registry
 from app.usage import UsageContext
+from app.utils.cancellation import await_to_completion
 from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.message_validation import MessageValidationUtils
@@ -406,6 +407,9 @@ class _UserTurn:
     title_task: asyncio.Task | None = None
     bot_response: Any = None
     bot_message_persisted: bool = False
+    #: A terminal path has taken the row over and settles it to completion
+    #: itself; the cancellation cleanup must leave the row alone.
+    row_settling: bool = False
     tool_artifacts: list[dict[str, Any]] = field(default_factory=list)
     tool_args_by_id: dict[str, Any] = field(default_factory=dict)
     sequence: int = 0
@@ -2087,13 +2091,15 @@ class MessageService(IMessageService):
                 yield event
         except (asyncio.CancelledError, GeneratorExit):
             # Cancellation / disconnect: persist partial text if available,
-            # do NOT create an error message.
-            await self._apersist_interrupted_user_turn(turn)
+            # do NOT create an error message. Run to completion: a second
+            # cancel (anyio re-cancels every await here; a Stop cancels twice)
+            # must not leave the row active.
+            await await_to_completion(self._apersist_interrupted_user_turn(turn))
             return
         except Exception as exc:
             turn.cancel_title_task()
             if not turn.bot_message_persisted:
-                yield await self._afail_user_turn(turn, exc)
+                yield await await_to_completion(self._afail_user_turn(turn, exc))
 
     async def _abegin_user_turn(
         self,
@@ -2112,12 +2118,18 @@ class MessageService(IMessageService):
         and publishing the ``starting`` one made every fenced Stop stale.
         ``continuable`` is also legal only from ``running``.
         """
-        generation = await self._astart_generation(
-            conversation_id=message_create_data.conversation_id,
-            user_id=user_id,
-            logical_turn_id=user_message_id,
+        # Cancelled once the row exists but before the turn's cleanup is in
+        # place, the row stayed `starting` and refused every later message.
+        generation = await await_to_completion(
+            self._astart_running_generation(
+                conversation_id=message_create_data.conversation_id,
+                user_id=user_id,
+                logical_turn_id=user_message_id,
+            ),
+            on_abandoned=lambda opened: self._amark_generation_stopped(
+                opened, user_id=user_id, assistant_message_id=None, terminal_reason="disconnect"
+            ),
         )
-        generation = await self._amark_generation_running(generation, user_id=user_id)
 
         # Register in-flight entry, keyed by generation id when there is one.
         # The user message id remains the fallback so an unwired service keeps
@@ -2144,6 +2156,17 @@ class MessageService(IMessageService):
             registry_key=registry_key,
             inflight=inflight,
         )
+
+    async def _astart_running_generation(
+        self, *, conversation_id: UUID, user_id: UUID, logical_turn_id: UUID
+    ):
+        """Allocate the lifecycle row and move it to ``running``."""
+        generation = await self._astart_generation(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            logical_turn_id=logical_turn_id,
+        )
+        return await self._amark_generation_running(generation, user_id=user_id)
 
     async def _astream_turn_events(
         self,
@@ -2318,11 +2341,24 @@ class MessageService(IMessageService):
         """
         turn.cancel_title_task()
         if event.type == "interrupt":
-            yield await self._ainterrupt_user_turn(turn, event)
+            paused_events = [await self._ainterrupt_user_turn(turn, event)]
         else:
-            # The turn paused at its execution budget with a validated partial
-            # answer. Persist first, offer second: the continuation id a client
-            # redeems must point at an answer that is already saved.
+            # Settled as one step, before anything is yielded, however soon the
+            # client stops reading. A cancel between saving the partial and
+            # offering Continue sent the cleanup to save the partial again
+            # under the same id, which collided and left the row active.
+            turn.row_settling = True
+            paused_events = await await_to_completion(self._apublish_user_turn_pause(turn, event))
+        for paused_event in paused_events:
+            yield paused_event
+
+    async def _apublish_user_turn_pause(self, turn: _UserTurn, event: V3StreamEvent) -> list:
+        """Save the validated partial, offer Continue, and park the entry as a lock token."""
+        # The turn paused at its execution budget with a validated partial
+        # answer. Persist first, offer second: the continuation id a client
+        # redeems must point at an answer that is already saved.
+        paused_events = [
+            paused_event
             async for paused_event in self._apublish_continuation_pause(
                 event,
                 generation=turn.generation,
@@ -2334,10 +2370,11 @@ class MessageService(IMessageService):
                 inflight=turn.inflight,
                 tool_artifacts=turn.tool_artifacts or None,
                 next_sequence=turn.next_sequence,
-            ):
-                yield paused_event
+            )
+        ]
         turn.inflight.resolve()
         turn.registry.mark_paused(turn.registry_key)
+        return paused_events
 
     async def _ainterrupt_user_turn(self, turn: _UserTurn, event: V3StreamEvent):
         """Workflow paused for human approval: persist it, then release the row.
@@ -2368,9 +2405,11 @@ class MessageService(IMessageService):
                 custom_agents=turn.custom_agents,
             ),
         )
-        paused = await self._amark_generation_awaiting_approval(
-            turn.generation, user_id=turn.owner_id, assistant_message_id=turn.bot_message_id
-        )
+        # Saved under the reserved id: a cleanup that saved the partial too
+        # would collide with it. The SSE consumer stops reading at an
+        # interrupt, so that cleanup is the common path, not a race.
+        turn.bot_message_persisted = True
+        paused = await await_to_completion(self._asettle_approval_pause(turn))
         if self._approval_pause_was_stopped(paused):
             return self._stopped_approval_event(turn.conversation_id, event.sequence)
         return make_event(
@@ -2386,6 +2425,15 @@ class MessageService(IMessageService):
                 "message": persisted.model_dump(mode="json"),
             },
         )
+
+    async def _asettle_approval_pause(self, turn: _UserTurn):
+        """Release the row to the approval, and park the entry as a lock token."""
+        paused = await self._amark_generation_awaiting_approval(
+            turn.generation, user_id=turn.owner_id, assistant_message_id=turn.bot_message_id
+        )
+        turn.inflight.resolve()
+        turn.registry.mark_paused(turn.registry_key)
+        return paused
 
     async def _astop_user_turn(self, turn: _UserTurn) -> None:
         """A cooperative Stop: keep the partial, then confirm the stop on the row."""
@@ -2431,31 +2479,16 @@ class MessageService(IMessageService):
         """Persist the answer, close the row, then publish the title and ``complete``."""
         _merge_stream_tool_artifacts_into_response(turn.bot_response, turn.tool_artifacts)
 
-        bot_message = await self._persist_completed_workflow_response(
-            conversation_id=turn.conversation_id,
-            user_id=turn.resolved_user_id,
-            bot_response=turn.bot_response,
-            sanitized_persona=turn.sanitized_persona,
-            workflow_request=turn.workflow_request,
-            message_id=turn.bot_message_id,
-            reply_to_user_message_id=turn.user_message_id,
-            suggestion_source_message=message_create_data.content,
+        # One step, run to completion however soon a Stop or disconnect lands.
+        # Cancelled between saving the answer and closing the row, the row
+        # stayed active: the cleanup stood down because the answer was saved.
+        turn.row_settling = True
+        bot_message, failure = await await_to_completion(
+            self._apersist_finished_user_turn(turn, message_create_data)
         )
-        turn.bot_message_persisted = True
-        await self._compact_checkpoint_after_persist(
-            conversation_id=turn.conversation_id,
-            workflow_request=turn.workflow_request,
-        )
-
-        # Resolve the inflight future with the final message
-        turn.inflight.resolve(bot_message.model_dump(mode="json"))
-        await self._amark_generation_completed(
-            turn.generation,
-            user_id=turn.owner_id,
-            assistant_message_id=turn.bot_message_id,
-            terminal_reason="completed",
-        )
-        turn.registry.remove(turn.registry_key)
+        if failure is not None:
+            yield failure
+            return
 
         # Emit the title update BEFORE the terminal completion so the
         # Streamlit SSE client (which stops reading after `complete`) still
@@ -2482,32 +2515,81 @@ class MessageService(IMessageService):
             data={"message": bot_message.model_dump(mode="json")},
         )
 
+    async def _apersist_finished_user_turn(
+        self, turn: _UserTurn, message_create_data: MessageCreate
+    ) -> tuple[MessageRead | None, V3StreamEvent | None]:
+        """Save the answer and close the row; or, if it cannot be saved, fail the turn.
+
+        Settles the row on every outcome, because its caller runs it to
+        completion and stops watching it once cancelled.
+        """
+        try:
+            bot_message = await self._persist_completed_workflow_response(
+                conversation_id=turn.conversation_id,
+                user_id=turn.resolved_user_id,
+                bot_response=turn.bot_response,
+                sanitized_persona=turn.sanitized_persona,
+                workflow_request=turn.workflow_request,
+                message_id=turn.bot_message_id,
+                reply_to_user_message_id=turn.user_message_id,
+                suggestion_source_message=message_create_data.content,
+            )
+        except Exception as exc:
+            turn.cancel_title_task()
+            return None, await self._afail_user_turn(turn, exc)
+        turn.bot_message_persisted = True
+        await self._compact_checkpoint_after_persist(
+            conversation_id=turn.conversation_id,
+            workflow_request=turn.workflow_request,
+        )
+
+        # Resolve the inflight future with the final message
+        turn.inflight.resolve(bot_message.model_dump(mode="json"))
+        await self._amark_generation_completed(
+            turn.generation,
+            user_id=turn.owner_id,
+            assistant_message_id=turn.bot_message_id,
+            terminal_reason="completed",
+        )
+        turn.registry.remove(turn.registry_key)
+        return bot_message, None
+
     async def _apersist_interrupted_user_turn(self, turn: _UserTurn) -> None:
         """A disconnect, or a Stop that cancelled this task: keep the partial, settle.
 
-        Writes here are synchronous or shielded on purpose: the task is being
-        cancelled, and a second cancellation must not skip what the user is
-        waiting for (see :meth:`_create_bot_response_message`).
+        The caller runs this to completion, so a second cancellation cannot
+        skip what the user is waiting for. The partial is written
+        synchronously (see :meth:`_create_bot_response_message`).
         """
         turn.cancel_title_task()
-        if turn.bot_message_persisted:
+        if turn.bot_message_persisted or turn.row_settling:
+            # A terminal path saved the answer, or is settling the row itself;
+            # saving the partial too would collide with the answer's id.
             return
         partial = turn.inflight.partial_text.strip()
         assistant_message_id = None
-        if partial:
-            bot_msg = self._create_bot_response_message(
-                conversation_id=turn.conversation_id,
-                content=fix_markdown_code_blocks(partial),
-                metadata=self._stopped_partial_metadata(turn, "disconnect"),
-                message_id=turn.bot_message_id,
+        try:
+            if partial:
+                bot_msg = self._create_bot_response_message(
+                    conversation_id=turn.conversation_id,
+                    content=fix_markdown_code_blocks(partial),
+                    metadata=self._stopped_partial_metadata(turn, "disconnect"),
+                    message_id=turn.bot_message_id,
+                )
+                turn.inflight.resolve(bot_msg.model_dump(mode="json"))
+                assistant_message_id = turn.bot_message_id
+        except Exception:
+            # Keeping the partial is best effort; closing the row is not. An
+            # answer committed just before the cancel landed collides here.
+            logging.warning(
+                "Could not keep the partial answer of generation %s",
+                turn.registry_key,
+                exc_info=True,
             )
-            turn.inflight.resolve(bot_msg.model_dump(mode="json"))
-            assistant_message_id = turn.bot_message_id
-        else:
+        finally:
             turn.inflight.resolve(None)
-        turn.registry.remove(turn.registry_key)
-        await asyncio.shield(
-            self._amark_generation_stopped(
+            turn.registry.remove(turn.registry_key)
+            await self._amark_generation_stopped(
                 turn.generation,
                 user_id=turn.owner_id,
                 assistant_message_id=assistant_message_id,
@@ -2515,7 +2597,6 @@ class MessageService(IMessageService):
                 # what tells it from a client that simply went away.
                 terminal_reason=("user_requested" if turn.inflight.is_cancelled else "disconnect"),
             )
-        )
 
     async def _afail_user_turn(self, turn: _UserTurn, exc: Exception) -> V3StreamEvent:
         """Persist the failure as the answer, fail the row, and build the error event."""
@@ -3023,8 +3104,18 @@ class MessageService(IMessageService):
         registry = get_generation_registry()
         try:
             # Reclaim before consuming the approval. Conflicts preserve its pending record.
-            resume.generation = await self._aresume_approved_generation(
-                thread_id=thread_id, conversation_id=conversation_id, user_id=user_id
+            # Cancelled after the row is back to `running` but before this
+            # stream's cleanup is in place, the row stayed active.
+            resume.generation = await await_to_completion(
+                self._aresume_approved_generation(
+                    thread_id=thread_id, conversation_id=conversation_id, user_id=user_id
+                ),
+                on_abandoned=lambda reclaimed: self._amark_generation_stopped(
+                    reclaimed,
+                    user_id=user_id,
+                    assistant_message_id=None,
+                    terminal_reason="disconnect",
+                ),
             )
         except GenerationControlError as exc:
             yield make_event(
@@ -3054,12 +3145,14 @@ class MessageService(IMessageService):
                 async for event in events:
                     yield event
         except (asyncio.CancelledError, GeneratorExit):
-            await asyncio.shield(self._apersist_disconnected_resume(resume))
+            await await_to_completion(self._apersist_disconnected_resume(resume))
             return
         except CustomHTTPException:
             self._release_resume_claim(resume, "approval_resume_refused")
-            await self._amark_generation_failed(
-                resume.generation, user_id=user_id, terminal_reason="approval_claim_refused"
+            await await_to_completion(
+                self._amark_generation_failed(
+                    resume.generation, user_id=user_id, terminal_reason="approval_claim_refused"
+                )
             )
             raise
         except Exception as exc:
@@ -3307,8 +3400,10 @@ class MessageService(IMessageService):
         )
         self._set_plan_lifecycle(resume.conversation_id, resume.user_id, PlanLifecycle.paused)
         resume.persisted = True
-        paused = await self._amark_generation_awaiting_approval(
-            resume.generation, user_id=resume.user_id, assistant_message_id=persisted.id
+        paused = await await_to_completion(
+            self._amark_generation_awaiting_approval(
+                resume.generation, user_id=resume.user_id, assistant_message_id=persisted.id
+            )
         )
         if self._approval_pause_was_stopped(paused):
             return self._stopped_approval_event(resume.conversation_id, event.sequence)
@@ -3355,6 +3450,21 @@ class MessageService(IMessageService):
             fallback_content=ERROR_RESPONSE_AFTER_RESUME,
         )
         resume.persisted = True
+        # Run to completion: cancelled between saving the answer and closing
+        # the row, the row stayed active, because the cleanup stands down once
+        # the answer is saved.
+        await await_to_completion(self._asettle_completed_resume(resume, bot_message))
+
+        return make_event(
+            "complete",
+            sequence=resume.next_sequence(),
+            conversation_id=str(resume.conversation_id),
+            message_id=str(bot_message.id),
+            data={"message": bot_message.model_dump(mode="json")},
+        )
+
+    async def _asettle_completed_resume(self, resume: _ResumeTurn, bot_message: Any) -> None:
+        """Everything after the resumed answer is saved: resolve the approval, close the row."""
         if resume.inflight is not None:
             resume.inflight.resolve(bot_message.model_dump(mode="json"))
         self._clear_redis_interrupt(resume.conversation_id, resume.interrupt_id)
@@ -3368,14 +3478,6 @@ class MessageService(IMessageService):
             user_id=resume.user_id,
             assistant_message_id=bot_message.id,
             terminal_reason="completed",
-        )
-
-        return make_event(
-            "complete",
-            sequence=resume.next_sequence(),
-            conversation_id=str(resume.conversation_id),
-            message_id=str(bot_message.id),
-            data={"message": bot_message.model_dump(mode="json")},
         )
 
     async def _apause_resume(self, resume: _ResumeTurn, event: V3StreamEvent) -> list:
@@ -3453,7 +3555,7 @@ class MessageService(IMessageService):
                 error_message = await self._acreate_bot_response_message(**message_kwargs)
         finally:
             resume.persisted = True
-            await asyncio.shield(
+            await await_to_completion(
                 self._amark_generation_failed(
                     resume.generation, user_id=resume.user_id, terminal_reason=source
                 )
@@ -3506,7 +3608,7 @@ class MessageService(IMessageService):
                     resume.inflight.resolve(bot_message.model_dump(mode="json"))
         finally:
             resume.persisted = True
-            await asyncio.shield(
+            await await_to_completion(
                 self._amark_generation_stopped(
                     resume.generation,
                     user_id=resume.user_id,
@@ -3604,16 +3706,24 @@ class MessageService(IMessageService):
 
         control = self._generation_control()
         try:
-            leased = await control.lease_continuation(
-                ContinueGenerationCommand(
-                    generation_id=generation_id,
-                    continuation_id=continuation_id,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    idempotency_key=idempotency_key,
-                    expected_version=expected_version,
-                    inline_rich_response_v1=inline_rich_response_v1,
-                )
+            # Run to completion: the lease commits `continuing` before it
+            # records the idempotency claim, and a cancel between the two left
+            # the row active with no claim for a retry to replay.
+            leased = await await_to_completion(
+                control.lease_continuation(
+                    ContinueGenerationCommand(
+                        generation_id=generation_id,
+                        continuation_id=continuation_id,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        idempotency_key=idempotency_key,
+                        expected_version=expected_version,
+                        inline_rich_response_v1=inline_rich_response_v1,
+                    )
+                ),
+                on_abandoned=lambda abandoned: self._asettle_abandoned_lease(
+                    abandoned, user_id=user_id
+                ),
             )
         except GenerationControlError as exc:
             # A refusal is the answer, not a broken stream: the client asked
@@ -3713,7 +3823,7 @@ class MessageService(IMessageService):
                 async for event in events:
                     yield event
         except (asyncio.CancelledError, GeneratorExit):
-            await asyncio.shield(
+            await await_to_completion(
                 self._astop_continuation(
                     lease,
                     inflight=inflight,
@@ -3725,8 +3835,10 @@ class MessageService(IMessageService):
             raise
         except Exception as exc:
             registry.remove(generation_id)
-            await self._amark_generation_failed(
-                lease.snapshot, user_id=user_id, terminal_reason="stream_exception"
+            await await_to_completion(
+                self._amark_generation_failed(
+                    lease.snapshot, user_id=user_id, terminal_reason="stream_exception"
+                )
             )
             yield make_event(
                 "error",
@@ -3739,6 +3851,17 @@ class MessageService(IMessageService):
 
         finally:
             self._release_generation_entry(generation_id, inflight, registry)
+
+    async def _asettle_abandoned_lease(self, leased: Any, *, user_id: UUID) -> None:
+        """Close a continuation leased after the client that asked for it had gone."""
+        if leased.replayed:
+            return
+        await self._amark_generation_stopped(
+            leased.lease.snapshot,
+            user_id=user_id,
+            assistant_message_id=None,
+            terminal_reason="disconnect",
+        )
 
     async def _astop_continuation(self, lease, *, inflight, user_id, bot_message_id, reason):
         assistant_message_id = None
