@@ -334,6 +334,85 @@ async def test_cancellation_records_cancelled_and_reraises():
     assert repo.commands[0].error_code is None
 
 
+# Whether an unshielded ``to_thread`` job is dropped is a race against the
+# executor picking it up, lost most of the time but not every time, so each
+# disconnect test repeats until a single lost row would fail it.
+_DISCONNECTS = 50
+
+
+async def _disconnect(attempt) -> None:
+    """Abandon ``attempt`` the way Starlette does when the client goes away."""
+    import anyio
+
+    with anyio.CancelScope() as scope:
+        async with anyio.create_task_group() as group:
+            group.start_soon(attempt)
+            await anyio.sleep(0.01)
+            scope.cancel()
+
+
+async def _recorded(repo: FakeRepository, expected: int) -> list[str]:
+    """Statuses once any persist still running in a worker thread has landed."""
+    for _ in range(200):
+        if len(repo.commands) >= expected:
+            break
+        await asyncio.sleep(0.01)
+    return [command.status for command in repo.commands]
+
+
+async def test_a_client_disconnect_still_records_the_cancelled_attempt():
+    """The ``cancelled`` row is written when a streamed response is abandoned.
+
+    Starlette cancels through anyio, whose cancellation is level-triggered: the
+    persist's own await is cancelled too, and ``asyncio.to_thread`` drops a
+    job no thread has started yet, so the row was usually never written.
+    """
+    import anyio
+
+    repo = FakeRepository()
+    recorder = _recorder(repo)
+
+    async def slow_call():
+        await anyio.sleep(10)
+
+    async def attempt() -> None:
+        with bind_usage_context(UsageContext(operation="chat")):
+            await recorder.record_one_async_attempt(
+                call=slow_call,
+                provider="gemini",
+                model="gemini-3-flash",
+                operation=UsageOperation(),
+            )
+
+    for _ in range(_DISCONNECTS):
+        await _disconnect(attempt)
+
+    assert await _recorded(repo, _DISCONNECTS) == ["cancelled"] * _DISCONNECTS
+
+
+async def test_a_client_disconnect_still_finalizes_a_streaming_attempt():
+    import anyio
+
+    repo = FakeRepository()
+    recorder = _recorder(repo)
+
+    async def attempt() -> None:
+        with bind_usage_context(UsageContext(operation="image_generation")):
+            handle = recorder.begin_streaming_attempt(
+                provider="openai", model="gpt-image-1", operation=UsageOperation()
+            )
+            try:
+                await anyio.sleep(10)
+            except asyncio.CancelledError:
+                await handle.finalize("cancelled")
+                raise
+
+    for _ in range(_DISCONNECTS):
+        await _disconnect(attempt)
+
+    assert await _recorded(repo, _DISCONNECTS) == ["cancelled"] * _DISCONNECTS
+
+
 async def test_error_reraises_and_error_code_excludes_message():
     repo = FakeRepository()
     recorder = _recorder(repo)

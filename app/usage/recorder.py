@@ -9,8 +9,9 @@ The recorder wraps a single provider call. It:
   concurrent retries stay monotonic and operation-scoped;
 * classifies the outcome (``success`` / ``timeout`` / ``cancelled`` / ``error``)
   and records it to the Task 3 :class:`ModelUsageRepository`, which owns its own
-  SQLAlchemy session; the async path runs that blocking write via
-  :func:`asyncio.to_thread` so it never blocks the event loop;
+  SQLAlchemy session; the async path runs that blocking write in a worker
+  thread via :func:`run_to_completion`, so it never blocks the event loop
+  and a client disconnect cannot drop it;
 * on any persistence failure, enqueues a **content-free** Celery failed-write
   retry task carrying only the normalized :class:`RecordEventCommand` -- no
   prompts, responses, tool args, or raw payloads -- and if the broker enqueue
@@ -42,6 +43,7 @@ from app.usage.types import (
     UsageOperation,
     UsageStatus,
 )
+from app.utils.threads import run_to_completion
 
 logger = logging.getLogger("app.usage.model_usage_recorder")
 
@@ -137,7 +139,7 @@ class ModelUsageRecorder:
         try:
             response = await call()
         except asyncio.CancelledError:
-            await asyncio.to_thread(
+            await run_to_completion(
                 self._persist,
                 self._build_command(
                     operation=operation,
@@ -154,7 +156,7 @@ class ModelUsageRecorder:
             )
             raise
         except Exception as exc:
-            await asyncio.to_thread(
+            await run_to_completion(
                 self._persist,
                 self._build_command(
                     operation=operation,
@@ -170,7 +172,7 @@ class ModelUsageRecorder:
                 ),
             )
             raise
-        await asyncio.to_thread(
+        await run_to_completion(
             self._persist,
             self._build_command(
                 operation=operation,
@@ -401,7 +403,7 @@ class StreamingAttemptHandle:
     and calls :meth:`finalize` once with the terminal status. Repeat
     ``finalize`` calls are no-ops, so a stream that raises after partial output
     still records a single event. Persistence runs off the event loop via
-    :func:`asyncio.to_thread`, exactly like the async wrapper.
+    :func:`run_to_completion`, exactly like the async wrapper.
     """
 
     def __init__(
@@ -447,7 +449,7 @@ class StreamingAttemptHandle:
         usage = self._usage
         if self._generated_images:
             usage = replace(usage, generated_images=self._generated_images)
-        await asyncio.to_thread(
+        await run_to_completion(
             self._recorder._persist,
             self._recorder._build_command(
                 operation=self._operation,
