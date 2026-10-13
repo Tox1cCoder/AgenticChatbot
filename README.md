@@ -634,7 +634,7 @@ LangGraph checkpoints are kept in the same database under `CHECKPOINT_SCHEMA` (d
 ### Canonical server
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir client_backend --reload-dir shared
 ```
 
 Startup performs, in order: DB migration, checkpoint-table setup, agent pre-warming, skills pre-scan, Redis availability check, and launches the periodic client-runtime session cleanup task when `ENABLE_CLIENT_RUNTIME_BRIDGE=true`.
@@ -687,7 +687,7 @@ kani-client-backend doctor --config .env.client --json # machine-readable diagno
 
 1. **Canonical server** (port 8000):
    ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir client_backend --reload-dir shared
    ```
 2. **Sidecar** (port 8100) — set `CLIENT_SKILLS_ROOT` to the absolute path of `<repo>/skills` so the bundled examples are served (uploads then install into that same folder):
    ```bash

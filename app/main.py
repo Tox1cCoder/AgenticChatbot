@@ -627,4 +627,12 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    uvicorn.run("app.main:app", host=settings.api_host, port=settings.api_port, reload=True)
+    from shared.dev_reload import reload_dirs
+
+    uvicorn.run(
+        "app.main:app",
+        host=settings.api_host,
+        port=settings.api_port,
+        reload=True,
+        reload_dirs=reload_dirs(),
+    )

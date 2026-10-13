@@ -181,14 +181,19 @@ def main():
     """
     import uvicorn
 
+    from shared.dev_reload import reload_dirs
+
     initialize_client_environment()
     setup_logging()
 
+    reload = client_settings.environment == "development"
     uvicorn.run(
         "client_backend.main:app",
         host=client_settings.backend_host,
         port=client_settings.backend_port,
-        reload=client_settings.environment == "development",
+        reload=reload,
+        # uvicorn warns when reload_dirs is set without reload.
+        reload_dirs=reload_dirs() if reload else None,
         log_level=client_settings.log_level.lower(),
     )
 
