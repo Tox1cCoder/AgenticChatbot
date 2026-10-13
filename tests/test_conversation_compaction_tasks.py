@@ -322,6 +322,74 @@ def test_disabled_compaction_tasks_do_not_build_workers(monkeypatch) -> None:
     assert worker_module.backfill_conversation_summaries_task() == 0
 
 
+def test_real_worker_builds_from_the_container_with_configured_compactor() -> None:
+    """Smoke test of the production ``_build_worker`` path (no DB, no provider call)."""
+    from app.ai.model_context import resolve_model_context_window
+    from app.repositories.conversation_compaction import ConversationCompactionRepository
+    from app.workers import conversation_compaction as worker_module
+
+    worker = worker_module._build_worker()
+
+    configured = worker_module.settings
+    compactor = worker.compactor
+    assert isinstance(worker.repository, ConversationCompactionRepository)
+    assert worker.settings is configured
+    assert compactor.generator is worker_module._langchain_generate
+    assert (compactor.provider, compactor.model) == (
+        configured.conversation_summary_provider,
+        configured.conversation_summary_model,
+    )
+    assert compactor.trigger_messages == configured.conversation_summary_trigger_messages
+    assert compactor.trigger_tokens == configured.conversation_summary_trigger_tokens
+    assert compactor.keep_recent_turns == configured.conversation_summary_keep_recent_turns
+    assert compactor.max_summary_tokens == configured.conversation_summary_max_tokens
+    window = resolve_model_context_window(compactor.provider, compactor.model).max_input_tokens
+    assert window is not None
+    assert compactor.max_input_tokens == (
+        window
+        - configured.conversation_summary_default_reserved_output_tokens
+        - configured.conversation_summary_safety_margin_tokens
+    )
+    assert compactor.recorder is not None
+
+
+def test_real_worker_resolves_the_users_stored_key_before_the_server_key(monkeypatch) -> None:
+    from app.workers import conversation_compaction as worker_module
+
+    monkeypatch.setattr(worker_module.settings, "conversation_summary_provider", "gemini")
+    resolver = worker_module._build_worker().compactor.credential_resolver
+    provider_service = resolver.user_credential_resolver.__self__
+    stored = SimpleNamespace(
+        provider_type="gemini",
+        api_key_encrypted=provider_service._encrypt_key("user-stored-key"),
+        provider_metadata={},
+    )
+    lookups = []
+
+    def get_by_user_and_type(user_id, provider_type):
+        lookups.append((user_id, provider_type))
+        return stored
+
+    monkeypatch.setattr(provider_service.repository, "get_by_user_and_type", get_by_user_and_type)
+    user_id = uuid4()
+
+    credential = resolver.resolve(user_id)
+
+    assert lookups == [(user_id, "gemini")]
+    assert (credential.source, credential.api_key) == ("user", "user-stored-key")
+
+
+def test_real_worker_rejects_a_non_positive_compaction_input(monkeypatch) -> None:
+    from app.workers import conversation_compaction as worker_module
+
+    monkeypatch.setattr(
+        worker_module.settings, "conversation_summary_default_reserved_output_tokens", 10**12
+    )
+
+    with pytest.raises(ValueError, match="available_input_must_be_positive"):
+        worker_module._build_worker()
+
+
 def test_backfill_uses_separately_rate_limited_compaction_task() -> None:
     from app.workers import conversation_compaction as worker_module
 
