@@ -170,7 +170,7 @@ def test_request_reauthenticates_once_after_login_redirect(tmp_path: Path) -> No
     assert client.session.login_post_calls == 1
 
 
-def test_main_list_action_does_not_force_eager_login(
+def test_main_check_day_action_does_not_force_eager_login(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     class StubClient:
@@ -181,8 +181,8 @@ def test_main_list_action_does_not_force_eager_login(
         def login(self) -> bool:
             pytest.fail("main() should not force login before dispatching the action")
 
-        def list_applications(self) -> list[dict]:
-            return [{"id": "100", "no": "100-100", "process": "draft"}]
+        def get_day_status(self, date: str) -> dict:
+            return {"date": date, "is_late": False}
 
     monkeypatch.setattr(take100_api, "Take100Client", StubClient)
     monkeypatch.setattr(
@@ -191,7 +191,9 @@ def test_main_list_action_does_not_force_eager_login(
         [
             "take100_api.py",
             "--action",
-            "list",
+            "check-day",
+            "--date",
+            "2026-10-05",
             "--email",
             "user@example.com",
             "--password",
@@ -203,7 +205,7 @@ def test_main_list_action_does_not_force_eager_login(
 
     result = json.loads(capsys.readouterr().out)
     assert result["success"] is True
-    assert result["applications"][0]["no"] == "100-100"
+    assert result["day_status"]["date"] == "2026-10-05"
 
 
 def test_main_uses_injected_credentials_without_reading_skill_prose(monkeypatch, capsys):
@@ -211,14 +213,16 @@ def test_main_uses_injected_credentials_without_reading_skill_prose(monkeypatch,
         def __init__(self, email, password):
             assert (email, password) == ("user@example.com", "bound-secret")
 
-        def list_applications(self):
-            return [{"id": "from-environment"}]
+        def get_day_status(self, date):
+            return {"date": date, "source": "from-environment"}
 
     monkeypatch.setenv("TAKE100_EMAIL", "user@example.com")
     monkeypatch.setenv("TAKE100_PASSWORD", "bound-secret")
     monkeypatch.setattr(take100_api, "Take100Client", StubClient)
-    monkeypatch.setattr(sys, "argv", ["take100_api.py", "--action", "list"])
+    monkeypatch.setattr(
+        sys, "argv", ["take100_api.py", "--action", "check-day", "--date", "2026-10-05"]
+    )
 
     take100_api.main()
 
-    assert json.loads(capsys.readouterr().out)["applications"] == [{"id": "from-environment"}]
+    assert json.loads(capsys.readouterr().out)["day_status"]["source"] == "from-environment"
