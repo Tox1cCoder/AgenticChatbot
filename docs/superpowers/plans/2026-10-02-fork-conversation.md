@@ -411,3 +411,35 @@ A 5,000-row prefix is also more than one summary pass can take. With the default
   - Running preparation without `force` fails the fact test and the idled-job test.
   - Reverting the compactor fix fails the fact test.
   - Removing the first-turn gate fails both two-turn regressions, the invalidated-memory test and the unit gate test.
+
+## 10. Progress check (2026-10-13)
+
+The task checkboxes in section 5 were never updated during implementation; this section is the progress record.
+
+**Delivered:** all 14 commits (`8761d3a6`..`b277bf4f`) are on `origin/Thai-Postgre-FastAPI`. `alembic heads` reports one head, `c4f1a7b9d2e6` (the fork lineage revision). Every file named in Tasks 1-6 exists, plus `app/services/conversation_fork_memory.py` and `scripts/benchmark_conversation_fork.py`. Spot-checked against the section 8 findings:
+
+| Section 8 finding | Code |
+| --- | --- |
+| DI wiring map | `ConversationForkService` registered in `app/core/dependency_injection.py` and `app/core/container.py` |
+| Coordinator exception -> 500 | `ConversationForkService.fork_conversation` translates `WorkflowRoutingException` to 409 `conversation_turn_conflict` |
+| Reset keeps snapshot/widgets | `app/ui/conversation_fork.py::clear_source_state_for_fork_navigation` pops `generation_snapshot` and empties `live_widget_mounts` |
+| Isolation and lock bounds | `REPEATABLE READ` + `SET LOCAL lock_timeout`; `40001` retry and `55P03` mapping in `app/repositories/conversation_fork.py` |
+| Renderer guards | `fork_history` checked in `app/ui/rich_response.py`, `app/ui/hitl_recovery.py`, `demo.py` widget mounting |
+
+Sidecar fork route is tested at both aliases. README and the Postman collection mention the fork route.
+
+**Test run (no model calls):**
+
+- Fork unit/API/demo suites plus sidecar, hydration, canvas, delete, search and compaction-repository suites without `TEST_DATABASE_URL`: 278 passed, 76 skipped.
+- The skipped PostgreSQL tests were then run against `chatbot_test`: fork integration, fork history integration, migration, search and service suites, **142 passed, 0 skipped**.
+
+**Still open:**
+
+| Item | State |
+| --- | --- |
+| Task 1: document limits in `.env.example` | Not done. `CONVERSATION_FORK_MAX_MESSAGES`, `CONVERSATION_FORK_MAX_BYTES` and `CONVERSATION_FORK_MEMORY_PREPARE_TIMEOUT_SECONDS` are absent. The global guard blocks tools from editing the file, so this needs a manual edit. |
+| Summary job upsert | **Fixed in `9bf7d752`.** New work (a persisted reply, a fork's first job) only reopens an `idle` job. A `retry` job keeps its attempt count, an expired lease is left for the reconcile sweep, and a `dead` job keeps its old target, so only the hourly historical backfill revives it. Explicit rebuilds (`request_backfill`, mutation invalidation) still reopen everything. A reply's notification can still claim a `retry` job before its backoff ends. Each such claim counts toward `max_attempts`. Gating the claim on `available_at` was rejected: the reconcile sweep reuses `available_at` as its dispatch debounce, so retries would never run. |
+| Worker smoke test | **Fixed in `39e7fd02`.** Three tests build the real worker from the process container: the settings wiring, the input bound, and the user-key-first credential chain through real `ProviderService` decryption. No database or provider call. |
+| Demo Continue snapshot | **Fixed in `87f86948`.** The snapshot is no longer deleted on fork navigation. `generation_snapshot_for` shows it only in the conversation it names, so the child shows no Continue and returning to the source restores it. The same check fixed an older leak: ordinary sidebar/manager switching kept the snapshot, so a paused turn's Continue appeared in every other conversation. One snapshot slot is kept per session, so a turn in another conversation, or a page reload, still replaces it. Not verified in a browser. |
+| Section 6 document-backed forks | Not started; sources with documents get 409 `FORK_DOCUMENT_CONTEXT_UNSUPPORTED`. |
+| Benchmark on deployment target | Only the local single-host numbers in section 9 exist. |
