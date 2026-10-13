@@ -180,6 +180,112 @@ def test_claim_token_retry_dead_and_expired_lease_reconciliation(
         assert session.get(ConversationSummaryJob, conversation_id).status == "dead"
 
 
+def _set_job(session_factory, conversation_id: UUID, **values) -> None:
+    with session_factory.begin() as session:
+        job = session.get(ConversationSummaryJob, conversation_id)
+        for name, value in values.items():
+            setattr(job, name, value)
+
+
+def _job(session_factory, conversation_id: UUID) -> ConversationSummaryJob:
+    with session_factory() as session:
+        return session.get(ConversationSummaryJob, conversation_id)
+
+
+def test_new_reply_reopens_an_idle_job(seeded_repository, session_factory) -> None:
+    repository, _, conversation_id = seeded_repository
+    repository.persist_message(_message(conversation_id, MessageRole.assistant, "first"))
+    _set_job(session_factory, conversation_id, status="idle")
+
+    second = repository.persist_message(_message(conversation_id, MessageRole.assistant, "second"))
+
+    job = _job(session_factory, conversation_id)
+    assert job.status == "pending"
+    assert job.attempt_count == 0
+    assert job.requested_through_sequence == second.sequence
+
+
+def test_new_reply_keeps_a_retry_job_attempt_count_and_backoff(
+    seeded_repository, session_factory
+) -> None:
+    repository, _, conversation_id = seeded_repository
+    repository.persist_message(_message(conversation_id, MessageRole.assistant, "first"))
+    retry_at = datetime.now(UTC) + timedelta(minutes=10)
+    _set_job(
+        session_factory,
+        conversation_id,
+        status="retry",
+        attempt_count=3,
+        available_at=retry_at,
+        last_error_code="provider_timeout",
+    )
+
+    second = repository.persist_message(_message(conversation_id, MessageRole.assistant, "second"))
+
+    job = _job(session_factory, conversation_id)
+    assert job.status == "retry"
+    assert job.attempt_count == 3
+    assert job.available_at == retry_at
+    assert job.last_error_code == "provider_timeout"
+    assert job.requested_through_sequence == second.sequence
+
+
+def test_new_reply_leaves_a_dead_job_dead_until_the_backfill_reopens_it(
+    seeded_repository, session_factory
+) -> None:
+    repository, _, conversation_id = seeded_repository
+    first = repository.persist_message(_message(conversation_id, MessageRole.assistant, "first"))
+    _set_job(
+        session_factory,
+        conversation_id,
+        status="dead",
+        attempt_count=5,
+        last_error_code="credential_unavailable",
+    )
+
+    second = repository.persist_message(_message(conversation_id, MessageRole.assistant, "second"))
+
+    job = _job(session_factory, conversation_id)
+    assert job.status == "dead"
+    assert job.attempt_count == 5
+    assert job.last_error_code == "credential_unavailable"
+    # The target stays behind, so the bounded historical backfill sees the gap.
+    assert job.requested_through_sequence == first.sequence
+    assert repository.claim_job(conversation_id, lease_seconds=120) is None
+    assert (conversation_id, second.sequence) in repository.list_backfill_candidates(limit=100)
+
+    assert repository.request_backfill(conversation_id, second.sequence)
+    job = _job(session_factory, conversation_id)
+    assert job.status == "pending"
+    assert job.attempt_count == 0
+    assert job.requested_through_sequence == second.sequence
+
+
+def test_new_reply_leaves_an_expired_lease_to_the_reconcile_sweep(
+    seeded_repository, session_factory
+) -> None:
+    repository, _, conversation_id = seeded_repository
+    repository.persist_message(_message(conversation_id, MessageRole.assistant, "first"))
+    claim = repository.claim_job(conversation_id, lease_seconds=120)
+    assert claim is not None
+    _set_job(
+        session_factory,
+        conversation_id,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    second = repository.persist_message(_message(conversation_id, MessageRole.assistant, "second"))
+
+    job = _job(session_factory, conversation_id)
+    assert job.status == "processing"
+    assert job.requested_through_sequence == second.sequence
+    repository.reconcile_due_jobs(dispatch_debounce_seconds=30)
+    job = _job(session_factory, conversation_id)
+    assert job.status == "retry"
+    assert job.attempt_count == 1
+    assert job.last_error_code == "lease_expired"
+
+
 def test_owned_memory_input_cas_and_mutation_invalidation(
     seeded_repository, session_factory
 ) -> None:

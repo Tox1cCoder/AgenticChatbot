@@ -120,18 +120,36 @@ class ConversationCompactionRepository(RepositorySessionMixin):
         conversation_id: UUID,
         requested_through_sequence: int,
         now: datetime,
+        reopen: bool = True,
     ):
+        """Insert or coalesce the conversation's job.
+
+        ``reopen=True`` is an explicit rebuild request (backfill, mutation
+        invalidation): every job without a live lease returns to ``pending``
+        with its failure accounting cleared.
+
+        ``reopen=False`` is new work arriving (a persisted reply, a fork's first
+        job). It must not clear failure accounting: only an ``idle`` job
+        reopens, a ``retry`` job keeps its attempt count and ``available_at``,
+        an expired lease is left for ``reconcile_due_jobs`` to count, and a
+        ``dead`` job keeps its old target so ``list_backfill_candidates`` sees
+        the gap and the bounded historical backfill is the only thing that
+        revives it. Without this, each reply restarted a failing job at attempt
+        zero. A reply's notification can still claim a ``retry`` job before its
+        backoff ends (a claim by id ignores ``available_at``), but each such
+        attempt counts, so the job dies after ``max_attempts``.
+        """
+        if not reopen:
+            return ConversationCompactionRepository._new_work_upsert_statement(
+                conversation_id=conversation_id,
+                requested_through_sequence=requested_through_sequence,
+                now=now,
+            )
         table = ConversationSummaryJob.__table__
-        incoming = insert(table).values(
+        incoming = ConversationCompactionRepository._fresh_job_insert(
             conversation_id=conversation_id,
             requested_through_sequence=requested_through_sequence,
-            status=SummaryJobStatus.PENDING.value,
-            attempt_count=0,
-            available_at=now,
-            lease_token=None,
-            lease_expires_at=None,
-            last_error_code=None,
-            updated_at=now,
+            now=now,
         )
         live_lease = and_(
             table.c.status == SummaryJobStatus.PROCESSING.value,
@@ -158,6 +176,58 @@ class ConversationCompactionRepository(RepositorySessionMixin):
             },
         )
 
+    @staticmethod
+    def _fresh_job_insert(
+        *,
+        conversation_id: UUID,
+        requested_through_sequence: int,
+        now: datetime,
+    ):
+        return insert(ConversationSummaryJob.__table__).values(
+            conversation_id=conversation_id,
+            requested_through_sequence=requested_through_sequence,
+            status=SummaryJobStatus.PENDING.value,
+            attempt_count=0,
+            available_at=now,
+            lease_token=None,
+            lease_expires_at=None,
+            last_error_code=None,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _new_work_upsert_statement(
+        *,
+        conversation_id: UUID,
+        requested_through_sequence: int,
+        now: datetime,
+    ):
+        table = ConversationSummaryJob.__table__
+        incoming = ConversationCompactionRepository._fresh_job_insert(
+            conversation_id=conversation_id,
+            requested_through_sequence=requested_through_sequence,
+            now=now,
+        )
+        idle = table.c.status == SummaryJobStatus.IDLE.value
+        dead = table.c.status == SummaryJobStatus.DEAD.value
+        return incoming.on_conflict_do_update(
+            index_elements=[table.c.conversation_id],
+            set_={
+                "requested_through_sequence": case(
+                    (dead, table.c.requested_through_sequence),
+                    else_=func.greatest(
+                        table.c.requested_through_sequence,
+                        incoming.excluded.requested_through_sequence,
+                    ),
+                ),
+                "status": case((idle, SummaryJobStatus.PENDING.value), else_=table.c.status),
+                "attempt_count": case((idle, 0), else_=table.c.attempt_count),
+                "available_at": case((idle, now), else_=table.c.available_at),
+                "last_error_code": case((idle, None), else_=table.c.last_error_code),
+                "updated_at": now,
+            },
+        )
+
     @classmethod
     def enqueue_job_in_session(
         cls,
@@ -179,6 +249,7 @@ class ConversationCompactionRepository(RepositorySessionMixin):
                 conversation_id=conversation_id,
                 requested_through_sequence=requested_through_sequence,
                 now=cls._utcnow(),
+                reopen=False,
             )
         )
 
@@ -296,6 +367,7 @@ class ConversationCompactionRepository(RepositorySessionMixin):
                     conversation_id=conversation_id,
                     requested_through_sequence=message.sequence,
                     now=now,
+                    reopen=False,
                 )
             )
         session.commit()
