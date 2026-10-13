@@ -18,7 +18,6 @@ FORK_ATTEMPTS_KEY = "fork_attempts"
 _TERMINAL_ERROR_CODES = frozenset({"FORK_RESULT_DELETED", "FORK_REQUEST_CONFLICT"})
 
 _FORK_NAVIGATION_POPPED_KEYS = (
-    "generation_snapshot",
     "pending_interrupt",
     "interrupt_conversation_id",
 )
@@ -90,10 +89,11 @@ def build_fork_request(message_id: str, request_id: str) -> dict[str, str]:
 
 
 def clear_source_state_for_fork_navigation(state: MutableMapping[str, Any]) -> None:
-    """Drop source-only UI state the shared reset deliberately retains.
+    """Drop source-only interrupt and widget state before showing another conversation.
 
-    ``generation_snapshot`` survives ``_clear_inflight_state`` so a paused turn stays
-    continuable in the SAME conversation; navigating to a child must not inherit it.
+    ``generation_snapshot`` is deliberately kept. It records its conversation, and
+    the demo renders it only there, so the child gets no Continue and the source
+    keeps its paused turn's Continue for when the user returns.
     """
     for key in _FORK_NAVIGATION_POPPED_KEYS:
         state.pop(key, None)

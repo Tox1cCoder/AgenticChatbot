@@ -199,14 +199,56 @@ def test_child_inherits_no_source_generation_widget_or_approval_state(harness):
     harness.demo.fork_conversation_from_message(SOURCE_ID, MESSAGE_ID)
 
     state = harness.state
-    assert "generation_snapshot" not in state
-    assert state.live_widget_mounts == {}
-    assert "pending_interrupt" not in state
-    assert "interrupt_conversation_id" not in state
-    assert harness.demo.generation_controls(state.get("generation_snapshot") or {}) == {
+    assert harness.demo.generation_snapshot_for(CHILD_ID) == {}
+    assert harness.demo.generation_controls(harness.demo.generation_snapshot_for(CHILD_ID)) == {
         "stop": "hidden",
         "continue": "hidden",
     }
+    assert harness.demo.build_continue_request(state.generation_snapshot, CHILD_ID) is None
+    assert state.live_widget_mounts == {}
+    assert "pending_interrupt" not in state
+    assert "interrupt_conversation_id" not in state
+
+
+def test_returning_to_the_source_still_offers_its_paused_turn_continue(harness):
+    harness.demo.fork_conversation_from_message(SOURCE_ID, MESSAGE_ID)
+    harness.state.current_conversation_id = SOURCE_ID
+    harness.demo._navigate_away_from_source()
+
+    snapshot = harness.demo.generation_snapshot_for(SOURCE_ID)
+    assert snapshot["generation_id"] == "gen-1"
+    assert harness.demo.generation_controls(snapshot)["continue"] == "enabled"
+    body = harness.demo.build_continue_request(snapshot, SOURCE_ID)
+    assert body is not None and body["generationId"] == "gen-1"
+
+
+def test_an_ordinary_switch_does_not_carry_continue_into_another_conversation(harness):
+    harness.state.current_conversation_id = CHILD_ID
+    harness.demo.reset_conversation_state()
+
+    assert harness.demo.generation_controls(harness.demo.generation_snapshot_for(CHILD_ID)) == {
+        "stop": "hidden",
+        "continue": "hidden",
+    }
+    assert harness.demo.generation_snapshot_for(SOURCE_ID)["continuation_id"] == "cont-1"
+
+
+def test_the_continue_button_renders_only_in_the_paused_turns_conversation(harness):
+    def continue_buttons() -> list[dict[str, Any]]:
+        return [b for b in harness.st.buttons if b.get("key") == "continue_generation_btn"]
+
+    harness.demo._render_continue_control(CHILD_ID)
+    assert continue_buttons() == []
+
+    harness.demo._render_continue_control(SOURCE_ID)
+    assert len(continue_buttons()) == 1
+
+
+def test_a_snapshot_without_a_conversation_belongs_to_none(harness):
+    harness.state.generation_snapshot = {"generation_id": "gen-1", "continuation_id": "c"}
+
+    assert harness.demo.generation_snapshot_for(SOURCE_ID) == {}
+    assert harness.demo.build_continue_request(harness.state.generation_snapshot, SOURCE_ID) is None
 
 
 def test_failure_leaves_the_source_selection_and_state_usable(harness):
@@ -269,7 +311,7 @@ def test_a_paused_source_with_stale_stream_state_is_never_stopped(harness):
     assert [e for _, e, _ in harness.api.calls] == [f"/conversations/{SOURCE_ID}/fork"]
     assert state.current_conversation_id == CHILD_ID
     assert state.stream_inflight is False
-    assert "generation_snapshot" not in state
+    assert harness.demo.generation_snapshot_for(CHILD_ID) == {}
     assert state.live_widget_mounts == {}
     assert "pending_interrupt" not in state
 
@@ -309,7 +351,7 @@ def test_lineage_label_renders_a_switch_button_only_when_linked(harness):
         harness.demo.render_fork_lineage(_child())
 
     assert harness.state.current_conversation_id == SOURCE_ID
-    assert "generation_snapshot" not in harness.state
+    assert harness.demo.generation_snapshot_for(SOURCE_ID)["generation_id"] == "gen-1"
 
     harness.st.buttons.clear()
     harness.state.conversations_list = [_child()]

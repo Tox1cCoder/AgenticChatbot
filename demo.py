@@ -2886,6 +2886,23 @@ def _apply_generation_event(event: dict) -> None:
     st.session_state.generation_snapshot = snapshot
 
 
+def generation_snapshot_for(conversation_id: str | None) -> dict:
+    """The session's generation snapshot, only while it belongs to ``conversation_id``.
+
+    One snapshot slot is kept per browser session and it survives conversation
+    switches on purpose, so a paused turn is still continuable when the user comes
+    back to it. Every reader that renders or sends a command must therefore check
+    the owner: shown elsewhere, it would offer the paused turn's Continue in a
+    conversation that has no such turn. A snapshot without a conversation belongs
+    to none.
+    """
+    snapshot = st.session_state.get("generation_snapshot") or {}
+    owner = str(snapshot.get("conversation_id") or "")
+    if not owner or owner != str(conversation_id or ""):
+        return {}
+    return snapshot
+
+
 def _generation_command_key(action: str) -> str:
     """A stable idempotency key per (generation, version, action).
 
@@ -2960,7 +2977,7 @@ def _handle_stop_rerun(conversation_id: str) -> None:
     # published one, which lets the command be fenced against the version the
     # UI last saw; the user message id remains the fallback for a turn that
     # started before `generation_start` arrived.
-    snapshot = st.session_state.get("generation_snapshot") or {}
+    snapshot = generation_snapshot_for(conversation_id)
     stop_data: dict[str, Any] = {"conversationId": conversation_id}
     if snapshot.get("generation_id"):
         stop_data["generationId"] = str(snapshot["generation_id"])
@@ -3029,6 +3046,8 @@ def build_continue_request(snapshot: dict | None, conversation_id: str) -> dict[
         return None
     if not conversation_id or conversation_id == "pending_new":
         return None
+    if str(snapshot.get("conversation_id") or "") != str(conversation_id):
+        return None
     return {
         "conversationId": str(conversation_id),
         "generationId": str(generation_id),
@@ -3044,7 +3063,7 @@ def refresh_generation_snapshot(conversation_id: str) -> dict | None:
     What a ``202`` from Stop is answered with. The UI never infers a status
     from a closed socket, so reconciling means asking.
     """
-    snapshot = st.session_state.get("generation_snapshot") or {}
+    snapshot = generation_snapshot_for(conversation_id)
     generation_id = snapshot.get("generation_id")
     if not generation_id or not conversation_id or conversation_id == "pending_new":
         return None
@@ -3115,7 +3134,7 @@ def _render_continue_control(conversation_id: str) -> None:
     Placed outside the message form so clicking it does not submit a draft the
     user was still typing.
     """
-    snapshot = st.session_state.get("generation_snapshot") or {}
+    snapshot = generation_snapshot_for(conversation_id)
     controls = generation_controls(snapshot)
     if controls["continue"] != "enabled":
         reason = generation_block_reason(snapshot)
@@ -3378,8 +3397,9 @@ def refresh_conversations_list() -> None:
 def _navigate_away_from_source() -> None:
     """Switch the view to another conversation without carrying source-only state.
 
-    ``reset_conversation_state`` keeps the generation snapshot on purpose (same-
-    conversation Continue), so a conversation switch has to drop it explicitly.
+    The generation snapshot is kept: it is scoped by ``generation_snapshot_for``,
+    so it offers nothing in the new view and the source's Continue is still there
+    when the user comes back.
     """
     reset_conversation_state()
     conversation_fork.clear_source_state_for_fork_navigation(st.session_state)

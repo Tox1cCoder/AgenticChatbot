@@ -57,9 +57,11 @@ There is no `/ai/conversations/.../fork` alias; AI SDK clients call the route ab
    slicing the source transcript you hold in memory; it may be paginated and the server applies a
    snapshot policy to copied rows.
 5. Send every later request (`/messages`, `/ai/...` chat, stop, continue) to the child id.
-6. Discard source-scoped client state when switching: the generation snapshot (Continue/Stop),
-   pending approval/interrupt UI, mounted live widgets and their subscriptions, composer
-   attachments, and any message cache keyed by the source. Do not send a stop/cancel for
+6. Do not show source-scoped client state in the child. Discard pending approval/interrupt UI,
+   mounted live widgets and their subscriptions, composer attachments, and any message cache
+   keyed by the source. A generation snapshot (Continue/Stop) may be kept for the user's return,
+   but render and send it only in the conversation named by its `conversation_id`. The demo does
+   this with `generation_snapshot_for`. Do not send a stop/cancel for
    the source as part of forking: the server rejects a fork while a source turn is active, so a
    stop could only alter a paused or stale source generation.
 
