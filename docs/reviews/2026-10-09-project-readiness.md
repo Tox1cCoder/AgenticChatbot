@@ -38,6 +38,11 @@ test verifies this behavior. No agent-copy repair was needed.
   Attach appends missing defaults while keeping existing attachments and order.
   Changing defaults affects subsequent joins; it does not synchronize existing
   conversations. Detach and project deletion retain conversation attachments.
+- (Changed 2026-10-13) The set is also an allowlist. A member conversation uses
+  only attachments the project lists; out-of-set rows are kept but hidden from
+  listing, PUT, and the runtime roster. An empty set allows no agents. Attaching
+  an out-of-set agent is refused with 403. Like a disabled agent, a hidden agent
+  is left out of the next turn's roster; a turn already running is not cancelled.
 - Agent definitions remain live: configuration edits apply when a subsequent
   turn builds its runtime roster. Disabling suppresses future execution while
   preserving saved links; it does not cancel a turn already running.

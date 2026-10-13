@@ -126,7 +126,7 @@ class ProjectService:
         *,
         device_id: str | None = None,
     ) -> list[CustomAgentRead]:
-        """Replace the default set. Does not touch conversations already in the project."""
+        """Replace the allowed set. Member conversations see the change on their next read."""
         self.require_owned(owner_id, project_id)
         for custom_agent_id in custom_agent_ids:
             if self.custom_agent_repository.get_owned(owner_id, custom_agent_id) is None:

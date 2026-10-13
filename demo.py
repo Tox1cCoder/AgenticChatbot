@@ -2257,6 +2257,26 @@ def _build_skill_refs(
     return [by_key[key] for key in selected_skill_keys if key in by_key]
 
 
+def _conversation_project_id(conversation_id: str) -> str | None:
+    """The project a conversation belongs to; a pending chat joins the open project."""
+    if conversation_id == "pending_new":
+        return st.session_state.get("current_project_id")
+    conversation = find_conversation_in_state(conversation_id)
+    if conversation is None:
+        response = make_api_request("GET", f"/conversations/{conversation_id}")
+        conversation = (response or {}).get("data") or {}
+    return conversation.get("projectId")
+
+
+def _project_allowed_agents(
+    project_id: str, all_agents: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The subset of ``all_agents`` the project allows; none when it cannot be read."""
+    project = get_project(project_id) or {}
+    allowed_ids = {agent.get("id") for agent in project.get("customAgents") or []}
+    return [agent for agent in all_agents if agent.get("id") in allowed_ids]
+
+
 def render_conversation_custom_agents_panel(conversation_id: str) -> None:
     """Attach/detach custom agents for the active conversation.
 
@@ -2270,6 +2290,16 @@ def render_conversation_custom_agents_panel(conversation_id: str) -> None:
     all_agents = list_custom_agents()
     if not all_agents:
         return
+    project_id = _conversation_project_id(conversation_id)
+    if project_id:
+        all_agents = _project_allowed_agents(project_id, all_agents)
+        if not all_agents:
+            st.caption(
+                "This conversation's project allows no custom agents. "
+                "Add agents in the project's settings."
+            )
+            return
+        st.caption("Only the agents allowed by this conversation's project are listed.")
     label_by_id = {a["id"]: a.get("name", a["id"]) for a in all_agents}
 
     is_pending = conversation_id == "pending_new"
@@ -6060,10 +6090,14 @@ def render_project_view() -> None:
             agent.get("id") for agent in project["customAgents"] if agent.get("id") in label_by_id
         ]
     selected_agent_ids = st.multiselect(
-        "Default agents for new conversations in this project",
+        "Agents allowed in this project",
         list(label_by_id.keys()),
         default=default_agent_ids,
         format_func=lambda i: label_by_id.get(i, i),
+        help=(
+            "Conversations in this project can only use these agents, and new ones start "
+            "with all of them attached. With none selected, no custom agents can be used."
+        ),
         key=f"project_agents_{widget_scope}",
     )
 

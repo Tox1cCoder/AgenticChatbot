@@ -148,7 +148,7 @@ def set_project_custom_agents(
         None, alias="deviceId", description="Active device for agent availability"
     ),
 ) -> ApiResponse[list[CustomAgentRead]]:
-    """Replace the default set. Conversations already in the project are untouched."""
+    """Replace the allowed set. Member conversations see the change on their next read."""
     result = project_service.set_agents(
         user_id, project_id, payload.custom_agent_ids, device_id=device_id
     )

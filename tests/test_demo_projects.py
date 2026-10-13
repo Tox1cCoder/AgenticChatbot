@@ -436,3 +436,52 @@ def test_new_chat_in_project_button_keeps_current_project_id(monkeypatch):
     new_chat_block = source.split('"New chat in this project"', 1)[1].split("st.rerun()", 1)[0]
 
     assert "current_project_id" not in new_chat_block
+
+
+_AGENTS = [{"id": "a", "name": "A"}, {"id": "b", "name": "B"}, {"id": "c", "name": "C"}]
+
+
+def test_project_conversation_offers_only_the_projects_agents(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    monkeypatch.setattr(
+        demo, "find_conversation_in_state", lambda _id: {"id": "conv", "projectId": "p"}
+    )
+    monkeypatch.setattr(
+        demo, "get_project", lambda _id: {"customAgents": [{"id": "a"}, {"id": "b"}]}
+    )
+
+    project_id = demo._conversation_project_id("conv")
+
+    assert project_id == "p"
+    assert [a["id"] for a in demo._project_allowed_agents(project_id, _AGENTS)] == ["a", "b"]
+
+
+def test_pending_chat_uses_the_open_project(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    sys.modules["streamlit"].session_state.current_project_id = "p"
+
+    assert demo._conversation_project_id("pending_new") == "p"
+
+
+def test_conversation_missing_from_state_is_fetched(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    monkeypatch.setattr(demo, "find_conversation_in_state", lambda _id: None)
+    calls = []
+
+    def request(method, path, data=None):
+        calls.append((method, path))
+        return {"success": True, "data": {"projectId": None}}
+
+    monkeypatch.setattr(demo, "make_api_request", request)
+
+    assert demo._conversation_project_id("conv") is None
+    assert calls == [("GET", "/conversations/conv")]
+
+
+def test_unreadable_or_empty_project_allows_no_agents(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    monkeypatch.setattr(demo, "get_project", lambda _id: None)
+    assert demo._project_allowed_agents("p", _AGENTS) == []
+
+    monkeypatch.setattr(demo, "get_project", lambda _id: {"customAgents": []})
+    assert demo._project_allowed_agents("p", _AGENTS) == []

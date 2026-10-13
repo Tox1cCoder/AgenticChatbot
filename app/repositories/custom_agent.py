@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import CustomAgentForbiddenError
@@ -153,14 +153,28 @@ class CustomAgentRepository(RepositorySessionMixin):
     def _list_attachments_in_session(
         session: Session, owner_id: UUID, conversation_id: UUID
     ) -> list[tuple[ConversationCustomAgent, CustomAgent]]:
-        """Attachment-listing body shared by both transports."""
+        """Attachment-listing body shared by both transports.
+
+        A project's agent set is an allowlist: inside a project, only attachments
+        the project also lists are returned. The other rows are kept, so leaving
+        the project brings them back.
+        """
+        allowed_by_project = or_(
+            Conversation.project_id.is_(None),
+            exists().where(
+                ProjectCustomAgent.project_id == Conversation.project_id,
+                ProjectCustomAgent.custom_agent_id == ConversationCustomAgent.custom_agent_id,
+            ),
+        )
         stmt = (
             select(ConversationCustomAgent, CustomAgent)
             .join(CustomAgent, CustomAgent.id == ConversationCustomAgent.custom_agent_id)
+            .join(Conversation, Conversation.id == ConversationCustomAgent.conversation_id)
             .where(
                 ConversationCustomAgent.conversation_id == conversation_id,
                 ConversationCustomAgent.owner_id == owner_id,
                 CustomAgent.deleted_at.is_(None),
+                allowed_by_project,
             )
             .order_by(ConversationCustomAgent.agent_order.asc())
         )
@@ -188,7 +202,11 @@ class CustomAgentRepository(RepositorySessionMixin):
     def replace_attachments(
         self, owner_id: UUID, conversation_id: UUID, custom_agent_ids: list[UUID]
     ) -> None:
-        """Replace the conversation's attachment set with the given ordered ids."""
+        """Replace the conversation's attachment set with the given ordered ids.
+
+        Inside a project only the project's agents may be attached, and only
+        those rows are replaced; rows hidden by the allowlist are left intact.
+        """
         with self.session_factory() as session:
             conversation = session.execute(
                 select(Conversation)
@@ -201,15 +219,21 @@ class CustomAgentRepository(RepositorySessionMixin):
             ).scalar_one_or_none()
             if conversation is None:
                 raise CustomAgentForbiddenError(detail="Conversation is unavailable")
+            replaced_rows = [
+                ConversationCustomAgent.conversation_id == conversation_id,
+                ConversationCustomAgent.owner_id == owner_id,
+            ]
+            if conversation.project_id is not None:
+                allowed_ids = self._project_agent_ids(session, conversation.project_id)
+                if not set(custom_agent_ids) <= allowed_ids:
+                    raise CustomAgentForbiddenError(
+                        detail="Only the project's custom agents can be attached here"
+                    )
+                replaced_rows.append(ConversationCustomAgent.custom_agent_id.in_(allowed_ids))
             live_ids = self.lock_owned_agent_ids(session, owner_id, custom_agent_ids)
             if set(live_ids) != set(custom_agent_ids):
                 raise CustomAgentForbiddenError(detail="One or more custom agents are unavailable")
-            session.execute(
-                delete(ConversationCustomAgent).where(
-                    ConversationCustomAgent.conversation_id == conversation_id,
-                    ConversationCustomAgent.owner_id == owner_id,
-                )
-            )
+            session.execute(delete(ConversationCustomAgent).where(*replaced_rows))
             for order, custom_agent_id in enumerate(custom_agent_ids):
                 session.add(
                     ConversationCustomAgent(
@@ -229,6 +253,16 @@ class CustomAgentRepository(RepositorySessionMixin):
             return list(session.execute(stmt).scalars().all())
 
     # --------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _project_agent_ids(session: Session, project_id: UUID) -> set[UUID]:
+        return set(
+            session.execute(
+                select(ProjectCustomAgent.custom_agent_id).where(
+                    ProjectCustomAgent.project_id == project_id
+                )
+            ).scalars()
+        )
 
     @staticmethod
     def _get_owned(session: Session, owner_id: UUID, custom_agent_id: UUID) -> CustomAgent | None:

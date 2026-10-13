@@ -340,9 +340,16 @@ Not dual-registered under `/ai`: only `custom_agents` does that, and
 `GET /custom-agents`. Projects are few per user; pagination can be added later
 without breaking clients that ignore it.
 
-`PUT /projects/{id}/custom-agents` changes only the project's default set. It
-does **not** reach into conversations already in the project, consistent with
-seeding happening at create and attach time and nowhere else.
+`PUT /projects/{id}/custom-agents` changes the project's agent set. It does
+**not** rewrite conversations already in the project; seeding happens at create
+and attach time and nowhere else.
+
+**Amended 2026-10-13:** the set is also an allowlist. A member conversation's
+effective agents are its attachments that the project also lists, applied when
+attachments are read (listing, PUT, and the runtime roster). An empty set allows
+no agents. `PUT /conversations/{id}/custom-agents` refuses (403) any agent outside
+the set and replaces only in-set rows, so out-of-set rows survive and reappear if
+the conversation leaves the project.
 
 There is no `GET /projects/{id}/conversations`. The existing `GET /conversations`
 (`app/api/conversations.py:76`) gains an optional `projectId` query parameter

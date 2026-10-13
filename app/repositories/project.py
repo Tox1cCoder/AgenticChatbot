@@ -297,10 +297,11 @@ class ProjectRepository(RepositorySessionMixin):
     def replace_agents(
         self, owner_id: UUID, project_id: UUID, custom_agent_ids: list[UUID]
     ) -> None:
-        """Replace the project's default set with the given ordered ids.
+        """Replace the project's allowed set with the given ordered ids.
 
-        This does not reach into conversations already in the project; seeding
-        happens at create and attach time only.
+        Conversation rows are not rewritten: seeding happens at create and attach
+        time only, and the allowlist is applied when attachments are read
+        (``CustomAgentRepository._list_attachments_in_session``).
         """
         with self.session_factory() as session:
             self._lock_owned_project(session, owner_id, project_id)
