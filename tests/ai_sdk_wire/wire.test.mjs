@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DefaultChatTransport } from 'ai';
+import { DefaultChatTransport, readUIMessageStream } from 'ai';
 
 async function parseWire(wire) {
   const bytes = new TextEncoder().encode(wire);
@@ -19,6 +19,22 @@ async function parseWire(wire) {
     chunks.push(chunk);
   }
   return chunks;
+}
+
+// What a vanilla SDK consumer ends with: text parts only, custom data ignored.
+async function vanillaText(chunks) {
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+  let last;
+  for await (const message of readUIMessageStream({ stream })) last = message;
+  return (last?.parts ?? [])
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join('');
 }
 
 function loadManifest() {
@@ -54,6 +70,10 @@ for (const entry of entries) {
     const seen = new Set(chunks.map((chunk) => chunk.type));
     for (const required of entry.requires ?? []) {
       assert.ok(seen.has(required), `${required} did not survive SDK parsing`);
+    }
+    if (entry.sdkText !== undefined) {
+      // The SDK never applies data-answer-reconcile itself; the client must.
+      assert.equal(await vanillaText(chunks), entry.sdkText);
     }
   });
 }

@@ -132,11 +132,16 @@ class AISDKV6StreamState:
         self.text_started = False
         self.reasoning_started = False
         self.any_text_delta = False
+        # Legacy preview overlay (client without streamWebAnswerV1).
         self.preview_active = False
         self.stream_web_answer_v1 = bool(stream_web_answer_v1)
         self.web_answer_streamed = False
         self.web_repair_mode = False
+        # Repair overlay shown over the streamed draft (opted-in clients).
+        self.repair_preview_active = False
         self.web_reconciled = False
+        # Set once provisional text has been retired; later previews are stale.
+        self.answer_settled = False
         self.tool_seq = 0
         self.pending_tool_call_ids: list[str] = []
         self.inline_rich_response_v1 = bool(inline_rich_response_v1)
@@ -181,29 +186,76 @@ class AISDKV6StreamAdapter:
         except asyncio.CancelledError:
             return
         except Exception as exc:  # pragma: no cover - defensive
+            for frame in self._settle_answer(None):
+                yield frame
             for frame in _ai_sdk_error_frames_from_exception(exc):
                 yield frame
             async for chunk in self._terminate():
                 yield chunk
 
+    # -- provisional answer text ------------------------------------------
+
+    def _preview_clear_frames(self) -> list[str]:
+        state = self._state
+        if not (state.preview_active or state.repair_preview_active):
+            return []
+        state.preview_active = False
+        state.repair_preview_active = False
+        return [
+            _sse({"type": "data-answer-preview", "data": {"operation": "clear"}, "transient": True})
+        ]
+
+    def _settle_answer(self, content: str | None) -> list[str]:
+        """Retire provisional answer text: the one path every terminal takes.
+
+        Clears any preview overlay, then -- once per stream, and only when a
+        draft went out as ``text-delta`` -- replaces the draft with ``content``,
+        the persisted answer. ``None`` means nothing authoritative was supplied:
+        the draft is discarded (``""``) and the client recovers the saved text
+        from history or generation status. Idempotent.
+        """
+        state = self._state
+        state.answer_settled = True
+        frames = self._preview_clear_frames()
+        if state.web_answer_streamed and not state.web_reconciled:
+            state.web_reconciled = True
+            frames.append(
+                _sse(
+                    {
+                        "type": "data-answer-reconcile",
+                        "data": {"messageId": state.message_id, "content": content or ""},
+                        "transient": True,
+                    }
+                )
+            )
+        return frames
+
+    def _authoritative_content(self, message: dict[str, Any]) -> str:
+        """A persisted message's text exactly as history will project it."""
+        projected = project_ai_sdk_message_for_capability(
+            message,
+            inline_rich_response_v1=self._state.inline_rich_response_v1,
+        )
+        return str(projected.get("content") or "")
+
+    async def _saved_partial(self, message: dict[str, Any]) -> AsyncGenerator[str, None]:
+        """A paused turn's persisted partial replaces whatever was provisional."""
+        state = self._state
+        content = self._authoritative_content(message)
+        for frame in self._settle_answer(content):
+            yield frame
+        if not state.any_text_delta and content.strip():
+            # Web previews are not text: a client without the draft capability
+            # would otherwise see the validated partial only after a refetch.
+            state.any_text_delta = True
+            yield _sse({"type": "text-delta", "id": state.text_id, "delta": content})
+
     # -- terminal chunks ---------------------------------------------------
 
     async def _terminate(self) -> AsyncGenerator[str, None]:
         state = self._state
-        if state.web_answer_streamed and not state.web_reconciled:
-            state.web_reconciled = True
-            yield _sse(
-                {
-                    "type": "data-answer-reconcile",
-                    "data": {"messageId": state.message_id, "content": ""},
-                    "transient": True,
-                }
-            )
-        if state.preview_active:
-            state.preview_active = False
-            yield _sse(
-                {"type": "data-answer-preview", "data": {"operation": "clear"}, "transient": True}
-            )
+        for frame in self._settle_answer(None):
+            yield frame
         if state.text_started:
             yield _sse({"type": "text-end", "id": state.text_id})
         if state.reasoning_started:
@@ -261,11 +313,15 @@ class AISDKV6StreamAdapter:
         etype = event.type
         data = event.data or {}
 
+        if etype == "answer_preview" and state.answer_settled:
+            return  # a preview after the authoritative answer is stale
+
         if state.stream_web_answer_v1 and etype == "answer_preview":
             operation = data.get("operation")
             if operation == "clear":
                 if state.web_answer_streamed:
                     state.web_repair_mode = True
+                    state.repair_preview_active = False
                     yield _sse(
                         {
                             "type": "data-answer-preview",
@@ -280,6 +336,7 @@ class AISDKV6StreamAdapter:
             if operation == "replace" and state.web_answer_streamed:
                 state.web_repair_mode = True
             if state.web_repair_mode:
+                state.repair_preview_active = True
                 yield _sse(
                     {
                         "type": "data-answer-preview",
@@ -298,25 +355,17 @@ class AISDKV6StreamAdapter:
             # Completion carries it as a replacement, so this is not appended.
             return
 
-        if (
-            state.web_answer_streamed
-            and not state.web_reconciled
-            and etype in {"error", "interrupt"}
-        ):
-            state.web_reconciled = True
-            yield _sse(
-                {
-                    "type": "data-answer-reconcile",
-                    "data": {"messageId": state.message_id, "content": ""},
-                    "transient": True,
-                }
-            )
+        if state.preview_active and etype == "message_delta":
+            # Authoritative text has started; the provisional overlay goes.
+            for frame in self._preview_clear_frames():
+                yield frame
 
-        if state.preview_active and etype in {"message_delta", "complete", "error", "interrupt"}:
-            state.preview_active = False
-            yield _sse(
-                {"type": "data-answer-preview", "data": {"operation": "clear"}, "transient": True}
-            )
+        if etype == "message_end":
+            message = data.get("message")
+            if isinstance(message, dict):
+                async for chunk in self._saved_partial(message):
+                    yield chunk
+            return
 
         if etype == "answer_preview":
             operation = data.get("operation")
@@ -650,6 +699,13 @@ class AISDKV6StreamAdapter:
     async def _interrupt(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
         state = self._state
         message = data.get("message")
+        saved: str | None = None
+        if isinstance(message, dict):
+            saved = self._authoritative_content(message)
+        elif isinstance(message, str):
+            saved = message.strip()
+        for frame in self._settle_answer(saved):
+            yield frame
         if isinstance(message, str) and message.strip():
             yield _sse({"type": "text-delta", "id": state.text_id, "delta": message.strip()})
         projected_message = message
@@ -676,6 +732,8 @@ class AISDKV6StreamAdapter:
 
     async def _error(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
         state = self._state
+        for frame in self._settle_answer(None):
+            yield frame
         message = data.get("message")
         if isinstance(message, dict):
             message = project_ai_sdk_message_event(message, include_content=True)
@@ -719,18 +777,10 @@ class AISDKV6StreamAdapter:
                 is_v1=is_v1,
             )
 
-        if state.web_answer_streamed and isinstance(message, dict):
-            state.web_reconciled = True
-            yield _sse(
-                {
-                    "type": "data-answer-reconcile",
-                    "data": {
-                        "messageId": state.message_id,
-                        "content": str(message.get("content") or ""),
-                    },
-                    "transient": True,
-                }
-            )
+        # ``message`` is already capability-projected, as history projects it.
+        saved = str(message.get("content") or "") if isinstance(message, dict) else None
+        for frame in self._settle_answer(saved):
+            yield frame
 
         if not state.any_text_delta:
             content = message.get("content") or "" if isinstance(message, dict) else ""

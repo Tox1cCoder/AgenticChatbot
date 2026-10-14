@@ -59,8 +59,14 @@ def record_fixture(
     *,
     expect: str = "accept",
     requires: list[str] | None = None,
+    sdk_text: str | None = None,
 ) -> None:
-    """Write one complete SSE stream and its expected SDK outcome."""
+    """Write one complete SSE stream and its expected SDK outcome.
+
+    ``sdk_text`` is the text a vanilla ``readUIMessageStream`` consumer ends
+    with -- the SDK appends text deltas and never applies the custom
+    reconcile part, so for a web draft this is the draft, not the answer.
+    """
     directory = _fixture_dir()
     if directory is None:
         return
@@ -69,7 +75,10 @@ def record_fixture(
     manifest_path = directory / _MANIFEST
     entries = json.loads(manifest_path.read_text(encoding="utf-8"))
     entries = [entry for entry in entries if entry["file"] != filename]
-    entries.append({"file": filename, "expect": expect, "requires": requires or []})
+    entry: dict[str, Any] = {"file": filename, "expect": expect, "requires": requires or []}
+    if sdk_text is not None:
+        entry["sdkText"] = sdk_text
+    entries.append(entry)
     manifest_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
 
 
@@ -416,6 +425,48 @@ async def test_proxy_unexpected_upstream_failure_is_sanitized():
     assert payloads(body) == [
         {"type": "error", "errorText": "The request could not be completed."},
     ]
+
+
+async def _web_repair_source():
+    yield make_event("answer_preview", sequence=1, data={"operation": "replace", "text": "Draft"})
+    yield make_event("answer_preview", sequence=2, data={"operation": "append", "text": " one"})
+    yield make_event(
+        "answer_preview", sequence=3, data={"operation": "replace", "text": "Repaired answer"}
+    )
+    yield make_event("message_delta", sequence=4, data={"text": "Final cited answer"})
+    yield make_event(
+        "complete",
+        sequence=5,
+        data={"message": {"id": "m-1", "content": "Final cited answer"}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_web_repair_fixture_keeps_the_draft_for_a_vanilla_sdk_consumer(monkeypatch):
+    """Replacement is application behavior: the SDK alone keeps the draft."""
+    direct = await direct_wire(_web_repair_source, state=_state(stream_web_answer_v1=True))
+    proxied = await proxy_wire(direct, monkeypatch)
+    requires = ["data-answer-preview", "data-answer-reconcile"]
+    record_fixture("web-repair-direct", direct, requires=requires, sdk_text="Draft one")
+    record_fixture("web-repair-proxied", proxied, requires=requires, sdk_text="Draft one")
+
+    assert_standard_frames_are_strict(direct)
+    assert payloads(proxied) == payloads(direct)
+    reconcile = [p for p in payloads(direct) if p["type"] == "data-answer-reconcile"]
+    assert [p["data"]["content"] for p in reconcile] == ["Final cited answer"]
+
+
+@pytest.mark.asyncio
+async def test_web_failure_fixture_discards_the_draft_before_the_error():
+    async def source():
+        yield make_event("answer_preview", sequence=1, data={"operation": "replace", "text": "D"})
+        raise RuntimeError("provider failure")
+
+    direct = await direct_wire(source, state=_state(stream_web_answer_v1=True))
+    record_fixture("web-failure-direct", direct, requires=["data-answer-reconcile"])
+
+    order = types(direct)
+    assert order.index("data-answer-reconcile") < order.index("error")
 
 
 def test_legacy_invalid_frames_are_recorded_as_rejected_fixtures():
