@@ -484,9 +484,10 @@ class SkillExecutionEngine:
         stderr_task = asyncio.create_task(read_stream(process.stderr))
         wait_task = asyncio.create_task(process.wait())
         tasks = (stdout_task, stderr_task, wait_task)
+        gathered = asyncio.gather(*tasks)
         try:
             stdout_bytes, stderr_bytes, returncode = await asyncio.wait_for(
-                asyncio.gather(*tasks),
+                gathered,
                 timeout=timeout,
             )
         except TimeoutError as exc:
@@ -507,6 +508,10 @@ class SkillExecutionEngine:
         finally:
             if windows_job is not None:
                 windows_job.close()
+            # Python 3.11's wait_for cancels the gather on caller cancellation
+            # but never reads it, so its stored CancelledError is logged at GC.
+            if gathered.done() and not gathered.cancelled():
+                gathered.exception()
 
         stdout = redact_secret_values(
             stdout_bytes.decode("utf-8", errors="replace"), secret_values

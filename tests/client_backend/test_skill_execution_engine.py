@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import os
 import sys
@@ -355,6 +356,34 @@ async def test_timeout_includes_process_wait_after_child_closes_output(tmp_path)
     assert envelope["ok"] is False
     assert envelope["error"]["code"] == EXECUTION_TIMEOUT
     assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_command_leaves_no_unretrieved_future_exception(tmp_path):
+    skill = _skill(tmp_path, "import time\ntime.sleep(5)\n")
+    loop = asyncio.get_running_loop()
+    reported: list[dict] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+        task = asyncio.create_task(
+            _engine(skill).execute(
+                "skill::demo-skill::run_skill_command",
+                {"argv": ["demo-cli"]},
+                _context(timeout_seconds=10),
+            )
+        )
+        await asyncio.sleep(0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        del task
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert [context["message"] for context in reported] == []
 
 
 @pytest.mark.asyncio
