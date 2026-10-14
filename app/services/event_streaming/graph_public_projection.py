@@ -17,12 +17,13 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
 from ...ai.utils import coerce_response_text, make_json_safe, normalize_tool_call
 from ...core.rich_response import RichMarkerStreamFilter
 from ..rag_grounding import CitationStreamFilter
 from .events import SubagentRef, V3StreamEvent, make_event
+from .text_chunks import ChunkMode, StreamKey, TextChunkAccumulator
 
 # Planning nodes whose state carries user-visible progress. ``planning_package``
 # is where a Planning turn's answer is assembled, so it is what completion is
@@ -58,11 +59,17 @@ class StreamProjectionContext:
     emitted_initial_selection: bool = False
     suppress_tokens: bool = False
     internal_content_only: bool = True
-    accumulated_content: str = ""
+    # Text chunk semantics are explicit (see text_chunks.py): canonical
+    # ``message_delta`` is incremental; only a whole tuple-path ``AIMessage`` is
+    # a snapshot. State is per model run, so a repair never dedupes against
+    # the draft it replaces.
+    text_chunks: TextChunkAccumulator = field(default_factory=TextChunkAccumulator)
+    # Stands in for run identity when an upstream event carries none; advanced
+    # at each model boundary (``message_start`` / ``message_end``).
+    local_text_run: int = 0
     accumulated_thinking: str = ""
     last_reasoning_run_id: str | None = None
     reasoning_break_pending: bool = False
-    subagent_content: dict[tuple[str, str], str] = field(default_factory=dict)
     last_state_values: dict[str, Any] | None = None
     current_tool_calls: dict[Any, dict[str, Any]] = field(default_factory=dict)
     emitted_tool_call_ids: set[str] = field(default_factory=set)
@@ -169,37 +176,24 @@ def _is_internal_node_metadata(metadata: Any) -> bool:
     return _is_internal_node(_node_from_metadata(metadata), metadata=metadata)
 
 
-def _consume_stream_text_chunk(accumulated_content: str, text_chunk: Any) -> tuple[str, str | None]:
-    """
-    Return (new_accumulated_content, delta_to_emit) for a streaming text chunk.
+def _run_text_key(run_id: Any, ctx: StreamProjectionContext) -> StreamKey:
+    if run_id:
+        return ("run", str(run_id))
+    return ("local", str(ctx.local_text_run))
 
-    Handles both:
-    - Cumulative chunks (Gemini): Each chunk contains all text accumulated so far
-    - Incremental chunks (OpenAI): Each chunk contains only new text
-    """
-    if not text_chunk:
-        return accumulated_content, None
 
-    chunk_text = coerce_response_text(text_chunk)
-    if not chunk_text:
-        return accumulated_content, None
+def _message_text_key(message: Any, ctx: StreamProjectionContext) -> StreamKey:
+    message_id = getattr(message, "id", None)
+    if message_id:
+        return ("message", str(message_id))
+    return ("local", str(ctx.local_text_run))
 
-    if accumulated_content:
-        # Exact repeat of what we've already accumulated - skip it
-        if chunk_text == accumulated_content:
-            return accumulated_content, None
 
-        # Cumulative chunk: new chunk starts with what we already have (Gemini)
-        if chunk_text.startswith(accumulated_content):
-            delta = chunk_text[len(accumulated_content) :]
-            return chunk_text, delta or None
-
-        # Duplicate tail chunk - skip it
-        if accumulated_content.endswith(chunk_text):
-            return accumulated_content, None
-
-    # Incremental chunk (OpenAI) or first chunk - append and emit
-    return accumulated_content + chunk_text, chunk_text
+def _message_text_mode(message: Any) -> ChunkMode:
+    """A whole ``AIMessage`` restates its text; a chunk carries only new text."""
+    if isinstance(message, AIMessage) and not isinstance(message, AIMessageChunk):
+        return "snapshot"
+    return "delta"
 
 
 def _thinking_from_non_standard_block(block: dict[str, Any]) -> str:
@@ -255,20 +249,22 @@ class GraphPublicStreamProjector:
 
         if etype == "message_delta":
             ctx.internal_content_only = False
-            if (
-                ctx.requires_web
-                and ctx.preview_started
-                and event.run_id is not None
-                and event.run_id != ctx.preview_run_id
-            ):
-                # A grounding repair is a new model run. Deduplicate its
-                # chunks within that run, not against the preceding draft.
-                ctx.accumulated_content = ""
-            ctx.accumulated_content, delta = _consume_stream_text_chunk(
-                ctx.accumulated_content, data.get("text", "")
+            delta = ctx.text_chunks.consume(
+                coerce_response_text(data.get("text", "")),
+                mode="delta",
+                stream_key=_run_text_key(event.run_id, ctx),
             )
             if delta and not ctx.suppress_tokens:
                 yield from _publish_answer_text(delta, ctx, run_id=event.run_id)
+            return
+
+        if etype in {"message_start", "message_end"}:
+            # A model boundary: the finished run's text state is no longer
+            # needed, and an id-less next run must not share it.
+            if etype == "message_end":
+                ctx.text_chunks.discard(_run_text_key(event.run_id, ctx))
+            if not event.run_id:
+                ctx.local_text_run += 1
             return
 
         if etype == "reasoning_delta":
@@ -470,15 +466,24 @@ class GraphPublicStreamProjector:
 
         ctx.internal_content_only = False
 
+        # A whole message restates its text, so it is consumed once as a
+        # snapshot; a chunk's text blocks are each new text.
+        whole_message = _message_text_mode(message_chunk) == "snapshot"
+        if whole_message:
+            yield from self._publish_legacy_text(
+                message_chunk,
+                coerce_response_text(getattr(message_chunk, "content", "")),
+                ctx,
+            )
+
         if hasattr(message_chunk, "content_blocks") and message_chunk.content_blocks:
             for block in message_chunk.content_blocks:
                 block_type = block.get("type")
                 if block_type == "text":
-                    ctx.accumulated_content, delta = _consume_stream_text_chunk(
-                        ctx.accumulated_content, block.get("text", "")
-                    )
-                    if delta and not ctx.suppress_tokens:
-                        yield from _publish_answer_text(delta, ctx)
+                    if not whole_message:
+                        yield from self._publish_legacy_text(
+                            message_chunk, block.get("text", ""), ctx
+                        )
                 elif block_type == "thinking":
                     thinking_content = block.get("thinking", "") or block.get("text", "")
                     if thinking_content:
@@ -540,30 +545,22 @@ class GraphPublicStreamProjector:
                             yield make_event(
                                 "reasoning_delta", sequence=0, data={"text": reasoning_content}
                             )
-                    elif part_type == "text":
-                        ctx.accumulated_content, delta = _consume_stream_text_chunk(
-                            ctx.accumulated_content, part.get("text", "")
+                    elif part_type == "text" and not whole_message:
+                        yield from self._publish_legacy_text(
+                            message_chunk, part.get("text", ""), ctx
                         )
-                        if delta and not ctx.suppress_tokens:
-                            yield from _publish_answer_text(delta, ctx)
-                elif isinstance(part, str) and part:
-                    ctx.accumulated_content, delta = _consume_stream_text_chunk(
-                        ctx.accumulated_content, part
-                    )
-                    if delta and not ctx.suppress_tokens:
-                        yield from _publish_answer_text(delta, ctx)
+                elif isinstance(part, str) and part and not whole_message:
+                    yield from self._publish_legacy_text(message_chunk, part, ctx)
 
         elif (
             hasattr(message_chunk, "content")
             and message_chunk.content
             and isinstance(message_chunk.content, str)
+            and not whole_message
         ):
-            content = coerce_response_text(message_chunk.content)
-            ctx.accumulated_content, delta = _consume_stream_text_chunk(
-                ctx.accumulated_content, content
+            yield from self._publish_legacy_text(
+                message_chunk, coerce_response_text(message_chunk.content), ctx
             )
-            if delta and not ctx.suppress_tokens:
-                yield from _publish_answer_text(delta, ctx)
 
         if hasattr(message_chunk, "chunk_position") and message_chunk.chunk_position == "last":
             for tool_call in ctx.current_tool_calls.values():
@@ -583,57 +580,59 @@ class GraphPublicStreamProjector:
             ctx.current_tool_calls = {}
 
     @staticmethod
+    def _publish_legacy_text(message: Any, text: str, ctx: StreamProjectionContext):
+        delta = ctx.text_chunks.consume(
+            text,
+            mode=_message_text_mode(message),
+            stream_key=_message_text_key(message, ctx),
+        )
+        if delta and not ctx.suppress_tokens:
+            # The message id is the model run's identity on the tuple path; it
+            # is what makes a web repair a ``replace`` rather than an append.
+            yield from _publish_answer_text(delta, ctx, run_id=getattr(message, "id", None))
+
+    @staticmethod
     def _map_legacy_subagent_chunk(
         message_chunk: Any,
         subagent: SubagentRef,
         ctx: StreamProjectionContext,
     ):
-        blocks = getattr(message_chunk, "content_blocks", None) or []
-        emitted = False
-        for block in blocks:
+        pieces: list[tuple[str, str]] = []
+        for block in getattr(message_chunk, "content_blocks", None) or []:
             if not isinstance(block, dict):
                 continue
             block_type = block.get("type")
             if block_type == "text":
-                text, channel = block.get("text", ""), "text"
+                pieces.append(("text", block.get("text", "")))
             elif block_type in {"thinking", "reasoning"}:
-                text = block.get(block_type, "") or block.get("text", "")
-                channel = "reasoning"
-            else:
-                continue
-            if text:
-                emitted = True
-                key = (subagent.id, channel)
-                accumulated, delta = _consume_stream_text_chunk(
-                    ctx.subagent_content.get(key, ""), text
-                )
-                ctx.subagent_content[key] = accumulated
-                if not delta:
-                    continue
+                pieces.append(("reasoning", block.get(block_type, "") or block.get("text", "")))
+        pieces = [(channel, text) for channel, text in pieces if text]
+        if not pieces:
+            text = coerce_response_text(getattr(message_chunk, "content", ""))
+            pieces = [("text", text)] if text else []
+
+        mode = _message_text_mode(message_chunk)
+        if mode == "snapshot":
+            # A whole message restates each channel once, in full.
+            merged: dict[str, str] = {}
+            for channel, text in pieces:
+                merged[channel] = merged.get(channel, "") + text
+            pieces = list(merged.items())
+
+        message_key = _message_text_key(message_chunk, ctx)
+        for channel, text in pieces:
+            delta = ctx.text_chunks.consume(
+                text,
+                mode=mode,
+                stream_key=("subagent", subagent.id, channel, *message_key),
+            )
+            if delta:
                 yield make_event(
                     "subagent_message_delta",
                     sequence=0,
                     subagent=subagent,
                     data={"text": delta, "channel": channel},
                 )
-        if emitted:
-            return
-
-        text = coerce_response_text(getattr(message_chunk, "content", ""))
-        if text:
-            key = (subagent.id, "text")
-            accumulated, delta = _consume_stream_text_chunk(
-                ctx.subagent_content.get(key, ""), text
-            )
-            ctx.subagent_content[key] = accumulated
-            if not delta:
-                return
-            yield make_event(
-                "subagent_message_delta",
-                sequence=0,
-                subagent=subagent,
-                data={"text": delta, "channel": "text"},
-            )
 
     def _map_legacy_update_node(
         self, node_name: Any, node_state: Any, ctx: StreamProjectionContext

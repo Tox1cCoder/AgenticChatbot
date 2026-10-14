@@ -24,6 +24,8 @@ StreamEventType = Literal[
     # transition moves a turn's status.
     "generation_status",
     "message_start",
+    # Always incremental: ``data.text`` is new answer text, never a resent
+    # snapshot. Snapshots are converted at ingestion (text_chunks.py).
     "message_delta",
     # Transient draft text for web turns. The validated message_delta remains authoritative.
     "answer_preview",

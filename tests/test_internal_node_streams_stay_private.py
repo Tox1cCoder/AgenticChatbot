@@ -377,7 +377,7 @@ def test_tuple_fallback_keeps_planning_worker_text_attributed(suppress_internal)
     assert events[0].data == {"text": "worker result", "channel": "text"}
 
 
-def test_tuple_fallback_normalizes_cumulative_planning_worker_chunks():
+def _worker_deltas(chunks) -> list[str]:
     from app.services.event_streaming.events import make_event
 
     metadata = {
@@ -394,17 +394,32 @@ def test_tuple_fallback_normalizes_cumulative_planning_worker_chunks():
     )
     context = StreamProjectionContext()
     deltas = []
-
-    for sequence, text in enumerate(("A", "AB", "ABC"), start=1):
-        payload = _legacy_chunk_event(text, node="model")
-        payload["metadata"] = metadata
+    for sequence, chunk in enumerate(chunks, start=1):
+        payload = {"kind": "messages_tuple", "chunk": chunk, "metadata": metadata}
         for event in projector.map_event(
             make_event("state_snapshot", sequence=sequence, data=payload), context
         ):
             if event.type == "subagent_message_delta":
                 deltas.append(event.data["text"])
+    return deltas
 
-    assert deltas == ["A", "B", "C"]
+
+def test_tuple_fallback_whole_worker_messages_are_explicit_snapshots():
+    """Only a whole ``AIMessage`` restates text; its new suffix is published."""
+    from langchain_core.messages import AIMessage
+
+    chunks = [AIMessage(content=text, id="worker-msg") for text in ("A", "AB", "ABC")]
+
+    assert _worker_deltas(chunks) == ["A", "B", "C"]
+
+
+def test_tuple_fallback_worker_chunks_are_incremental():
+    """A chunk is new text even when it repeats or extends earlier text."""
+    from langchain_core.messages import AIMessageChunk
+
+    chunks = [AIMessageChunk(content=text, id="worker-msg") for text in ("A", "AB", "ABC")]
+
+    assert _worker_deltas(chunks) == ["A", "AB", "ABC"]
 
 
 def test_tuple_fallback_does_not_emit_an_empty_reasoning_delta():

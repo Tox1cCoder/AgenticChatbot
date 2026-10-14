@@ -407,11 +407,10 @@ def _answer_chunks(projector, ctx, *chunks: str):
     from app.services.event_streaming.graph_public_projection import flush_answer_text
 
     emitted = []
-    running = ""
+    # Canonical message_delta is incremental: each event carries only new text.
     for index, chunk in enumerate(chunks):
-        running += chunk
         for event in projector.map_event(
-            make_event("message_delta", sequence=index + 2, data={"text": running}), ctx
+            make_event("message_delta", sequence=index + 2, data={"text": chunk}), ctx
         ):
             if event.type == "message_delta":
                 emitted.append(event.data["text"])

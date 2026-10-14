@@ -37,31 +37,113 @@ def _make_projector(
     )
 
 
-def test_message_delta_emits_cumulative_delta_only():
-    """Gemini-style deltas resend the full text so far; only the new suffix
-    should surface as a ``message_delta`` event, mirroring
-    ``_consume_stream_text_chunk``."""
+def _published_text(projector, ctx, events) -> str:
+    return "".join(
+        public.data["text"]
+        for event in events
+        for public in projector.map_event(event, ctx)
+        if public.type == "message_delta"
+    )
+
+
+def test_canonical_message_deltas_are_incremental_and_never_deduplicated():
+    """Canonical ``message_delta`` always means incremental text: the installed
+    langchain-core bridge forwards each chunk's own slice. Repeated words are
+    real text, not resent snapshots."""
     projector = _make_projector()
     ctx = StreamProjectionContext()
+    events = [
+        make_event("message_delta", sequence=i, run_id="run-1", data={"text": text})
+        for i, text in enumerate(["ha", "ha", "!"], start=1)
+    ]
 
-    first = list(
-        projector.map_event(make_event("message_delta", sequence=1, data={"text": "Hello"}), ctx)
-    )
-    second = list(
-        projector.map_event(
-            make_event("message_delta", sequence=2, data={"text": "Hello, world"}), ctx
-        )
-    )
-    repeat = list(
-        projector.map_event(
-            make_event("message_delta", sequence=3, data={"text": "Hello, world"}), ctx
-        )
+    assert _published_text(projector, ctx, events) == "haha!"
+
+
+def test_repeated_text_without_run_identity_is_preserved():
+    projector = _make_projector()
+    ctx = StreamProjectionContext()
+    events = [
+        make_event("message_delta", sequence=i, data={"text": text})
+        for i, text in enumerate(["Hello", "Hello, world", "Hello, world"], start=1)
+    ]
+
+    assert _published_text(projector, ctx, events) == "HelloHello, worldHello, world"
+
+
+def _tuple_chunk(chunk, *, node: str = "chat_agent"):
+    return make_event(
+        "state_snapshot",
+        sequence=0,
+        data={"kind": "messages_tuple", "chunk": chunk, "metadata": {"langgraph_node": node}},
     )
 
-    assert [(e.type, e.data) for e in first] == [("message_delta", {"text": "Hello"})]
-    assert [(e.type, e.data) for e in second] == [("message_delta", {"text": ", world"})]
-    assert repeat == []
-    assert ctx.accumulated_content == "Hello, world"
+
+def test_legacy_tuple_chunks_preserve_repeated_text():
+    from langchain_core.messages import AIMessageChunk
+
+    projector = _make_projector()
+    ctx = StreamProjectionContext()
+    events = [
+        _tuple_chunk(AIMessageChunk(content=text, id="lc_run--a"))
+        for text in ["    ", "    ", "x", "x"]
+    ]
+
+    assert _published_text(projector, ctx, events) == "        xx"
+
+
+def test_legacy_whole_message_is_an_explicit_snapshot_of_its_streamed_chunks():
+    """A node-returned ``AIMessage`` re-states a message by id; only text that
+    extends what that message already streamed is new."""
+    from langchain_core.messages import AIMessageChunk
+
+    projector = _make_projector()
+    ctx = StreamProjectionContext()
+    streamed = [
+        _tuple_chunk(AIMessageChunk(content=text, id="lc_run--a")) for text in ["ha", " ", "ha!"]
+    ]
+    replay = _tuple_chunk(AIMessage(content="ha ha!", id="lc_run--a"))
+    extension = _tuple_chunk(AIMessage(content="ha ha! Done.", id="lc_run--a"))
+    other = _tuple_chunk(AIMessage(content="Validated answer.", id="validated-1"))
+
+    assert _published_text(projector, ctx, streamed) == "ha ha!"
+    assert _published_text(projector, ctx, [replay]) == ""
+    assert _published_text(projector, ctx, [extension]) == " Done."
+    assert _published_text(projector, ctx, [other]) == "Validated answer."
+
+
+def test_legacy_subagent_chunks_preserve_repeated_text():
+    from langchain_core.messages import AIMessageChunk
+
+    projector = _make_projector()
+    ctx = StreamProjectionContext()
+    metadata = {
+        "langgraph_node": "model",
+        "purpose": "planning_subagent",
+        "subagent_dispatch_id": "d1",
+        "subagent_task_id": "t1",
+        "subagent_agent": "search_agent",
+    }
+    events = [
+        make_event(
+            "state_snapshot",
+            sequence=0,
+            data={
+                "kind": "messages_tuple",
+                "chunk": AIMessageChunk(content=text, id="lc_run--w"),
+                "metadata": metadata,
+            },
+        )
+        for text in ["no", "no", "!"]
+    ]
+
+    deltas = [
+        public.data["text"]
+        for event in events
+        for public in projector.map_event(event, ctx)
+        if public.type == "subagent_message_delta"
+    ]
+    assert "".join(deltas) == "nono!"
 
 
 def test_reasoning_from_separate_model_runs_has_paragraph_boundary():

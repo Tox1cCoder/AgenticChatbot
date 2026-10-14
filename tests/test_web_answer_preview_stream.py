@@ -58,6 +58,59 @@ def test_repair_with_same_prefix_replaces_the_whole_draft():
     ]
 
 
+def test_web_draft_keeps_repeated_tokens():
+    projector = _projector()
+    context = StreamProjectionContext()
+    raw = [
+        make_event("tool_execution_end", sequence=1, tool_name="web_search", data={"output": {}}),
+        *(
+            make_event("message_delta", sequence=i, run_id="draft", data={"text": text})
+            for i, text in enumerate(["ha", "ha", "!"], start=2)
+        ),
+    ]
+    public = [event for item in raw for event in projector.map_event(item, context)]
+    assert [event.data for event in public if event.type == "answer_preview"] == [
+        {"operation": "replace", "text": "ha"},
+        {"operation": "append", "text": "ha"},
+        {"operation": "append", "text": "!"},
+    ]
+
+
+def test_tuple_path_repair_run_replaces_the_draft():
+    """The tuple fallback carries run identity on the chunk id; a repair run
+    must replace the draft rather than append to it."""
+    from langchain_core.messages import AIMessageChunk
+
+    projector = _projector()
+    context = StreamProjectionContext()
+
+    def chunk(text, run):
+        return make_event(
+            "state_snapshot",
+            sequence=0,
+            data={
+                "kind": "messages_tuple",
+                "chunk": AIMessageChunk(content=text, id=run),
+                "metadata": {"langgraph_node": "search_agent"},
+            },
+        )
+
+    raw = [
+        make_event("tool_execution_end", sequence=1, tool_name="web_search", data={"output": {}}),
+        chunk("Hello", "lc_run--draft"),
+        chunk(" world", "lc_run--draft"),
+        chunk("Hello", "lc_run--repair"),
+        chunk(" there", "lc_run--repair"),
+    ]
+    public = [event for item in raw for event in projector.map_event(item, context)]
+    assert [event.data for event in public if event.type == "answer_preview"] == [
+        {"operation": "replace", "text": "Hello"},
+        {"operation": "append", "text": " world"},
+        {"operation": "replace", "text": "Hello"},
+        {"operation": "append", "text": " there"},
+    ]
+
+
 def test_web_answer_does_not_preview_before_search_completes():
     projector = _projector()
     context = StreamProjectionContext(requires_web=True)
