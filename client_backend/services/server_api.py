@@ -60,6 +60,23 @@ class ServerStreamIncompleteError(ServerAPIError):
         )
 
 
+class ServerStreamMalformedError(ServerAPIError):
+    """An AI SDK upstream sent a ``data:`` line that is not JSON.
+
+    Forwarding it would make the client's SDK parser fail opaquely; the proxy
+    ends the stream with an explicit ``stream_malformed`` error instead.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Upstream stream sent a malformed frame",
+            detail={
+                "code": "stream_malformed",
+                "message": "The response stream was malformed.",
+            },
+        )
+
+
 class ServerStreamEventTooLargeError(ServerAPIError):
     """A stream line or frame exceeded ``stream_max_event_bytes``.
 

@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
@@ -18,6 +19,7 @@ from app.core.config import settings
 from app.core.exceptions import CustomHTTPException
 from app.core.rich_response import select_transient_upsert_items
 from app.models.generation import GenerationStatus
+from app.observability.streaming import StreamingMetrics, streaming_metrics
 
 from .ai_sdk_projection import (
     attach_image_parts_to_message,
@@ -74,6 +76,14 @@ _PRIVATE_PAUSE_FIELDS = frozenset(
 
 
 _HEARTBEAT = object()
+
+#: Frames that put answer text in front of the reader. ``_sse`` writes compact
+#: JSON with ``type`` first, so a prefix identifies them without parsing.
+_ANSWER_FRAME_PREFIXES = (
+    'data: {"type":"text-delta"',
+    'data: {"type":"data-answer-preview","data":{"operation":"replace"',
+    'data: {"type":"data-answer-preview","data":{"operation":"append"',
+)
 
 
 async def _drain_one_at_a_time(
@@ -185,8 +195,11 @@ class AISDKV6StreamState:
         *,
         inline_rich_response_v1: bool = False,
         stream_web_answer_v1: bool = False,
+        operation: str = "unknown",
     ) -> None:
         self.message_id = message_id
+        # chat | resume | continue: a metrics label, never sent to the client.
+        self.operation = operation
         self.text_id = text_id
         self.reasoning_id = reasoning_id
         self.text_started = False
@@ -202,6 +215,8 @@ class AISDKV6StreamState:
         self.preview_active = False
         self.stream_web_answer_v1 = bool(stream_web_answer_v1)
         self.web_answer_streamed = False
+        # The draft as the SDK holds it, to tell whether reconciliation changed it.
+        self.streamed_draft = ""
         self.web_repair_mode = False
         # Repair overlay shown over the streamed draft (opted-in clients).
         self.repair_preview_active = False
@@ -220,9 +235,13 @@ class AISDKV6StreamAdapter:
         state: AISDKV6StreamState,
         *,
         heartbeat_interval_seconds: float | None = None,
+        metrics: StreamingMetrics | None = None,
     ) -> None:
         self._event_source_factory = event_source_factory
         self._state = state
+        self._metrics = metrics or streaming_metrics
+        self._started_at = 0.0
+        self._first_answer_recorded = False
         self._heartbeat_interval = (
             heartbeat_interval_seconds
             if heartbeat_interval_seconds is not None
@@ -232,6 +251,18 @@ class AISDKV6StreamAdapter:
     # -- public API --------------------------------------------------------
 
     async def iter_sse(self) -> AsyncGenerator[str, None]:
+        state = self._state
+        self._started_at = time.monotonic()
+        try:
+            async for frame in self._iter_frames():
+                yield frame
+        finally:
+            # Recorded once per response. Not closed means the client went away
+            # (or we were cancelled) before the stream finished.
+            outcome = (state.outcome or "unknown") if state.closed else "disconnect"
+            self._metrics.record_end(operation=state.operation, outcome=outcome)
+
+    async def _iter_frames(self) -> AsyncGenerator[str, None]:
         state = self._state
         try:
             yield _sse({"type": "start", "messageId": state.message_id})
@@ -243,9 +274,12 @@ class AISDKV6StreamAdapter:
             # generator -- and through them the source -- before it returns.
             async with contextlib.aclosing(self._events_with_heartbeats()) as events:
                 async for event in events:
+                    received_at = time.monotonic()
                     async with contextlib.aclosing(self._map_event(event)) as frames:
                         async for chunk in frames:
-                            yield self._within_ceiling(chunk)
+                            frame = self._within_ceiling(chunk)
+                            self._observe_first_answer(frame, received_at)
+                            yield frame
                     if event.type in {"complete", "interrupt", "error"}:
                         break
 
@@ -264,6 +298,16 @@ class AISDKV6StreamAdapter:
                 yield frame
         # CancelledError and GeneratorExit propagate: a disconnected client gets
         # no further frames, and a socket close is never a lifecycle outcome.
+
+    def _observe_first_answer(self, frame: str, received_at: float) -> None:
+        """Time the first frame that shows the reader answer text."""
+        if self._first_answer_recorded or not frame.startswith(_ANSWER_FRAME_PREFIXES):
+            return
+        self._first_answer_recorded = True
+        now = time.monotonic()
+        operation = self._state.operation
+        self._metrics.record_first_answer(now - self._started_at, operation=operation)
+        self._metrics.record_delta_to_wire(now - received_at, operation=operation)
 
     @staticmethod
     def _within_ceiling(frame: str) -> str:
@@ -302,6 +346,7 @@ class AISDKV6StreamAdapter:
         frames = self._preview_clear_frames()
         if state.web_answer_streamed and not state.web_reconciled:
             state.web_reconciled = True
+            self._metrics.record_reconcile(changed=(content or "") != state.streamed_draft)
             frames.append(
                 _sse(
                     {
@@ -460,6 +505,7 @@ class AISDKV6StreamAdapter:
             else:
                 state.web_answer_streamed = True
                 state.any_text_delta = True
+                state.streamed_draft += chunk
                 yield _sse({"type": "text-delta", "id": state.text_id, "delta": chunk})
             return
 

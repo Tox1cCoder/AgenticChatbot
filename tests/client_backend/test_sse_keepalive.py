@@ -476,6 +476,46 @@ async def test_ai_sdk_proxy_reports_upstream_eof_as_incomplete(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ai_sdk_proxy_reports_a_malformed_upstream_frame_explicitly(monkeypatch):
+    lines = [
+        *_PARTIAL_UPSTREAM,
+        "data: {not json",
+        "",
+        'data: {"type":"finish"}',
+        "",
+        "data: [DONE]",
+    ]
+    body = await _proxy_body(monkeypatch, lines)
+    frames = _frames(body)
+    wire = [frame for frame in frames if frame != "[DONE]"]
+
+    assert "{not json" not in body, "an invalid frame must never reach the SDK parser"
+    assert [frame["type"] for frame in wire][-5:] == [
+        "data-stream-error",
+        "error",
+        "text-end",
+        "finish-step",
+        "finish",
+    ]
+    assert wire[-5]["data"] == {"errorCode": "stream_malformed"}
+    assert wire[-1] == {"type": "finish", "finishReason": "error"}
+    assert frames.count("[DONE]") == 1
+
+
+@pytest.mark.asyncio
+async def test_internal_proxy_still_passes_a_non_json_frame_through(monkeypatch):
+    from client_backend.api import messages as messages_api
+
+    async def upstream():
+        yield {"raw": "not-json"}
+
+    response = messages_api._build_sse_response(upstream(), ai_sdk=False)
+    body = "".join([chunk async for chunk in response.body_iterator])
+
+    assert body == "data: not-json\n\n"
+
+
+@pytest.mark.asyncio
 async def test_ai_sdk_proxy_tolerates_a_missing_done_after_finish(monkeypatch):
     lines = [
         *_PARTIAL_UPSTREAM,

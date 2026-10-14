@@ -21,6 +21,7 @@ from client_backend.services.server_api import (
     ServerAPIError,
     ServerStreamEventTooLargeError,
     ServerStreamIncompleteError,
+    ServerStreamMalformedError,
     get_server_client,
 )
 from client_backend.services.upstream_auth import get_upstream_auth_service
@@ -219,6 +220,10 @@ def _build_sse_response(
                         # appearing as a data event to the client.
                         yield ": keepalive\n\n"
                         continue
+                    if ai_sdk and "raw" in event and len(event) == 1:
+                        # Not JSON: the SDK would reject it with no context.
+                        failure = ServerStreamMalformedError()
+                        break
                     frame = _sse_frame(event)
                     if _frame_exceeds_ceiling(frame):
                         failure = ServerStreamEventTooLargeError()

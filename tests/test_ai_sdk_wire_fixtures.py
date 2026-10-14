@@ -495,6 +495,86 @@ async def test_partial_eof_fixture_is_an_explicit_incomplete_error(monkeypatch):
         assert data_frames(wire).count("[DONE]") == 1
 
 
+_TRICKY_CHUNKS = ["ha", "ha", "!", " héllo ", "🙂", "🙂", "\n```py\n", "    ", "    ", "x = 1\n```"]
+
+
+@pytest.mark.asyncio
+async def test_ordinary_text_survives_projector_adapter_proxy_and_sdk(monkeypatch):
+    """Repeated tokens, Unicode and code indentation arrive exactly, in order."""
+    from app.services.event_streaming.graph_public_projection import (
+        GraphPublicStreamProjector,
+        StreamProjectionContext,
+    )
+
+    expected = "".join(_TRICKY_CHUNKS)
+    projector = GraphPublicStreamProjector(
+        tool_end_events_from_node_state=lambda **_kwargs: iter(()),
+        suppress_internal_stream_chunks=True,
+    )
+    ctx = StreamProjectionContext()
+    public = [
+        public_event
+        for index, text in enumerate(_TRICKY_CHUNKS)
+        for public_event in projector.map_event(
+            make_event("message_delta", sequence=index, run_id="run-1", data={"text": text}), ctx
+        )
+    ]
+
+    async def source():
+        for event in public:
+            yield event
+        final = {"id": "m-1", "content": expected}
+        yield make_event("complete", sequence=99, data={"message": final})
+
+    direct = await direct_wire(source)
+    proxied = await proxy_wire(direct, monkeypatch)
+    record_fixture("exact-text-direct", direct, sdk_text=expected)
+    record_fixture("exact-text-proxied", proxied, sdk_text=expected)
+
+    for wire in (direct, proxied):
+        streamed = "".join(p["delta"] for p in payloads(wire) if p["type"] == "text-delta")
+        assert streamed == expected
+
+
+@pytest.mark.asyncio
+async def test_first_text_reaches_the_client_before_the_source_completes():
+    """Progressive delivery, proven with a barrier instead of timing."""
+    release = asyncio.Event()
+
+    async def source():
+        yield make_event("message_delta", sequence=1, data={"text": "first"})
+        await release.wait()
+        yield make_event("message_delta", sequence=2, data={"text": " second"})
+        yield make_event("complete", sequence=3, data={"message": {"id": "m-1"}})
+
+    adapter = AISDKV6StreamAdapter(source, _state(), heartbeat_interval_seconds=30)
+    received_before_release: list[str] = []
+    async for frame in adapter.iter_sse():
+        if not release.is_set():
+            received_before_release.append(frame)
+            if '"text-delta"' in frame:
+                release.set()
+
+    assert any('"delta":"first"' in frame for frame in received_before_release)
+    assert not any('"delta":" second"' in frame for frame in received_before_release)
+
+
+@pytest.mark.asyncio
+async def test_malformed_upstream_frame_fixture_is_an_explicit_error(monkeypatch):
+    upstream = (
+        'data: {"type":"start","messageId":"m-1"}\n\n'
+        'data: {"type":"text-start","id":"t-1"}\n\n'
+        "data: {not json\n\n"
+        "data: [DONE]\n\n"
+    )
+    proxied = await proxy_wire(upstream, monkeypatch)
+    record_fixture("malformed-upstream-proxied", proxied, requires=["data-stream-error", "error"])
+
+    assert "{not json" not in proxied
+    codes = [p["data"]["errorCode"] for p in payloads(proxied) if p["type"] == "data-stream-error"]
+    assert codes == ["stream_malformed"]
+
+
 def test_legacy_invalid_frames_are_recorded_as_rejected_fixtures():
     """The SDK must keep rejecting the frames this backend used to send."""
     legacy = {
