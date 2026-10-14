@@ -302,11 +302,11 @@ async def test_ai_sdk_sidecar_stream_error_retains_upstream_identity():
 
     assert payloads == [
         {
-            "type": "error",
-            "errorText": "Interrupt was claimed by a concurrent request.",
-            "statusCode": 409,
-            "errorCode": "INTERRUPT_CONFLICT",
-        }
+            "type": "data-stream-error",
+            "data": {"statusCode": 409, "errorCode": "INTERRUPT_CONFLICT"},
+            "transient": True,
+        },
+        {"type": "error", "errorText": "Interrupt was claimed by a concurrent request."},
     ]
     assert body.endswith("data: [DONE]\n\n")
 

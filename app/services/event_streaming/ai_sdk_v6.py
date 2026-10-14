@@ -63,37 +63,55 @@ def _sse(data: dict[str, Any]) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
-def _ai_sdk_error_from_exception(exc: Exception) -> dict[str, Any]:
-    """Project a server exception to the AI SDK error event shape.
+def _ai_sdk_error_frames(
+    error_text: str,
+    *,
+    status_code: int | None = None,
+    error_code: str | None = None,
+) -> list[str]:
+    """Frame an error for the AI SDK: optional metadata, then the strict error.
+
+    The SDK's ``error`` chunk is a strict object carrying only ``errorText``, so
+    the HTTP status and domain code travel in a preceding transient
+    ``data-stream-error`` part. Metadata goes first because some consumers stop
+    processing at ``error``.
+    """
+    frames: list[str] = []
+    metadata: dict[str, Any] = {}
+    if status_code is not None:
+        metadata["statusCode"] = status_code
+    if error_code is not None:
+        metadata["errorCode"] = error_code
+    if metadata:
+        frames.append(_sse({"type": "data-stream-error", "data": metadata, "transient": True}))
+    frames.append(_sse({"type": "error", "errorText": error_text}))
+    return frames
+
+
+def _ai_sdk_error_frames_from_exception(exc: Exception) -> list[str]:
+    """Project a server exception to AI SDK error frames.
 
     Only a ``CustomHTTPException`` detail is written for the client; any other
     exception's text (provider URLs, SQL, paths) is logged and replaced by its
     type name.
     """
     if isinstance(exc, CustomHTTPException):
-        event: dict[str, Any] = {
-            "type": "error",
-            "errorText": str(exc.detail),
-            "statusCode": exc.status_code,
-        }
-        if exc.error_code is not None:
-            event["errorCode"] = exc.error_code
-        return event
+        return _ai_sdk_error_frames(
+            str(exc.detail),
+            status_code=exc.status_code,
+            error_code=exc.error_code,
+        )
     logger.error("AI SDK stream failed", exc_info=exc)
-    return {"type": "error", "errorText": f"Response generation failed ({type(exc).__name__})."}
+    return _ai_sdk_error_frames(f"Response generation failed ({type(exc).__name__}).")
 
 
-def _ai_sdk_error_from_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Project known V3 error metadata to the AI SDK error event shape."""
-    message = data.get("error") or data.get("message") or ""
-    event: dict[str, Any] = {"type": "error", "errorText": message}
-    status_code = data.get("status_code")
-    if status_code is not None:
-        event["statusCode"] = status_code
-    error_code = data.get("error_code")
-    if error_code is not None:
-        event["errorCode"] = error_code
-    return event
+def _ai_sdk_error_frames_from_data(data: dict[str, Any]) -> list[str]:
+    """Project known V3 error metadata to AI SDK error frames."""
+    return _ai_sdk_error_frames(
+        str(data.get("error") or data.get("message") or ""),
+        status_code=data.get("status_code"),
+        error_code=data.get("error_code"),
+    )
 
 
 class AISDKV6StreamState:
@@ -163,7 +181,8 @@ class AISDKV6StreamAdapter:
         except asyncio.CancelledError:
             return
         except Exception as exc:  # pragma: no cover - defensive
-            yield _sse(_ai_sdk_error_from_exception(exc))
+            for frame in _ai_sdk_error_frames_from_exception(exc):
+                yield frame
             async for chunk in self._terminate():
                 yield chunk
 
@@ -447,7 +466,8 @@ class AISDKV6StreamAdapter:
             return
 
         if etype == "heartbeat":
-            yield _sse({"type": "heartbeat"})
+            # An SSE comment: the SDK's strict chunk schema has no heartbeat.
+            yield ": keepalive\n\n"
             return
 
         if etype == "interrupt":
@@ -507,15 +527,23 @@ class AISDKV6StreamAdapter:
             with contextlib.suppress(ValueError):
                 state.pending_tool_call_ids.remove(tool_call_id)
         data = event.data or {}
-        payload: dict[str, Any] = {
-            "type": "tool-output-available",
-            "toolCallId": tool_call_id,
-            "output": coerce_json_object(clean_tool_output(data.get("output"))),
-        }
         render = data.get("render")
         if isinstance(render, dict):
-            payload["render"] = render
-        yield _sse(payload)
+            # Keyed by tool call: the strict tool-output chunk has no room for it.
+            yield _sse(
+                {
+                    "type": "data-tool-render",
+                    "data": {"toolCallId": tool_call_id, "render": render},
+                    "transient": True,
+                }
+            )
+        yield _sse(
+            {
+                "type": "tool-output-available",
+                "toolCallId": tool_call_id,
+                "output": coerce_json_object(clean_tool_output(data.get("output"))),
+            }
+        )
 
     async def _rich_items(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
         if not self._state.inline_rich_response_v1:
@@ -648,11 +676,6 @@ class AISDKV6StreamAdapter:
 
     async def _error(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
         state = self._state
-        yield _sse(_ai_sdk_error_from_data(data))
-        if state.text_started:
-            yield _sse({"type": "text-end", "id": state.text_id})
-        if state.reasoning_started:
-            yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
         message = data.get("message")
         if isinstance(message, dict):
             message = project_ai_sdk_message_event(message, include_content=True)
@@ -660,6 +683,12 @@ class AISDKV6StreamAdapter:
             yield _sse(
                 {"type": "data-error-message", "data": {"message": message}, "transient": True}
             )
+        for frame in _ai_sdk_error_frames_from_data(data):
+            yield frame
+        if state.text_started:
+            yield _sse({"type": "text-end", "id": state.text_id})
+        if state.reasoning_started:
+            yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
         yield _sse({"type": "finish-step"})
         yield _sse({"type": "finish"})
         yield "data: [DONE]\n\n"

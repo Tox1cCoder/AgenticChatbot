@@ -1091,7 +1091,8 @@ typed duplicate code (`INTERRUPT_ALREADY_RESOLVED` or `INTERRUPT_CONFLICT`),
 not a second successful resume; pre-stream validation errors remain ordinary
 JSON HTTP errors. The internal Streamlit stream uses optional `status_code` /
 `error_code` metadata; the AI SDK stream projects the same values as optional
-`statusCode` / `errorCode`.
+`statusCode` / `errorCode` in a `data-stream-error` part sent just before the
+strict `error` chunk (which carries `errorText` only).
 
 On either duplicate code, make exactly one owner-filtered lifecycle read with
 `GET /hitl/interrupts/{interrupt_id}` using `cache: "no-store"`; never

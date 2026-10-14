@@ -3,7 +3,7 @@ Tests for SSE keepalive / heartbeat behaviour added to fix the sidecar
 HITL resume flow (model not generating response after approval).
 
 Covers:
-- Server AI SDK endpoint emits heartbeat events during long-running operations
+- Server AI SDK endpoint emits keepalive comments during long-running operations
 - Sidecar stream_sse filters heartbeat events from the upstream
 - Sidecar stream_sse uses an extended read timeout for streaming
 """
@@ -39,8 +39,9 @@ _skip_server = pytest.mark.skipif(
 @_skip_server
 @pytest.mark.asyncio
 async def test_ai_sdk_stream_emits_heartbeats_during_slow_source():
-    """The server AI SDK SSE wrapper should send heartbeat events
-    when the upstream event source is slow to produce events."""
+    """The server AI SDK SSE wrapper sends keepalive comments, never a
+    ``heartbeat`` data frame (the SDK's strict schema rejects it), when the
+    upstream event source is slow to produce events."""
     slow_event_emitted = asyncio.Event()
 
     async def slow_event_source():
@@ -67,10 +68,8 @@ async def test_ai_sdk_stream_emits_heartbeats_during_slow_source():
     all_text = "".join(collected)
     events = [line[6:] for line in all_text.split("\n") if line.startswith("data: ")]
 
-    heartbeat_events = [e for e in events if e != "[DONE]" and '"heartbeat"' in e]
-    assert len(heartbeat_events) >= 1, (
-        f"Expected at least one heartbeat event, got events: {events}"
-    )
+    assert ": keepalive" in all_text.split("\n"), f"Expected a keepalive comment: {all_text}"
+    assert not any('"heartbeat"' in e for e in events), events
     assert any('"text-delta"' in e for e in events), (
         f"Expected text-delta event in stream, got: {events}"
     )
@@ -95,8 +94,7 @@ async def test_ai_sdk_stream_completes_normally_without_heartbeat_when_fast():
     all_text = "".join(collected)
     events = [line[6:] for line in all_text.split("\n") if line.startswith("data: ")]
 
-    heartbeat_events = [e for e in events if e != "[DONE]" and '"heartbeat"' in e]
-    assert len(heartbeat_events) == 0, f"Expected no heartbeat events, got: {heartbeat_events}"
+    assert ": keepalive" not in all_text.split("\n"), all_text
     assert events[-1] == "[DONE]"
 
 
@@ -265,11 +263,15 @@ async def test_ai_sdk_tool_output_event_preserves_render_payload():
     tool_output_events = [
         json.loads(event) for event in events if '"tool-output-available"' in event
     ]
+    render_events = [json.loads(event) for event in events if '"data-tool-render"' in event]
 
     assert len(tool_output_events) == 1
     assert tool_output_events[0]["output"] == "Created presentation"
-    assert tool_output_events[0]["render"]["type"] == "mcp_app"
-    assert tool_output_events[0]["render"]["template_uri"] == (
+    assert "render" not in tool_output_events[0]
+    assert len(render_events) == 1
+    assert render_events[0]["data"]["toolCallId"] == "tool-call-1"
+    assert render_events[0]["data"]["render"]["type"] == "mcp_app"
+    assert render_events[0]["data"]["render"]["template_uri"] == (
         "ui://canva/presentation-viewer.html"
     )
 
@@ -311,12 +313,10 @@ async def test_ai_sdk_render_payload_preserves_structure_and_text_type():
         for line in "".join(collected).split("\n")
         if line.startswith("data: ") and line[6:] != "[DONE]"
     ]
-    tool_output_events = [
-        json.loads(event) for event in events if '"tool-output-available"' in event
-    ]
+    render_events = [json.loads(event) for event in events if '"data-tool-render"' in event]
 
-    assert len(tool_output_events) == 1
-    render = tool_output_events[0]["render"]
+    assert len(render_events) == 1
+    render = render_events[0]["data"]["render"]
     assert isinstance(render, dict), "render must remain a dict, not be collapsed to a string"
     assert render["type"] == "text"
     assert render["text"] == "The answer is 42."

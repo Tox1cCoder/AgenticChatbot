@@ -30,21 +30,48 @@ logger = get_logger(__name__)
 _SSE_KEEPALIVE_INTERVAL_SECONDS = 2.0
 
 
-def _upstream_stream_error_event(exc: Exception, *, ai_sdk: bool) -> dict[str, Any]:
-    """Project structured upstream failures without exposing arbitrary detail."""
-    text_key = "errorText" if ai_sdk else "error"
-    status_key = "statusCode" if ai_sdk else "status_code"
-    code_key = "errorCode" if ai_sdk else "error_code"
-    event: dict[str, Any] = {"type": "error", text_key: str(exc)}
+_AI_SDK_GENERIC_ERROR_TEXT = "The request could not be completed."
+
+
+def _upstream_stream_error_event(exc: Exception) -> dict[str, Any]:
+    """Project an upstream failure for the internal SSE wire."""
+    event: dict[str, Any] = {"type": "error", "error": str(exc)}
     if isinstance(exc, ServerAPIError):
         if exc.status_code is not None:
-            event[status_key] = exc.status_code
+            event["status_code"] = exc.status_code
         detail = exc.detail if isinstance(exc.detail, dict) else {}
-        event[text_key] = str(detail.get("message") or str(exc))
+        event["error"] = str(detail.get("message") or str(exc))
         code = detail.get("code")
         if code:
-            event[code_key] = str(code)
+            event["error_code"] = str(code)
     return event
+
+
+def _upstream_ai_sdk_error_events(exc: Exception) -> list[dict[str, Any]]:
+    """Project an upstream failure as AI SDK frames without arbitrary detail.
+
+    The SDK's ``error`` chunk is strict (``errorText`` only), so status and code
+    travel first in a transient ``data-stream-error`` part. Only the server's
+    structured ``message`` is shown; exception text (URLs, socket errors) never
+    reaches the client.
+    """
+    error_text = _AI_SDK_GENERIC_ERROR_TEXT
+    metadata: dict[str, Any] = {}
+    if isinstance(exc, ServerAPIError):
+        if exc.status_code is not None:
+            metadata["statusCode"] = exc.status_code
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        if detail.get("message"):
+            error_text = str(detail["message"])
+        if detail.get("code"):
+            metadata["errorCode"] = str(detail["code"])
+    else:
+        logger.warning("AI SDK upstream stream failed: %s", type(exc).__name__, exc_info=exc)
+    events: list[dict[str, Any]] = []
+    if metadata:
+        events.append({"type": "data-stream-error", "data": metadata, "transient": True})
+    events.append({"type": "error", "errorText": error_text})
+    return events
 
 
 def _build_sse_response(
@@ -67,7 +94,11 @@ def _build_sse_response(
                 async for event in event_source:
                     await queue.put(event)
             except Exception as exc:
-                await queue.put(_upstream_stream_error_event(exc, ai_sdk=ai_sdk))
+                if ai_sdk:
+                    for error_event in _upstream_ai_sdk_error_events(exc):
+                        await queue.put(error_event)
+                else:
+                    await queue.put(_upstream_stream_error_event(exc))
             finally:
                 await queue.put(None)
 

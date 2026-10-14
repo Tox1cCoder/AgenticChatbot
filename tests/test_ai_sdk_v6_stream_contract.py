@@ -252,7 +252,15 @@ async def test_tool_call_and_tool_output_map_to_ai_sdk_tool_chunks():
     ]
     assert tool_payloads[1]["input"] == {"query": "x"}
     assert tool_payloads[2]["output"] == "result"
-    assert tool_payloads[2]["render"]["type"] == "text"
+    assert "render" not in tool_payloads[2]
+    render_parts = [p for p in payloads if p != "[DONE]" and p["type"] == "data-tool-render"]
+    assert render_parts == [
+        {
+            "type": "data-tool-render",
+            "data": {"toolCallId": "call-1", "render": {"type": "text", "text": "result"}},
+            "transient": True,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -378,15 +386,17 @@ async def test_v3_error_retains_canonical_status_and_code_in_ai_sdk_stream():
         )
 
     payloads = await _collect_payloads(source)
+    wire = [payload for payload in payloads if payload != "[DONE]"]
+    error_index = next(i for i, p in enumerate(wire) if p["type"] == "error")
 
-    assert next(
-        payload for payload in payloads if payload != "[DONE]" and payload["type"] == "error"
-    ) == {
-        "type": "error",
-        "errorText": "This interrupt has already been resolved.",
-        "statusCode": 409,
-        "errorCode": "INTERRUPT_ALREADY_RESOLVED",
-    }
+    assert wire[error_index - 1 : error_index + 1] == [
+        {
+            "type": "data-stream-error",
+            "data": {"statusCode": 409, "errorCode": "INTERRUPT_ALREADY_RESOLVED"},
+            "transient": True,
+        },
+        {"type": "error", "errorText": "This interrupt has already been resolved."},
+    ]
     assert payloads[-1] == "[DONE]"
 
 
@@ -397,15 +407,17 @@ async def test_ai_sdk_stream_exception_retains_custom_http_metadata():
         yield  # pragma: no cover
 
     payloads = await _collect_payloads(source)
+    wire = [payload for payload in payloads if payload != "[DONE]"]
+    error_index = next(i for i, p in enumerate(wire) if p["type"] == "error")
 
-    assert next(
-        payload for payload in payloads if payload != "[DONE]" and payload["type"] == "error"
-    ) == {
-        "type": "error",
-        "errorText": "Already resolved",
-        "statusCode": 409,
-        "errorCode": "INTERRUPT_ALREADY_RESOLVED",
-    }
+    assert wire[error_index - 1 : error_index + 1] == [
+        {
+            "type": "data-stream-error",
+            "data": {"statusCode": 409, "errorCode": "INTERRUPT_ALREADY_RESOLVED"},
+            "transient": True,
+        },
+        {"type": "error", "errorText": "Already resolved"},
+    ]
     assert payloads[-1] == "[DONE]"
 
 

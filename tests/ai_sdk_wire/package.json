@@ -1,0 +1,12 @@
+{
+  "name": "ai-sdk-wire-tests",
+  "private": true,
+  "type": "module",
+  "description": "Parses backend-generated SSE fixtures with the real AI SDK.",
+  "scripts": {
+    "test": "node --test wire.test.mjs"
+  },
+  "devDependencies": {
+    "ai": "6.0.0"
+  }
+}

@@ -141,9 +141,17 @@ content-type: text/event-stream; charset=utf-8
 x-vercel-ai-ui-message-stream: v1
 ```
 
-Framing: each event is one `data: <json>` line. The stream ends with
-`data: [DONE]`. A `{"type": "heartbeat"}` event is emitted after every 15
-seconds of source silence; ignore it.
+Framing: each event is one `data: <json>` line. A normally drained stream
+ends with exactly one `data: [DONE]`. After 15 seconds of source silence the
+server writes an SSE comment line, `: keepalive`, which SSE parsers discard; the
+local sidecar writes its own every 2 seconds. Neither is a data event. A socket
+that closes early carries no terminal bytes.
+
+The AI SDK validates every `data:` frame against strict schemas **before**
+application code sees it: a standard chunk with an unknown key, or an unknown
+non-`data-*` type, fails the stream. That is why all backend-specific metadata
+travels in custom `data-*` parts (`data-tool-render`, `data-stream-error`) and
+never as extra keys on standard chunks.
 
 Every stream begins:
 
@@ -162,7 +170,7 @@ Terminal sequences (exactly one occurs per stream):
 |---|---|
 | Complete | optional `file` events → `data-assistant-message` → `text-end` → [`reasoning-end`] → `finish-step` → `finish` → `[DONE]` |
 | Interrupt | [`text-delta` with pause copy] → `text-end` → [`reasoning-end`] → `data-interrupt` → `finish-step` → `finish` → `[DONE]` |
-| Error | `error` → `text-end` → [`reasoning-end`] → [`data-error-message`] → `finish-step` → `finish` → `[DONE]` |
+| Error | [`data-error-message`] → [`data-stream-error`] → `error` → `text-end` → [`reasoning-end`] → `finish-step` → `finish` → `[DONE]` |
 
 Event catalog:
 
@@ -171,6 +179,7 @@ Event catalog:
 | `start`, `start-step`, `text-start`, `text-delta`, `text-end`, `finish-step`, `finish` | — | AI SDK lifecycle and answer text. |
 | `reasoning-start`, `reasoning-delta`, `reasoning-end` | — | Model reasoning text. Emitted only when reasoning exists. |
 | `tool-input-start`, `tool-input-available`, `tool-output-available` | — | Tool calls. |
+| `data-tool-render` | yes | Structured render payload for a tool result, keyed by `toolCallId`. Precedes its `tool-output-available`. |
 | `file` | — | Generated/selected image as a file part. |
 | `data-user-message` | yes | Persisted user message echo. |
 | `data-agent-selected` | yes | Routing decision. |
@@ -182,11 +191,13 @@ Event catalog:
 | `data-subagent` | yes | Live worker progress. |
 | `data-assistant-message` | no | Final assistant message side-channel (metadata + parts). |
 | `data-interrupt` | no | HITL pause. Terminal. |
-| `data-error-message` | yes | Persisted error message echo. |
-| `error` | — | Error text. Terminal. |
-| `heartbeat` | — | Keep-alive. |
+| `data-error-message` | yes | Persisted error message echo. Precedes `error`. |
+| `data-stream-error` | yes | `statusCode` / `errorCode` for the following `error`. Present only for known failures. |
+| `error` | — | Error text (`errorText` only). Terminal. |
 
-Unknown event types must be ignored.
+Unknown `data-*` parts pass SDK validation and must be ignored by application
+code. Any other unknown type is rejected by the SDK parser itself, so the
+backend never sends one.
 
 ## Stream Events
 
@@ -254,12 +265,16 @@ Tool call:
 ```json
 { "type": "tool-input-start", "toolCallId": "tool-call-id", "toolName": "tool_name" }
 { "type": "tool-input-available", "toolCallId": "tool-call-id", "toolName": "tool_name", "input": {} }
-{ "type": "tool-output-available", "toolCallId": "tool-call-id", "output": "any JSON value", "render": {} }
+{ "type": "data-tool-render", "data": { "toolCallId": "tool-call-id", "render": {} }, "transient": true }
+{ "type": "tool-output-available", "toolCallId": "tool-call-id", "output": "any JSON value" }
 ```
 
 `input` and `output` are any JSON value. JSON-shaped strings are parsed before
-emission (never double-encoded). `render` is present only when the tool
-produced a structured render payload (see Tool Artifacts).
+emission (never double-encoded). `data-tool-render` is sent only when the tool
+produced a structured render payload (see Tool Artifacts); read it in
+`useChat({ onData })` and attach it to the tool part with the same `toolCallId`.
+Being transient, it is not stored on the message; history carries the render
+in the persisted tool artifacts.
 
 File (image) part:
 
@@ -405,23 +420,22 @@ Final assistant message side-channel:
 Error:
 
 ```json
-{
-  "type": "error",
-  "errorText": "This interrupt has already been resolved.",
-  "statusCode": 409,
-  "errorCode": "INTERRUPT_ALREADY_RESOLVED"
-}
 { "type": "data-error-message", "data": { "message": {} }, "transient": true }
+{ "type": "data-stream-error", "data": { "statusCode": 409, "errorCode": "INTERRUPT_ALREADY_RESOLVED" }, "transient": true }
+{ "type": "error", "errorText": "This interrupt has already been resolved." }
 ```
 
 `data-error-message.data.message` uses the same wire-safe projection as
 `data-user-message` (with `content` included).
 
-`statusCode` and `errorCode` are optional and appear only for known domain
-failures. They are the AI SDK camel-case projection of the internal
-`status_code` and `error_code` values. Unknown exceptions retain `type` and
-`errorText` only. Treat the error event as terminal regardless of whether
-those optional fields are present.
+The SDK's `error` chunk accepts only `errorText`, so `statusCode` and
+`errorCode` travel in the preceding `data-stream-error` part, the AI SDK
+camel-case projection of the internal `status_code` and `error_code`. Each key
+is optional; the part is omitted entirely for unknown exceptions, whose
+`errorText` is a generic sanitized sentence. Custom parts come **before**
+`error` because some consumers stop processing at `error`. Read them in
+`onData`, keep the latest for the active request, and pair it with the error
+the SDK reports. Treat the error as terminal whether or not metadata arrived.
 
 ## Subagent Progress
 
@@ -624,8 +638,8 @@ Coverage rules:
 - Set an interrupt-ID-scoped submission lock before this POST and disable every
   control that can submit another resume request.
 - Resume is first-write-wins: a duplicate discovered after streaming starts is
-  a terminal `200` SSE stream whose `error` event has `errorCode`
-  `INTERRUPT_ALREADY_RESOLVED` or `INTERRUPT_CONFLICT`; it is not a second
+  a terminal `200` SSE stream whose `data-stream-error` part has `errorCode`
+  `INTERRUPT_ALREADY_RESOLVED` or `INTERRUPT_CONFLICT`, followed by `error`; it is not a second
   successful resume. JSON validation failures that happen before streaming can
   still be ordinary non-stream HTTP errors.
 
@@ -678,7 +692,7 @@ Successful responses contain only lifecycle data:
 The response never contains decisions, tool arguments, device/session data,
 user IDs, or secret material.
 
-When the terminal stream error's `errorCode` is exactly
+When the terminal stream error's `errorCode` (from `data-stream-error`) is exactly
 `INTERRUPT_ALREADY_RESOLVED` or `INTERRUPT_CONFLICT`, do exactly one uncached
 state GET. Do not automatically replay the resume POST; use the durable state
 to choose the next UI state:
