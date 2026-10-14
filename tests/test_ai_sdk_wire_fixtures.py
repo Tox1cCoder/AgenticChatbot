@@ -146,7 +146,9 @@ async def _drain(response) -> str:
 async def proxy_wire(upstream_wire: str, monkeypatch) -> str:
     """Pass a direct server stream through the sidecar's real AI SDK proxy."""
     client = await _server_client_for(upstream_wire, monkeypatch)
-    response = messages_api._build_sse_response(client.stream_sse("/api/chat/c-1"), ai_sdk=True)
+    response = messages_api._build_sse_response(
+        client.stream_ai_sdk_chat("c-1", {}), ai_sdk=True
+    )
     assert response.headers[_V1_HEADER] == "v1"
     return await _drain(response)
 
@@ -405,6 +407,7 @@ async def test_proxy_structured_upstream_failure_uses_custom_metadata():
             "transient": True,
         },
         {"type": "error", "errorText": "Interrupt was claimed."},
+        {"type": "finish", "finishReason": "error"},
     ]
     assert data_frames(body).count("[DONE]") == 1
 
@@ -424,6 +427,7 @@ async def test_proxy_unexpected_upstream_failure_is_sanitized():
     assert "hunter2" not in body
     assert payloads(body) == [
         {"type": "error", "errorText": "The request could not be completed."},
+        {"type": "finish", "finishReason": "error"},
     ]
 
 
@@ -467,6 +471,26 @@ async def test_web_failure_fixture_discards_the_draft_before_the_error():
 
     order = types(direct)
     assert order.index("data-answer-reconcile") < order.index("error")
+
+
+@pytest.mark.asyncio
+async def test_partial_eof_fixture_is_an_explicit_incomplete_error(monkeypatch):
+    async def source():
+        yield make_event("message_delta", sequence=1, data={"text": "partial"})
+
+    direct = await direct_wire(source)
+    # Drop the server's [DONE]: the upstream connection ended early.
+    truncated = direct.replace("data: [DONE]\n\n", "").split('data: {"type":"data-stream')[0]
+    proxied = await proxy_wire(truncated, monkeypatch)
+    record_fixture("partial-eof-direct", direct, requires=["data-stream-error", "error"])
+    record_fixture("partial-eof-proxied", proxied, requires=["data-stream-error", "error"])
+
+    for wire in (direct, proxied):
+        frames = payloads(wire)
+        assert {"type": "finish", "finishReason": "error"} in frames
+        incomplete = [f for f in frames if f["type"] == "data-stream-error"]
+        assert [f["data"]["errorCode"] for f in incomplete] == ["stream_incomplete"]
+        assert data_frames(wire).count("[DONE]") == 1
 
 
 def test_legacy_invalid_frames_are_recorded_as_rejected_fixtures():

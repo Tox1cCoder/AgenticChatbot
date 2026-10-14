@@ -796,3 +796,304 @@ def test_ai_sdk_ignores_invalid_raw_base64_attachment():
 
     assert _extract_user_attachments(payload) == []
     assert _has_user_attachment_candidates(payload) is True
+
+
+# -- terminal outcomes ---------------------------------------------------------
+
+
+def _finish(payloads):
+    finishes = [p for p in payloads if p != "[DONE]" and p["type"] == "finish"]
+    assert len(finishes) == 1, finishes
+    return finishes[0]
+
+
+def _stream_errors(payloads):
+    return [p for p in payloads if p != "[DONE]" and p["type"] == "data-stream-error"]
+
+
+def _errors(payloads):
+    return [p for p in payloads if p != "[DONE]" and p["type"] == "error"]
+
+
+async def _collect_with_state(source, **state_kwargs):
+    state = AISDKV6StreamState(message_id="m-1", text_id="t-1", reasoning_id="r-1", **state_kwargs)
+    adapter = AISDKV6StreamAdapter(lambda: source(), state)
+    chunks = [chunk async for chunk in adapter.iter_sse()]
+    payloads = []
+    for line in "".join(chunks).splitlines():
+        if line.startswith("data: "):
+            raw = line[6:]
+            payloads.append(raw if raw == "[DONE]" else json.loads(raw))
+    return payloads, state
+
+
+def _assert_incomplete(payloads):
+    wire = [p for p in payloads if p != "[DONE]"]
+    order = [p["type"] for p in wire]
+    assert _stream_errors(payloads) == [
+        {
+            "type": "data-stream-error",
+            "data": {"errorCode": "stream_incomplete"},
+            "transient": True,
+        }
+    ]
+    assert len(_errors(payloads)) == 1
+    assert order.index("data-stream-error") < order.index("error") < order.index("finish")
+    assert _finish(payloads) == {"type": "finish", "finishReason": "error"}
+    assert order.count("text-end") == 1
+    assert payloads.count("[DONE]") == 1
+    assert payloads[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+async def test_empty_source_is_an_incomplete_stream_not_a_success():
+    async def source():
+        return
+        yield  # pragma: no cover
+
+    payloads, state = await _collect_with_state(source)
+
+    _assert_incomplete(payloads)
+    assert state.outcome is None
+
+
+@pytest.mark.asyncio
+async def test_partial_only_eof_never_indicates_a_successful_finish():
+    async def source():
+        yield make_event("reasoning_delta", sequence=1, data={"text": "thinking"})
+        yield make_event("message_delta", sequence=2, data={"text": "partial"})
+
+    payloads, state = await _collect_with_state(source)
+
+    _assert_incomplete(payloads)
+    order = [p["type"] for p in payloads if p != "[DONE]"]
+    assert order.count("reasoning-end") == 1
+    assert [p["delta"] for p in payloads if p != "[DONE]" and p["type"] == "text-delta"] == [
+        "partial"
+    ]
+    assert state.outcome is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_first_token", [False, True])
+async def test_exception_finishes_with_an_error_reason(after_first_token):
+    async def source():
+        if after_first_token:
+            yield make_event("message_delta", sequence=1, data={"text": "partial"})
+        raise RuntimeError("provider failure")
+        yield  # pragma: no cover
+
+    payloads, state = await _collect_with_state(source)
+
+    assert len(_errors(payloads)) == 1
+    assert _finish(payloads) == {"type": "finish", "finishReason": "error"}
+    order = [p["type"] for p in payloads if p != "[DONE]"]
+    assert order.index("error") < order.index("text-end")
+    assert order.count("text-end") == 1
+    assert payloads.count("[DONE]") == 1
+    assert state.outcome == "error"
+
+
+@pytest.mark.asyncio
+async def test_completion_finishes_normally():
+    async def source():
+        yield make_event("message_delta", sequence=1, data={"text": "done"})
+        yield make_event("complete", sequence=2, data={"message": {"id": "m-1"}})
+
+    payloads, state = await _collect_with_state(source)
+
+    assert _finish(payloads) == {"type": "finish"}
+    assert _errors(payloads) == []
+    assert state.outcome == "complete"
+
+
+@pytest.mark.asyncio
+async def test_error_event_finishes_with_an_error_reason():
+    async def source():
+        yield make_event("error", sequence=1, data={"error": "Generation failed"})
+
+    payloads, state = await _collect_with_state(source)
+
+    assert _finish(payloads) == {"type": "finish", "finishReason": "error"}
+    assert len(_errors(payloads)) == 1
+    assert state.outcome == "error"
+
+
+@pytest.mark.asyncio
+async def test_hitl_interrupt_is_a_legitimate_terminal_outcome():
+    async def source():
+        yield make_event(
+            "interrupt",
+            sequence=1,
+            data={"thread_id": "t", "interrupt": {"interrupt_id": "i"}, "message": "Approve?"},
+        )
+
+    payloads, state = await _collect_with_state(source)
+
+    assert _errors(payloads) == []
+    assert _finish(payloads) == {"type": "finish"}
+    assert state.outcome == "interrupt"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offered", [True, False], ids=["continuable", "not-continuable"])
+async def test_validated_budget_pause_is_a_legitimate_terminal_outcome(offered):
+    async def source():
+        yield make_event("message_delta", sequence=1, data={"text": "Validated partial"})
+        yield make_event(
+            "message_end",
+            sequence=2,
+            message_id="m-1",
+            data={"message": {"id": "m-1", "content": "Validated partial"}},
+        )
+        if offered:
+            yield make_event(
+                "continuation_available",
+                sequence=3,
+                data={"generation_id": "g-1", "continuation_id": "c-1", "version": 3},
+            )
+
+    payloads, state = await _collect_with_state(source)
+
+    assert _errors(payloads) == []
+    assert _finish(payloads) == {"type": "finish"}
+    assert state.outcome == "paused"
+    phases = [
+        p["data"]["phase"] for p in payloads if p != "[DONE]" and p["type"] == "data-generation"
+    ]
+    assert phases == (["continuation_available"] if offered else [])
+
+
+@pytest.mark.asyncio
+async def test_stop_without_a_terminal_event_is_reported_as_incomplete():
+    """A Stop ends the service stream without a terminal event; the adapter does
+    not invent `stopped` -- the client reads the generation status instead."""
+
+    async def source():
+        yield make_event("message_delta", sequence=1, data={"text": "partial before stop"})
+
+    payloads, _ = await _collect_with_state(source)
+
+    _assert_incomplete(payloads)
+    assert not any(
+        p != "[DONE]" and p["type"] == "data-generation" for p in payloads
+    ), "a transport outcome must not publish a lifecycle transition"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["stopped", "completed_partial"])
+async def test_a_service_published_stop_status_is_a_legitimate_end(status):
+    async def source():
+        yield make_event("message_delta", sequence=1, data={"text": "partial"})
+        yield make_event(
+            "generation_status",
+            sequence=2,
+            data={"generation_id": "g-1", "status": "stop_requested", "version": 3},
+        )
+        yield make_event(
+            "generation_status",
+            sequence=3,
+            data={"generation_id": "g-1", "status": status, "version": 4},
+        )
+
+    payloads, state = await _collect_with_state(source)
+
+    assert _errors(payloads) == []
+    assert _finish(payloads) == {"type": "finish"}
+    assert state.outcome == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_a_pending_stop_status_alone_is_still_incomplete():
+    """`stop_requested` is not an outcome; the client polls for the real one."""
+
+    async def source():
+        yield make_event(
+            "generation_status",
+            sequence=1,
+            data={"generation_id": "g-1", "status": "stop_requested", "version": 3},
+        )
+
+    payloads, state = await _collect_with_state(source)
+
+    _assert_incomplete(payloads)
+    assert state.outcome is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["complete", "error"])
+async def test_duplicate_terminal_events_close_the_stream_once(terminal):
+    async def source():
+        for sequence in (1, 2):
+            data = {"message": {"id": "m-1"}} if terminal == "complete" else {"error": "x"}
+            yield make_event(terminal, sequence=sequence, data=data)
+
+    payloads, _ = await _collect_with_state(source)
+
+    _finish(payloads)
+    assert len(_errors(payloads)) == (1 if terminal == "error" else 0)
+    assert payloads.count("[DONE]") == 1
+
+
+@pytest.mark.asyncio
+async def test_outer_aclose_during_a_tool_wait_closes_the_source_before_returning():
+    cleaned = asyncio.Event()
+    tool_wait = asyncio.Event()
+
+    async def source():
+        try:
+            yield make_event("message_delta", sequence=1, data={"text": "before tool"})
+            await tool_wait.wait()  # never released: a tool that is still running
+            yield make_event("complete", sequence=2)  # pragma: no cover
+        finally:
+            cleaned.set()
+
+    adapter = AISDKV6StreamAdapter(
+        source,
+        AISDKV6StreamState(message_id="m-1", text_id="t-1", reasoning_id="r-1"),
+        heartbeat_interval_seconds=30,
+    )
+    stream = adapter.iter_sse()
+    async for chunk in stream:
+        if '"text-delta"' in chunk:
+            break
+
+    await stream.aclose()
+
+    assert cleaned.is_set(), "upstream cleanup must finish before aclose() returns"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_emits_no_frames_and_propagates():
+    cleaned = asyncio.Event()
+    reached_wait = asyncio.Event()
+    frames: list[str] = []
+
+    async def source():
+        try:
+            yield make_event("message_delta", sequence=1, data={"text": "partial"})
+            reached_wait.set()
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+
+    adapter = AISDKV6StreamAdapter(
+        source,
+        AISDKV6StreamState(message_id="m-1", text_id="t-1", reasoning_id="r-1"),
+        heartbeat_interval_seconds=30,
+    )
+
+    async def consume():
+        async for chunk in adapter.iter_sse():
+            frames.append(chunk)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(reached_wait.wait(), timeout=1)
+    sent_before_cancel = len(frames)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(frames) == sent_before_cancel
+    assert not any("[DONE]" in frame for frame in frames)
+    assert cleaned.is_set()

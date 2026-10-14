@@ -159,7 +159,7 @@ async def test_a_streamed_chat_to_a_dot_segment_id_is_never_forwarded(sidecar, p
         if line.startswith("data: {")
     ]
     assert forwarded == []
-    assert [event["type"] for event in events] == ["data-stream-error", "error"]
+    assert [event["type"] for event in events] == ["data-stream-error", "error", "finish"]
     assert events[0]["data"]["statusCode"] == 404
 
 

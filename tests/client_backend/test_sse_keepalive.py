@@ -323,3 +323,192 @@ async def test_ai_sdk_render_payload_preserves_structure_and_text_type():
     assert isinstance(render["content"], list)
     assert render["content"][0]["type"] == "text"
     assert render["content"][0]["text"] == "The answer is 42."
+
+
+# ── Sidecar terminal classification (AI SDK proxy) ──────────────────────
+
+
+def _fake_upstream(monkeypatch, client, lines):
+    class _Response:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for line in lines:
+                yield line
+
+        async def aread(self):
+            return b""
+
+    class _Stream:
+        async def __aenter__(self):
+            return _Response()
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    async def _install():
+        real_client = await client._get_client()
+        monkeypatch.setattr(real_client, "stream", lambda *a, **kw: _Stream())
+
+    return _install()
+
+
+def _client() -> ServerAPIClient:
+    client = ServerAPIClient(base_url="http://test.local", timeout=5)
+    client._tokens = type("T", (), {"access_token": "fake"})()
+    return client
+
+
+_PARTIAL_UPSTREAM = [
+    'data: {"type":"start","messageId":"m1"}',
+    "",
+    'data: {"type":"start-step"}',
+    "",
+    'data: {"type":"text-start","id":"t1"}',
+    "",
+    'data: {"type":"text-delta","id":"t1","delta":"partial"}',
+    "",
+]
+
+
+@pytest.mark.asyncio
+async def test_stream_sse_requires_done_only_when_asked(monkeypatch):
+    from client_backend.services.server_api import ServerStreamIncompleteError
+
+    client = _client()
+    await _fake_upstream(monkeypatch, client, _PARTIAL_UPSTREAM)
+
+    lenient = [event async for event in client.stream_sse("/test")]
+    assert [event["type"] for event in lenient] == [
+        "start",
+        "start-step",
+        "text-start",
+        "text-delta",
+    ]
+
+    received = []
+    with pytest.raises(ServerStreamIncompleteError):
+        async for event in client.stream_sse("/test", require_done=True):
+            received.append(event)
+    assert len(received) == 4
+
+
+@pytest.mark.asyncio
+async def test_stream_sse_ignores_bytes_after_the_first_done(monkeypatch):
+    client = _client()
+    lines = [*_PARTIAL_UPSTREAM, "data: [DONE]", "", 'data: {"type":"junk"}', ""]
+    await _fake_upstream(monkeypatch, client, lines)
+
+    events = [event async for event in client.stream_sse("/test", require_done=True)]
+
+    assert "junk" not in [event["type"] for event in events]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "args", "required"),
+    [
+        ("stream_ai_sdk_chat", ("c-1", {}), True),
+        ("continue_ai_sdk_generation", ({},), True),
+        ("resume_ai_sdk_interrupt", ({},), True),
+        ("stream_internal_message", ({},), False),
+        ("resume_interrupt", ({},), False),
+        ("continue_generation", ({},), False),
+    ],
+)
+async def test_only_ai_sdk_streams_require_the_terminator(monkeypatch, method, args, required):
+    client = _client()
+    seen: list[bool] = []
+
+    async def fake_stream_sse(path, method="POST", *, require_done=False, **kwargs):
+        seen.append(require_done)
+        yield {"type": "start"}
+
+    monkeypatch.setattr(client, "stream_sse", fake_stream_sse)
+    [event async for event in getattr(client, method)(*args)]
+
+    assert seen == [required]
+
+
+async def _proxy_body(monkeypatch, lines) -> str:
+    from client_backend.api import messages as messages_api
+
+    client = _client()
+    await _fake_upstream(monkeypatch, client, lines)
+    response = messages_api._build_sse_response(
+        client.stream_sse("/api/chat/c-1", require_done=True), ai_sdk=True
+    )
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+    return "".join(chunks)
+
+
+def _frames(body: str) -> list:
+    return [
+        line[6:] if line[6:] == "[DONE]" else json.loads(line[6:])
+        for line in body.split("\n")
+        if line.startswith("data: ")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ai_sdk_proxy_reports_upstream_eof_as_incomplete(monkeypatch):
+    frames = _frames(await _proxy_body(monkeypatch, _PARTIAL_UPSTREAM))
+    wire = [frame for frame in frames if frame != "[DONE]"]
+
+    assert [frame["type"] for frame in wire] == [
+        "start",
+        "start-step",
+        "text-start",
+        "text-delta",
+        "data-stream-error",
+        "error",
+        "text-end",
+        "finish-step",
+        "finish",
+    ]
+    assert wire[4]["data"] == {"errorCode": "stream_incomplete"}
+    assert wire[6] == {"type": "text-end", "id": "t1"}
+    assert wire[-1] == {"type": "finish", "finishReason": "error"}
+    assert frames.count("[DONE]") == 1
+    assert frames[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+async def test_ai_sdk_proxy_tolerates_a_missing_done_after_finish(monkeypatch):
+    lines = [
+        *_PARTIAL_UPSTREAM,
+        'data: {"type":"text-end","id":"t1"}',
+        'data: {"type":"finish-step"}',
+        'data: {"type":"finish"}',
+    ]
+    frames = _frames(await _proxy_body(monkeypatch, lines))
+
+    assert [frame["type"] for frame in frames if frame != "[DONE]"][-1] == "finish"
+    assert not any(frame != "[DONE]" and frame["type"] == "error" for frame in frames)
+    assert frames.count("[DONE]") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ai_sdk", [True, False])
+async def test_proxy_close_mid_stream_sends_nothing_and_closes_upstream(ai_sdk):
+    from client_backend.api import messages as messages_api
+
+    closed = asyncio.Event()
+
+    async def upstream():
+        try:
+            yield {"type": "start", "messageId": "m1"}
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    response = messages_api._build_sse_response(upstream(), ai_sdk=ai_sdk)
+    body = response.body_iterator
+    first = await anext(body)
+
+    await body.aclose()  # must not raise "async generator ignored GeneratorExit"
+
+    assert '"start"' in first
+    assert closed.is_set()

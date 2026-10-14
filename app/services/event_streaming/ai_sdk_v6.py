@@ -17,6 +17,7 @@ from typing import Any
 from app.core.config import settings
 from app.core.exceptions import CustomHTTPException
 from app.core.rich_response import select_transient_upsert_items
+from app.models.generation import GenerationStatus
 
 from .ai_sdk_projection import (
     attach_image_parts_to_message,
@@ -40,6 +41,18 @@ from .events import (
 logger = logging.getLogger(__name__)
 
 _AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+#: Sent when the service stream ends without a terminal outcome: an upstream
+#: EOF, or a Stop (which ends the stream without one). The client recovers the
+#: saved text and the generation status; the adapter never invents either.
+STREAM_INCOMPLETE_ERROR_CODE = "stream_incomplete"
+_STREAM_INCOMPLETE_ERROR_TEXT = "The response ended before it was complete."
+
+#: Published generation statuses that end an epoch at a Stop. ``stop_requested``
+#: is deliberately absent: it is pending, and the client polls for the outcome.
+_STOP_STATUSES = frozenset(
+    {GenerationStatus.STOPPED.value, GenerationStatus.COMPLETED_PARTIAL.value}
+)
 
 #: Canonical lifecycle event -> the ``phase`` on the shared ``data-generation``
 #: part. `run_start` projects as ``start`` rather than earning a second
@@ -130,7 +143,13 @@ class AISDKV6StreamState:
         self.text_id = text_id
         self.reasoning_id = reasoning_id
         self.text_started = False
+        self.text_ended = False
         self.reasoning_started = False
+        self.reasoning_ended = False
+        # complete | interrupt | paused | stopped | error; None while unresolved. A
+        # presentation fact only: durable generation status is the service's.
+        self.outcome: str | None = None
+        self.closed = False
         self.any_text_delta = False
         # Legacy preview overlay (client without streamWebAnswerV1).
         self.preview_active = False
@@ -173,25 +192,31 @@ class AISDKV6StreamAdapter:
             yield _sse({"type": "text-start", "id": state.text_id})
             state.text_started = True
 
-            async for event in self._events_with_heartbeats():
-                async for chunk in self._map_event(event):
-                    yield chunk
-                if event.type in {"interrupt", "error"}:
-                    return  # terminal chunks already emitted by the handler
-                if event.type == "complete":
-                    break
+            # aclosing: an outer aclose() or cancellation closes every nested
+            # generator -- and through them the source -- before it returns.
+            async with contextlib.aclosing(self._events_with_heartbeats()) as events:
+                async for event in events:
+                    async with contextlib.aclosing(self._map_event(event)) as frames:
+                        async for chunk in frames:
+                            yield chunk
+                    if event.type in {"complete", "interrupt", "error"}:
+                        break
 
-            async for chunk in self._terminate():
+            for chunk in self._terminate():
                 yield chunk
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:
+            if state.closed:
+                logger.error("AI SDK stream failed after it was closed", exc_info=exc)
+                return
+            state.outcome = "error"
             for frame in self._settle_answer(None):
                 yield frame
             for frame in _ai_sdk_error_frames_from_exception(exc):
                 yield frame
-            async for chunk in self._terminate():
-                yield chunk
+            for frame in self._close(finish_reason="error"):
+                yield frame
+        # CancelledError and GeneratorExit propagate: a disconnected client gets
+        # no further frames, and a socket close is never a lifecycle outcome.
 
     # -- provisional answer text ------------------------------------------
 
@@ -252,17 +277,51 @@ class AISDKV6StreamAdapter:
 
     # -- terminal chunks ---------------------------------------------------
 
-    async def _terminate(self) -> AsyncGenerator[str, None]:
+    def _terminate(self) -> list[str]:
+        """Close a stream whose event source ended, by outcome."""
         state = self._state
-        for frame in self._settle_answer(None):
-            yield frame
-        if state.text_started:
-            yield _sse({"type": "text-end", "id": state.text_id})
-        if state.reasoning_started:
-            yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
-        yield _sse({"type": "finish-step"})
-        yield _sse({"type": "finish"})
-        yield "data: [DONE]\n\n"
+        if state.closed:
+            return []
+        if state.outcome is None:
+            # No terminal event arrived: truncation must not look like success.
+            return [
+                *self._settle_answer(None),
+                *_ai_sdk_error_frames(
+                    _STREAM_INCOMPLETE_ERROR_TEXT,
+                    error_code=STREAM_INCOMPLETE_ERROR_CODE,
+                ),
+                *self._close(finish_reason="error"),
+            ]
+        finish_reason = "error" if state.outcome == "error" else None
+        return [*self._settle_answer(None), *self._close(finish_reason=finish_reason)]
+
+    def _end_blocks(self) -> list[str]:
+        """End the open text and reasoning blocks, each exactly once."""
+        state = self._state
+        frames: list[str] = []
+        if state.text_started and not state.text_ended:
+            state.text_ended = True
+            frames.append(_sse({"type": "text-end", "id": state.text_id}))
+        if state.reasoning_started and not state.reasoning_ended:
+            state.reasoning_ended = True
+            frames.append(_sse({"type": "reasoning-end", "id": state.reasoning_id}))
+        return frames
+
+    def _close(self, *, finish_reason: str | None) -> list[str]:
+        """The one closing sequence: blocks, finish-step, finish, [DONE]."""
+        state = self._state
+        if state.closed:
+            return []
+        state.closed = True
+        finish: dict[str, Any] = {"type": "finish"}
+        if finish_reason is not None:
+            finish["finishReason"] = finish_reason
+        return [
+            *self._end_blocks(),
+            _sse({"type": "finish-step"}),
+            _sse(finish),
+            "data: [DONE]\n\n",
+        ]
 
     # -- heartbeat wrapper -------------------------------------------------
 
@@ -363,6 +422,8 @@ class AISDKV6StreamAdapter:
         if etype == "message_end":
             message = data.get("message")
             if isinstance(message, dict):
+                # Only a budget pause publishes its persisted partial this way.
+                state.outcome = "paused"
                 async for chunk in self._saved_partial(message):
                     yield chunk
             return
@@ -457,6 +518,11 @@ class AISDKV6StreamAdapter:
             return
 
         if etype in _GENERATION_LIFECYCLE_PHASES:
+            if etype == "continuation_available":
+                state.outcome = "paused"
+            elif etype == "generation_status" and data.get("status") in _STOP_STATUSES:
+                # The service's own word that the epoch ended at a Stop.
+                state.outcome = "stopped"
             # One custom part for all three lifecycle events, discriminated by
             # `phase`, so a client subscribes once. Not `transient`: a client
             # that reconnects still needs the identity and the version, which
@@ -711,10 +777,8 @@ class AISDKV6StreamAdapter:
         projected_message = message
         if isinstance(message, dict):
             projected_message = project_ai_sdk_message_event(message, include_content=True)
-        if state.text_started:
-            yield _sse({"type": "text-end", "id": state.text_id})
-        if state.reasoning_started:
-            yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
+        for frame in self._end_blocks():
+            yield frame
         yield _sse(
             {
                 "type": "data-interrupt",
@@ -726,9 +790,9 @@ class AISDKV6StreamAdapter:
                 },
             }
         )
-        yield _sse({"type": "finish-step"})
-        yield _sse({"type": "finish"})
-        yield "data: [DONE]\n\n"
+        state.outcome = "interrupt"
+        for frame in self._close(finish_reason=None):
+            yield frame
 
     async def _error(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
         state = self._state
@@ -743,16 +807,13 @@ class AISDKV6StreamAdapter:
             )
         for frame in _ai_sdk_error_frames_from_data(data):
             yield frame
-        if state.text_started:
-            yield _sse({"type": "text-end", "id": state.text_id})
-        if state.reasoning_started:
-            yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
-        yield _sse({"type": "finish-step"})
-        yield _sse({"type": "finish"})
-        yield "data: [DONE]\n\n"
+        state.outcome = "error"
+        for frame in self._close(finish_reason="error"):
+            yield frame
 
     async def _complete(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
         state = self._state
+        state.outcome = "complete"
         original_message = data.get("message") or {}
         message = original_message
         is_v1 = False

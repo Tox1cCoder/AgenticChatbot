@@ -17,7 +17,11 @@ from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.security import LocalSessionPayload
 from client_backend.services.runtime_bridge import get_runtime_bridge
-from client_backend.services.server_api import ServerAPIError, get_server_client
+from client_backend.services.server_api import (
+    ServerAPIError,
+    ServerStreamIncompleteError,
+    get_server_client,
+)
 from client_backend.services.upstream_auth import get_upstream_auth_service
 
 router = APIRouter(tags=["messages"])
@@ -74,6 +78,62 @@ def _upstream_ai_sdk_error_events(exc: Exception) -> list[dict[str, Any]]:
     return events
 
 
+class _UpstreamFailure:
+    """Queued in place of an event when the upstream iterator raised."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+
+class _AISDKFrameTracker:
+    """What the forwarded AI SDK stream has opened and not yet closed.
+
+    After an upstream failure the proxy closes exactly what is open, so the
+    client sees one well-formed error ending instead of a dangling text block.
+    """
+
+    def __init__(self) -> None:
+        self.open_text: list[str] = []
+        self.open_reasoning: list[str] = []
+        self.step_open = False
+        self.finished = False
+
+    def observe(self, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        block_id = event.get("id")
+        if kind == "text-start":
+            self.open_text.append(block_id)
+        elif kind == "text-end" and block_id in self.open_text:
+            self.open_text.remove(block_id)
+        elif kind == "reasoning-start":
+            self.open_reasoning.append(block_id)
+        elif kind == "reasoning-end" and block_id in self.open_reasoning:
+            self.open_reasoning.remove(block_id)
+        elif kind == "start-step":
+            self.step_open = True
+        elif kind == "finish-step":
+            self.step_open = False
+        elif kind == "finish":
+            self.finished = True
+
+    def closing_events(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = [{"type": "text-end", "id": i} for i in self.open_text]
+        events += [{"type": "reasoning-end", "id": i} for i in self.open_reasoning]
+        if self.step_open:
+            events.append({"type": "finish-step"})
+        if not self.finished:
+            events.append({"type": "finish", "finishReason": "error"})
+        self.open_text, self.open_reasoning = [], []
+        self.step_open, self.finished = False, True
+        return events
+
+
+def _sse_frame(event: dict[str, Any]) -> str:
+    if "raw" in event and len(event) == 1:
+        return f"data: {event['raw']}\n\n"
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
 def _build_sse_response(
     event_source: AsyncIterator[dict[str, Any]],
     *,
@@ -87,20 +147,27 @@ def _build_sse_response(
     """
 
     async def event_generator():
-        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, Any] | _UpstreamFailure | None] = asyncio.Queue()
+        tracker = _AISDKFrameTracker()
 
         async def _upstream_reader():
             try:
                 async for event in event_source:
                     await queue.put(event)
             except Exception as exc:
-                if ai_sdk:
-                    for error_event in _upstream_ai_sdk_error_events(exc):
-                        await queue.put(error_event)
-                else:
-                    await queue.put(_upstream_stream_error_event(exc))
+                await queue.put(_UpstreamFailure(exc))
             finally:
                 await queue.put(None)
+
+        def _failure_frames(exc: Exception) -> list[str]:
+            if not ai_sdk:
+                return [_sse_frame(_upstream_stream_error_event(exc))]
+            if isinstance(exc, ServerStreamIncompleteError) and tracker.finished:
+                # The answer's outcome already arrived; only the terminator was lost.
+                logger.warning("AI SDK upstream finished without [DONE]; closing normally")
+                return []
+            events = [*_upstream_ai_sdk_error_events(exc), *tracker.closing_events()]
+            return [_sse_frame(event) for event in events]
 
         reader_task = asyncio.create_task(_upstream_reader())
         proxied = 0
@@ -118,27 +185,32 @@ def _build_sse_response(
 
                 if event is None:
                     break
+                if isinstance(event, _UpstreamFailure):
+                    for frame in _failure_frames(event.exc):
+                        yield frame
+                    continue
 
                 proxied += 1
-                if "raw" in event and len(event) == 1:
-                    yield f"data: {event['raw']}\n\n"
-                else:
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if ai_sdk:
+                    tracker.observe(event)
+                yield _sse_frame(event)
         except asyncio.CancelledError:
-            # Consumer (desktop client) disconnected mid-stream.
+            # Consumer (desktop client) disconnected mid-stream: no more frames.
             logger.debug("SSE consumer disconnected after %d proxied events", proxied)
-            return
+            raise
         finally:
+            # No yield here: on a disconnect or aclose() the generator may not
+            # yield again, and the upstream must be closed before we return.
             reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await reader_task
-            # Exactly one trailing [DONE] for the AI SDK wire: stream_sse never
-            # yields the upstream [DONE], so this is the only one the consumer
-            # sees, ending the stream even if the upstream sent junk after its
-            # own [DONE].
-            if ai_sdk:
-                yield "data: [DONE]\n\n"
             logger.debug("SSE proxy forwarded %d events to consumer", proxied)
+
+        # Exactly one trailing [DONE] for the AI SDK wire, on a drained stream
+        # only: stream_sse never yields the upstream [DONE], so this is the one
+        # the consumer sees even if the upstream sent junk after its own.
+        if ai_sdk:
+            yield "data: [DONE]\n\n"
 
     headers = {
         "Cache-Control": "no-cache",

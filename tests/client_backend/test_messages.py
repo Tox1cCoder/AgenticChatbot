@@ -307,6 +307,7 @@ async def test_ai_sdk_sidecar_stream_error_retains_upstream_identity():
             "transient": True,
         },
         {"type": "error", "errorText": "Interrupt was claimed by a concurrent request."},
+        {"type": "finish", "finishReason": "error"},
     ]
     assert body.endswith("data: [DONE]\n\n")
 

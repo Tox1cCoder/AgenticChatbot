@@ -43,6 +43,23 @@ class ServerConnectionError(ServerAPIError):
     pass
 
 
+class ServerStreamIncompleteError(ServerAPIError):
+    """An AI SDK stream ended without its ``[DONE]`` terminator.
+
+    A bare EOF is a transport failure, not a finished answer: the proxy reports
+    it as ``stream_incomplete`` rather than inventing a successful response.
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__(
+            f"Upstream stream {path} ended without [DONE]",
+            detail={
+                "code": "stream_incomplete",
+                "message": "The response ended before it was complete.",
+            },
+        )
+
+
 class UnforwardablePathError(ServerAPIError):
     """Raised, before sending, for a path that would not reach the route it names."""
 
@@ -304,6 +321,8 @@ class ServerAPIClient:
         self,
         path: str,
         method: str = "POST",
+        *,
+        require_done: bool = False,
         **kwargs: Any,
     ) -> AsyncIterator[dict[str, Any]]:
         """
@@ -312,6 +331,10 @@ class ServerAPIClient:
         Uses an unbounded read timeout because the server's AI SDK streaming
         endpoint does not emit heartbeats during tool execution.  The
         connection stays alive until the server sends ``[DONE]`` or closes.
+
+        ``require_done`` (AI SDK streams) raises ``ServerStreamIncompleteError``
+        when the connection ends before ``[DONE]``; the internal SSE wire has
+        no terminator, so its callers keep the default.
         """
         _refuse_unforwardable_path(path)
         client = await self._get_client()
@@ -330,6 +353,7 @@ class ServerAPIClient:
             pool=min(self.timeout, 30),
         )
 
+        done_seen = False
         try:
             async with client.stream(
                 method,
@@ -350,6 +374,7 @@ class ServerAPIClient:
                         # exactly one survives the proxy boundary even when the
                         # upstream emits [DONE] followed by trailing bytes.
                         if data.strip() == "[DONE]":
+                            done_seen = True
                             break
                         try:
                             parsed = json.loads(data)
@@ -373,6 +398,8 @@ class ServerAPIClient:
             logger.warning(
                 "SSE stream read timeout on %s (this should not happen with read=None)", path
             )
+        if require_done and not done_seen:
+            raise ServerStreamIncompleteError(path)
 
     @contextlib.asynccontextmanager
     async def stream_media(
@@ -535,7 +562,8 @@ class ServerAPIClient:
         payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
         """Proxy the AI SDK UI message stream."""
-        async for event in self.stream_sse(f"/api/chat/{conversation_id}", json=payload):
+        path = f"/api/chat/{conversation_id}"
+        async for event in self.stream_sse(path, json=payload, require_done=True):
             yield event
 
     async def continue_ai_sdk_generation(
@@ -547,7 +575,7 @@ class ServerAPIClient:
         Same command, different adapter — the parity that keeps a Continue from
         behaving differently depending on which client issued it.
         """
-        async for event in self.stream_sse("/ai/continue", json=payload):
+        async for event in self.stream_sse("/ai/continue", json=payload, require_done=True):
             yield event
 
     async def resume_ai_sdk_interrupt(
@@ -555,7 +583,7 @@ class ServerAPIClient:
         payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
         """Resume an interrupted AI SDK stream."""
-        async for event in self.stream_sse("/ai/resume-interrupt", json=payload):
+        async for event in self.stream_sse("/ai/resume-interrupt", json=payload, require_done=True):
             yield event
 
     # ── Client Runtime Methods ───────────────────────────────────────────

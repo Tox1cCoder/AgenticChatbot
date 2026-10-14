@@ -274,6 +274,34 @@ def test_a_disconnect_publishes_no_lifecycle_event_on_either_transport():
     assert lifecycle[0]["status"] == "running"
 
 
+def test_an_incomplete_ai_sdk_stream_adds_a_transport_error_not_a_lifecycle_event():
+    """The AI SDK adapter reports a truncated stream as `stream_incomplete`.
+
+    That is a transport fact about this response. It must not appear as, or
+    change, the published lifecycle: both transports still agree.
+    """
+    events = [_start(), *_tokens("half an answ")]
+    lifecycle = _assert_parity(events)
+
+    async def source():
+        for event in events:
+            yield event
+
+    adapter = AISDKV6StreamAdapter(
+        source,
+        AISDKV6StreamState(message_id="m1", text_id="t1", reasoning_id="r1"),
+        heartbeat_interval_seconds=30.0,
+    )
+
+    async def collect():
+        return [chunk async for chunk in adapter.iter_sse()]
+
+    wire = "".join(asyncio.run(collect()))
+    assert [item["phase"] for item in lifecycle] == ["start"]
+    assert '"errorCode":"stream_incomplete"' in wire
+    assert '"finishReason":"error"' in wire
+
+
 def test_a_blocked_mutation_outcome_has_parity():
     """An unknown mutation receipt blocks continuation, with its reason."""
     lifecycle = _assert_parity(
