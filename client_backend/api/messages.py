@@ -5,7 +5,7 @@ Message and streaming proxy endpoints for the local client backend.
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -19,6 +19,7 @@ from client_backend.core.security import LocalSessionPayload
 from client_backend.services.runtime_bridge import get_runtime_bridge
 from client_backend.services.server_api import (
     ServerAPIError,
+    ServerStreamEventTooLargeError,
     ServerStreamIncompleteError,
     get_server_client,
 )
@@ -78,11 +79,49 @@ def _upstream_ai_sdk_error_events(exc: Exception) -> list[dict[str, Any]]:
     return events
 
 
-class _UpstreamFailure:
-    """Queued in place of an event when the upstream iterator raised."""
+_KEEPALIVE = object()
 
-    def __init__(self, exc: Exception) -> None:
-        self.exc = exc
+
+async def _drain_one_at_a_time(
+    queue: asyncio.Queue[Any],
+    producer: asyncio.Task[None],
+    interval: float,
+) -> AsyncGenerator[Any, None]:
+    """Yield queued items in order, or ``_KEEPALIVE`` after ``interval`` of silence.
+
+    Ends once the producer has finished and everything it queued is delivered.
+    Completion is read from the task, never from a sentinel the producer would
+    have to enqueue -- into a full queue, from ``finally``, while cancelled.
+    """
+    getter: asyncio.Future[Any] | None = None
+    try:
+        while True:
+            if getter is None:
+                if not queue.empty():
+                    yield queue.get_nowait()
+                    continue
+                if producer.done():
+                    return
+                getter = asyncio.ensure_future(queue.get())
+            waiting = {getter} if producer.done() else {getter, producer}
+            await asyncio.wait(waiting, timeout=interval, return_when=asyncio.FIRST_COMPLETED)
+            if getter.done():
+                item = getter.result()
+                getter = None
+                yield item
+            elif producer.done():
+                if queue.empty():
+                    return
+            else:
+                yield _KEEPALIVE
+    finally:
+        if getter is not None:
+            getter.cancel()
+
+
+def _frame_exceeds_ceiling(frame: str) -> bool:
+    limit = client_settings.stream_max_event_bytes
+    return len(frame) * 4 > limit and len(frame.encode("utf-8")) > limit
 
 
 class _AISDKFrameTracker:
@@ -135,29 +174,28 @@ def _sse_frame(event: dict[str, Any]) -> str:
 
 
 def _build_sse_response(
-    event_source: AsyncIterator[dict[str, Any]],
+    event_source: AsyncGenerator[dict[str, Any], None],
     *,
     ai_sdk: bool = False,
 ) -> StreamingResponse:
     """Build an SSE StreamingResponse with keepalive heartbeats.
 
-    Uses an asyncio.Queue so that keepalive comments can be emitted even when
-    the upstream generator is blocked waiting for the server (e.g. during tool
-    execution over the device-runtime WebSocket).
+    The upstream is read in its own task so keepalive comments still go out
+    while it is blocked on the server (e.g. during tool execution over the
+    device-runtime WebSocket). The queue between them holds one event: a slow
+    client makes the reader wait instead of buffering the answer.
     """
 
     async def event_generator():
-        queue: asyncio.Queue[dict[str, Any] | _UpstreamFailure | None] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
         tracker = _AISDKFrameTracker()
 
         async def _upstream_reader():
-            try:
-                async for event in event_source:
+            # aclosing: a cancelled reader still closes the upstream stream and
+            # with it the server connection.
+            async with contextlib.aclosing(event_source) as events:
+                async for event in events:
                     await queue.put(event)
-            except Exception as exc:
-                await queue.put(_UpstreamFailure(exc))
-            finally:
-                await queue.put(None)
 
         def _failure_frames(exc: Exception) -> list[str]:
             if not ai_sdk:
@@ -172,28 +210,29 @@ def _build_sse_response(
         reader_task = asyncio.create_task(_upstream_reader())
         proxied = 0
         try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(
-                        queue.get(), timeout=_SSE_KEEPALIVE_INTERVAL_SECONDS
-                    )
-                except TimeoutError:
-                    # SSE comment line keeps the connection alive without
-                    # appearing as a data event to the client.
-                    yield ": keepalive\n\n"
-                    continue
-
-                if event is None:
-                    break
-                if isinstance(event, _UpstreamFailure):
-                    for frame in _failure_frames(event.exc):
-                        yield frame
-                    continue
-
-                proxied += 1
-                if ai_sdk:
-                    tracker.observe(event)
-                yield _sse_frame(event)
+            failure: Exception | None = None
+            drained = _drain_one_at_a_time(queue, reader_task, _SSE_KEEPALIVE_INTERVAL_SECONDS)
+            async with contextlib.aclosing(drained) as items:
+                async for event in items:
+                    if event is _KEEPALIVE:
+                        # SSE comment line keeps the connection alive without
+                        # appearing as a data event to the client.
+                        yield ": keepalive\n\n"
+                        continue
+                    frame = _sse_frame(event)
+                    if _frame_exceeds_ceiling(frame):
+                        failure = ServerStreamEventTooLargeError()
+                        break
+                    proxied += 1
+                    if ai_sdk:
+                        tracker.observe(event)
+                    yield frame
+            if failure is None and reader_task.done() and not reader_task.cancelled():
+                # Raised by the upstream after the events it delivered.
+                failure = reader_task.exception()
+            if failure is not None:
+                for frame in _failure_frames(failure):
+                    yield frame
         except asyncio.CancelledError:
             # Consumer (desktop client) disconnected mid-stream: no more frames.
             logger.debug("SSE consumer disconnected after %d proxied events", proxied)
@@ -202,7 +241,8 @@ def _build_sse_response(
             # No yield here: on a disconnect or aclose() the generator may not
             # yield again, and the upstream must be closed before we return.
             reader_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            # Its failure, if any, was already reported as frames above.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reader_task
             logger.debug("SSE proxy forwarded %d events to consumer", proxied)
 

@@ -95,9 +95,9 @@ async def test_stream_sse_reads_streaming_error_body_before_raising(monkeypatch)
                 raise RuntimeError("Attempted to access streaming response json without read()")
             return {"detail": "invalid payload"}
 
-        async def aiter_lines(self):
+        async def aiter_bytes(self):
             if False:
-                yield ""
+                yield b""
 
     class FakeStream:
         async def __aenter__(self):
@@ -157,9 +157,9 @@ async def test_stream_sse_passes_through_nested_context_window_metadata(monkeypa
     class FakeResponse:
         status_code = 200
 
-        async def aiter_lines(self):
+        async def aiter_bytes(self):
             for line in sse_lines:
-                yield line
+                yield f"{line}\n".encode()
 
         async def aread(self):
             return b""

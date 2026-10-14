@@ -47,6 +47,7 @@ _AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
 #: saved text and the generation status; the adapter never invents either.
 STREAM_INCOMPLETE_ERROR_CODE = "stream_incomplete"
 _STREAM_INCOMPLETE_ERROR_TEXT = "The response ended before it was complete."
+STREAM_EVENT_TOO_LARGE_ERROR_CODE = "stream_event_too_large"
 
 #: Published generation statuses that end an epoch at a Stop. ``stop_requested``
 #: is deliberately absent: it is pending, and the client polls for the outcome.
@@ -70,6 +71,52 @@ _GENERATION_LIFECYCLE_PHASES = {
 _PRIVATE_PAUSE_FIELDS = frozenset(
     {"validated_content", "budget", "thread_id", "type", "active_agent_id"}
 )
+
+
+_HEARTBEAT = object()
+
+
+async def _drain_one_at_a_time(
+    queue: asyncio.Queue[Any],
+    producer: asyncio.Task[None],
+    interval: float,
+) -> AsyncGenerator[Any, None]:
+    """Yield queued items in order, or ``_HEARTBEAT`` after ``interval`` of silence.
+
+    Ends once the producer has finished and everything it queued is delivered.
+    Completion is read from the task itself, never from a sentinel the producer
+    would have to enqueue -- into a full queue, from ``finally``, possibly while
+    being cancelled.
+    """
+    getter: asyncio.Future[Any] | None = None
+    try:
+        while True:
+            if getter is None:
+                if not queue.empty():
+                    yield queue.get_nowait()
+                    continue
+                if producer.done():
+                    return
+                getter = asyncio.ensure_future(queue.get())
+            waiting = {getter} if producer.done() else {getter, producer}
+            await asyncio.wait(waiting, timeout=interval, return_when=asyncio.FIRST_COMPLETED)
+            if getter.done():
+                item = getter.result()
+                getter = None
+                yield item
+            elif producer.done():
+                if queue.empty():
+                    return
+            else:
+                yield _HEARTBEAT
+    finally:
+        if getter is not None:
+            getter.cancel()
+
+
+def _frame_exceeds(frame: str, limit: int) -> bool:
+    """Whether ``frame`` is over ``limit`` UTF-8 bytes; encodes only when it could be."""
+    return len(frame) * 4 > limit and len(frame.encode("utf-8")) > limit
 
 
 def _sse(data: dict[str, Any]) -> str:
@@ -198,12 +245,12 @@ class AISDKV6StreamAdapter:
                 async for event in events:
                     async with contextlib.aclosing(self._map_event(event)) as frames:
                         async for chunk in frames:
-                            yield chunk
+                            yield self._within_ceiling(chunk)
                     if event.type in {"complete", "interrupt", "error"}:
                         break
 
             for chunk in self._terminate():
-                yield chunk
+                yield self._within_ceiling(chunk)
         except Exception as exc:
             if state.closed:
                 logger.error("AI SDK stream failed after it was closed", exc_info=exc)
@@ -217,6 +264,17 @@ class AISDKV6StreamAdapter:
                 yield frame
         # CancelledError and GeneratorExit propagate: a disconnected client gets
         # no further frames, and a socket close is never a lifecycle outcome.
+
+    @staticmethod
+    def _within_ceiling(frame: str) -> str:
+        """Refuse a frame over the wire ceiling rather than write or truncate it."""
+        if _frame_exceeds(frame, settings.stream_max_event_bytes):
+            raise CustomHTTPException(
+                413,
+                "A streamed event exceeded the maximum size.",
+                STREAM_EVENT_TOO_LARGE_ERROR_CODE,
+            )
+        return frame
 
     # -- provisional answer text ------------------------------------------
 
@@ -328,8 +386,13 @@ class AISDKV6StreamAdapter:
     async def _events_with_heartbeats(
         self,
     ) -> AsyncGenerator[V3StreamEvent, None]:
-        queue: asyncio.Queue[V3StreamEvent | object] = asyncio.Queue()
-        source_complete = object()
+        """Pump the source in its own task, holding at most one event.
+
+        The source is created, iterated, and closed in the producer task, so a
+        ContextVar it binds is reset in the task that set it. A slow reader
+        makes the producer wait in ``put`` instead of buffering the answer.
+        """
+        queue: asyncio.Queue[V3StreamEvent] = asyncio.Queue(maxsize=1)
 
         async def produce_events() -> None:
             source = self._event_source_factory()
@@ -341,24 +404,15 @@ class AISDKV6StreamAdapter:
                 if callable(aclose):
                     with contextlib.suppress(Exception):
                         await aclose()
-                await queue.put(source_complete)
 
         producer = asyncio.create_task(produce_events())
         try:
-            while True:
-                try:
-                    item = await asyncio.wait_for(
-                        queue.get(),
-                        timeout=self._heartbeat_interval,
-                    )
-                except TimeoutError:
-                    yield make_event("heartbeat", sequence=0)
-                    continue
-
-                if item is source_complete:
-                    await producer
-                    break
-                yield item
+            drained = _drain_one_at_a_time(queue, producer, self._heartbeat_interval)
+            async with contextlib.aclosing(drained) as items:
+                async for item in items:
+                    yield make_event("heartbeat", sequence=0) if item is _HEARTBEAT else item
+            # A source error surfaces once, after every event it queued.
+            producer.result()
         finally:
             if not producer.done():
                 producer.cancel()

@@ -160,9 +160,9 @@ async def test_stream_sse_filters_heartbeat_events(monkeypatch):
     class FakeResponse:
         status_code = 200
 
-        async def aiter_lines(self):
+        async def aiter_bytes(self):
             for line in sse_lines:
-                yield line
+                yield f"{line}\n".encode()
 
         async def aread(self):
             pass
@@ -332,9 +332,9 @@ def _fake_upstream(monkeypatch, client, lines):
     class _Response:
         status_code = 200
 
-        async def aiter_lines(self):
+        async def aiter_bytes(self):
             for line in lines:
-                yield line
+                yield f"{line}\n".encode()
 
         async def aread(self):
             return b""

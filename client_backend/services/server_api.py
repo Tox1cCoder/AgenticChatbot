@@ -60,6 +60,45 @@ class ServerStreamIncompleteError(ServerAPIError):
         )
 
 
+class ServerStreamEventTooLargeError(ServerAPIError):
+    """A stream line or frame exceeded ``stream_max_event_bytes``.
+
+    Raised before the oversized data is buffered further or forwarded: the
+    stream ends with a sanitized error rather than truncated or invalid JSON.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Stream event exceeded the maximum size",
+            status_code=413,
+            detail={
+                "code": "stream_event_too_large",
+                "message": "A streamed event exceeded the maximum size.",
+            },
+        )
+
+
+async def _bounded_lines(response: Any, max_line_bytes: int) -> AsyncIterator[str]:
+    """Split a byte stream into text lines, refusing any longer than the ceiling.
+
+    ``httpx``'s line iterator buffers a line of any length before yielding it;
+    this one stops as soon as a pending line passes ``max_line_bytes``.
+    """
+    pending = bytearray()
+    async for chunk in response.aiter_bytes():
+        pending.extend(chunk)
+        while (newline := pending.find(b"\n")) >= 0:
+            line = bytes(pending[:newline]).rstrip(b"\r")
+            del pending[: newline + 1]
+            if len(line) > max_line_bytes:
+                raise ServerStreamEventTooLargeError()
+            yield line.decode("utf-8", errors="replace")
+        if len(pending) > max_line_bytes:
+            raise ServerStreamEventTooLargeError()
+    if pending:
+        yield bytes(pending).rstrip(b"\r").decode("utf-8", errors="replace")
+
+
 class UnforwardablePathError(ServerAPIError):
     """Raised, before sending, for a path that would not reach the route it names."""
 
@@ -366,7 +405,8 @@ class ServerAPIClient:
                     await self._handle_response(response)
 
                 proxied = 0
-                async for line in response.aiter_lines():
+                max_line_bytes = client_settings.stream_max_event_bytes
+                async for line in _bounded_lines(response, max_line_bytes):
                     if line.startswith("data: "):
                         data = line[6:]
                         # Break on the FIRST upstream [DONE] and never yield it:

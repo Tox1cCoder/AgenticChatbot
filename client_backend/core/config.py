@@ -108,6 +108,14 @@ class ClientSettings(BaseSettings):
         default=60,
         description="Timeout for server API requests in seconds.",
     )
+    stream_max_event_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        gt=0,
+        description=(
+            "Largest single SSE line accepted from the server and frame written to the "
+            "client, in UTF-8 bytes. Bounds the proxy's buffer per stream."
+        ),
+    )
 
     # Local Backend Binding
     backend_host: str = Field(

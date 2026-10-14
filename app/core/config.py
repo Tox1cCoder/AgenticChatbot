@@ -651,6 +651,15 @@ class Settings(BaseSettings):
             "Larger images skip the preview and arrive only at completion."
         ),
     )
+    stream_max_event_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        gt=0,
+        description=(
+            "Largest single AI SDK stream frame, in UTF-8 bytes on the wire. A larger "
+            "event ends the stream with a stream_event_too_large error; text is never "
+            "truncated to fit."
+        ),
+    )
 
     # Image Captioning Configuration
     image_caption_model: str = Field(

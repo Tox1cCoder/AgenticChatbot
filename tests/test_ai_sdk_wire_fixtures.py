@@ -109,9 +109,11 @@ class _FakeUpstreamResponse:
     def __init__(self, wire: str) -> None:
         self._wire = wire
 
-    async def aiter_lines(self):
-        for line in self._wire.split("\n"):
-            yield line
+    async def aiter_bytes(self):
+        # Odd-sized chunks: lines and UTF-8 sequences straddle chunk boundaries.
+        data = self._wire.encode("utf-8")
+        for start in range(0, len(data), 37):
+            yield data[start : start + 37]
 
     async def aread(self):
         return b""

@@ -696,6 +696,33 @@ def test_ai_sdk_emits_exactly_one_done_and_ends_with_it():
     assert order[-1] == "[DONE]", f"stream must end on [DONE]; order={order}"
 
 
+def test_ai_sdk_image_stream_fits_the_frame_ceiling_without_losing_the_image():
+    """The wire ceiling never trims media: every frame fits, by reference or
+    inline budget, and the final image still arrives as a protected reference."""
+    from app.core.config import settings
+
+    conversation_id = uuid4()
+    user_id = uuid4()
+    image_url = f"/chat-images/{uuid4()}"
+    service = _build_message_service(
+        conversation_id=conversation_id, user_id=user_id, image_url=image_url, resume=False
+    )
+    body = _drive_ai_sdk(conversation_id, user_id, service)
+    frames = [frame for frame in body.split("\n\n") if frame.startswith("data: ")]
+    payloads = _parse_sse(body)
+
+    assert all(
+        len(f"{frame}\n\n".encode()) <= settings.stream_max_event_bytes for frame in frames
+    )
+    assert not any(
+        isinstance(p, dict) and p.get("type") == "data-stream-error" for p in payloads
+    )
+    assert any(
+        isinstance(p, dict) and p.get("type") == "file" and p.get("url") == image_url
+        for p in payloads
+    )
+
+
 def test_ai_sdk_delivers_oversized_final_image_early():
     """RED: an oversized FINAL image must produce an early
     ``data-image-preview`` with status=final (or an early reference file part)
