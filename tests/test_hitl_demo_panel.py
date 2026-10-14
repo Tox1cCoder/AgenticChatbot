@@ -115,6 +115,16 @@ def test_demo_renders_per_skill_command_hitl_controls():
     assert "approval rules below are inactive until it is enabled" in src
 
 
+def test_skill_hitl_radio_takes_its_value_only_from_session_state():
+    # Passing index= as well makes Streamlit warn that the widget "was created
+    # with a default value but also had its value set via the Session State API".
+    compact = "".join(_demo_source().split())
+    assert "st.session_state[widget_key]=current_modest.radio(" in compact
+    radio_call = compact.split("st.session_state[widget_key]=current_modest.radio(", 1)[1]
+    radio_call = radio_call.split("on_change=_persist_skill_hitl_mode", 1)[0]
+    assert "index=" not in radio_call
+
+
 def test_demo_mcp_hitl_controls_are_explicitly_client_origin_scoped():
     src = _demo_source()
     compact = "".join(src.split())

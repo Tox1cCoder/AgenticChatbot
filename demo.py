@@ -10481,7 +10481,6 @@ def render_skills_tab():
                 st.radio(
                     "Approval mode for this skill command",
                     modes,
-                    index=modes.index(current_mode),
                     key=widget_key,
                     horizontal=True,
                     help=(
