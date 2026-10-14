@@ -642,6 +642,7 @@ async def resume_interrupt_ai_sdk(
         inline_rich_response_v1=(
             inline_rich_response_v1 and getattr(settings, "inline_rich_response_enabled", False)
         ),
+        stream_web_answer_v1=resume_request.stream_web_answer_v1,
     )
 
     def event_source():
@@ -740,6 +741,7 @@ async def continue_generation_ai_sdk(
         inline_rich_response_v1=(
             inline_rich_response_v1 and getattr(settings, "inline_rich_response_enabled", False)
         ),
+        stream_web_answer_v1=continue_request.stream_web_answer_v1,
     )
 
     def event_source():

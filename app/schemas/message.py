@@ -190,6 +190,14 @@ class InterruptResumeRequest(BaseModel):
             "for the resumed response (marker-bearing content + `data-rich-items`)."
         ),
     )
+    stream_web_answer_v1: bool = Field(
+        default=False,
+        description=(
+            "AI SDK only: stream web answer drafts as text-delta parts for this "
+            "response. The client must apply data-answer-reconcile to replace the "
+            "draft with the persisted text. Presentation only; never stored."
+        ),
+    )
 
     @field_validator("decisions", mode="before")
     @classmethod
@@ -267,6 +275,8 @@ class ContinueGenerationRequest(BaseModel):
         ..., ge=1, description="Lifecycle version this command was issued against"
     )
     inline_rich_response_v1: bool = False
+    # AI SDK presentation of this response only; see InterruptResumeRequest.
+    stream_web_answer_v1: bool = False
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 

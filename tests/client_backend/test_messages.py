@@ -487,3 +487,39 @@ async def test_the_ai_sdk_continue_proxy_uses_the_ai_sdk_stream_shape():
     assert "data-generation" in body
     # The AI SDK transport terminates with its sentinel; the internal one does not.
     assert body.endswith("data: [DONE]\n\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["chat", "resume", "continue"])
+@pytest.mark.parametrize("key", ["streamWebAnswerV1", "stream_web_answer_v1"])
+async def test_ai_sdk_proxies_forward_the_web_stream_capability(operation, key):
+    """The capability rides the body unchanged; the device id is still stamped."""
+    bridge = _BridgeStub()
+    server_client = _ServerClientStub()
+    body = {
+        "conversationId": "conversation-1",
+        key: True,
+        "inlineRichResponseV1": True,
+        "deviceId": "stale-device",
+    }
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _wire(monkeypatch, bridge, server_client)
+        if operation == "chat":
+            response = await messages_api.ai_sdk_chat("conversation-1", body, _session=_session())
+        elif operation == "resume":
+            response = await messages_api.ai_sdk_resume_interrupt(body, _session=_session())
+        else:
+            response = await messages_api.ai_sdk_continue_generation(body, _session=_session())
+        await _collect_streaming_body(response)
+
+    forwarded = {
+        "chat": [payload for _, payload in server_client.chat_calls],
+        "resume": server_client.resume_calls,
+        "continue": server_client.continue_ai_sdk_calls,
+    }[operation]
+    assert len(forwarded) == 1
+    assert forwarded[0][key] is True
+    assert forwarded[0]["inlineRichResponseV1"] is True
+    assert forwarded[0]["device_id"] == "device-123"
+    assert "deviceId" not in forwarded[0]
