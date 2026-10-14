@@ -118,6 +118,9 @@ async def _drain_one_at_a_time(
     finally:
         if getter is not None:
             getter.cancel()
+            # Let it finish unwinding, so no task outlives the stream.
+            with contextlib.suppress(asyncio.CancelledError):
+                await getter
 
 
 def _frame_exceeds_ceiling(frame: str) -> bool:

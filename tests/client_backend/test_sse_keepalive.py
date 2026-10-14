@@ -515,6 +515,62 @@ async def test_internal_proxy_still_passes_a_non_json_frame_through(monkeypatch)
     assert body == "data: not-json\n\n"
 
 
+async def _proxy_body_with_drop(monkeypatch, lines) -> str:
+    """The upstream sends ``lines`` then the connection drops mid-response."""
+    import httpx
+
+    from client_backend.api import messages as messages_api
+
+    class _Response:
+        status_code = 200
+
+        async def aiter_bytes(self):
+            for line in lines:
+                yield f"{line}\n".encode()
+            raise httpx.RemoteProtocolError("peer closed connection without sending complete body")
+
+        async def aread(self):
+            return b""
+
+    class _Stream:
+        async def __aenter__(self):
+            return _Response()
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    client = _client()
+    real_client = await client._get_client()
+    monkeypatch.setattr(real_client, "stream", lambda *a, **kw: _Stream())
+    response = messages_api._build_sse_response(client.stream_ai_sdk_chat("c-1", {}), ai_sdk=True)
+    return "".join([chunk async for chunk in response.body_iterator])
+
+
+@pytest.mark.asyncio
+async def test_an_upstream_connection_drop_is_reported_as_incomplete(monkeypatch):
+    body = await _proxy_body_with_drop(monkeypatch, _PARTIAL_UPSTREAM)
+    wire = [frame for frame in _frames(body) if frame != "[DONE]"]
+
+    assert "peer closed" not in body
+    codes = [f["data"].get("errorCode") for f in wire if f["type"] == "data-stream-error"]
+    assert codes == ["stream_incomplete"]
+    assert wire[-1] == {"type": "finish", "finishReason": "error"}
+
+
+@pytest.mark.asyncio
+async def test_an_upstream_connection_drop_after_finish_is_not_an_error(monkeypatch):
+    lines = [
+        *_PARTIAL_UPSTREAM,
+        'data: {"type":"text-end","id":"t1"}',
+        'data: {"type":"finish-step"}',
+        'data: {"type":"finish"}',
+    ]
+    frames = _frames(await _proxy_body_with_drop(monkeypatch, lines))
+
+    assert not any(f != "[DONE]" and f["type"] == "error" for f in frames)
+    assert frames.count("[DONE]") == 1
+
+
 @pytest.mark.asyncio
 async def test_ai_sdk_proxy_tolerates_a_missing_done_after_finish(monkeypatch):
     lines = [

@@ -237,7 +237,10 @@ Rules:
 - `errorCode` values you can act on: `stream_incomplete` (read status; the turn may be stopped,
   paused, or still running), `stream_event_too_large` (413; the response was cut off server-side),
   and the HITL duplicate codes in the main contract.
-- Stop pairs the local abort with the server command; aborting the fetch alone stops nothing:
+- Stop pairs the local abort with the server command. Aborting the fetch alone ends the turn as
+  a *disconnect* (the partial is saved with `stop_reason: "disconnect"`), not as a user Stop,
+  and gives you no confirmation; the explicit command records the user's intent and returns a
+  status you can poll:
 
 ```ts
 async function stopGeneration(snapshot: { generationId: string; conversationId: string; version: number }) {

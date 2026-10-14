@@ -121,10 +121,7 @@ def _record(report: WireReport, index: int, kind: str, frame: dict, data: dict) 
         report.error_code = data.get("errorCode")
     elif kind == "finish":
         report.finish_reason = frame.get("finishReason")
-    is_answer = kind == "text-delta" or (
-        kind == "data-answer-preview" and data.get("operation") in {"replace", "append"}
-    )
-    if is_answer and report.first_answer_index is None:
+    if _is_answer_frame(frame) and report.first_answer_index is None:
         report.first_answer_index = index
 
 
@@ -156,6 +153,45 @@ def analyze_wire(wire: str) -> WireReport:
         report.problems.append(f"expected at most one reconcile, found {report.reconciles}")
     report.visible_answer = reducer.visible()
     return report
+
+
+def _is_answer_frame(frame: dict[str, Any]) -> bool:
+    kind = frame.get("type")
+    data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
+    return kind == "text-delta" or (
+        kind == "data-answer-preview" and data.get("operation") in {"replace", "append"}
+    )
+
+
+class FirstAnswerWatch:
+    """Notice the first answer frame as network chunks arrive.
+
+    Parses complete ``data:`` lines rather than matching text, because the
+    sidecar re-serialises frames with different spacing and a frame can be
+    split across chunks.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self.seen = False
+
+    def feed(self, text: str) -> bool:
+        """Return True on the chunk that completes the first answer frame."""
+        if self.seen:
+            return False
+        self._pending += text
+        *complete, self._pending = self._pending.split("\n")
+        for line in complete:
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            try:
+                frame = json.loads(line[len("data: ") :])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(frame, dict) and _is_answer_frame(frame):
+                self.seen = True
+                return True
+        return False
 
 
 def compare_with_history(message_id: str | None, visible: str, history: dict) -> list[str]:
@@ -212,6 +248,7 @@ def _run(args: argparse.Namespace, config: dict[str, Any]) -> list[str]:
     started = time.monotonic()
     chunks: list[str] = []
     first_answer_at: float | None = None
+    watch = FirstAnswerWatch()
     with httpx.Client(timeout=timeout) as client:
         with client.stream("POST", chat_url, json=body, headers=headers) as response:
             if response.status_code != 200:
@@ -221,7 +258,7 @@ def _run(args: argparse.Namespace, config: dict[str, Any]) -> list[str]:
                 problems.append(f"missing {_V1_HEADER}: v1 header")
             for text in response.iter_text():
                 chunks.append(text)
-                if first_answer_at is None and '"type":"text-delta"' in text:
+                if watch.feed(text):
                     first_answer_at = time.monotonic()
         wire = "".join(chunks)
         report = analyze_wire(wire)

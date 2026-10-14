@@ -122,6 +122,9 @@ async def _drain_one_at_a_time(
     finally:
         if getter is not None:
             getter.cancel()
+            # Let it finish unwinding, so no task outlives the stream.
+            with contextlib.suppress(asyncio.CancelledError):
+                await getter
 
 
 def _frame_exceeds(frame: str, limit: int) -> bool:
@@ -459,8 +462,12 @@ class AISDKV6StreamAdapter:
             async with contextlib.aclosing(drained) as items:
                 async for item in items:
                     yield make_event("heartbeat", sequence=0) if item is _HEARTBEAT else item
-            # A source error surfaces once, after every event it queued.
-            producer.result()
+            # A source error surfaces once, after every event it queued. A
+            # cancelled producer is a Stop (the registry cancels the task the
+            # service runs in), not this consumer's cancellation: the stream
+            # ends as unresolved and _terminate reports it.
+            if not producer.cancelled():
+                producer.result()
         finally:
             if not producer.done():
                 producer.cancel()

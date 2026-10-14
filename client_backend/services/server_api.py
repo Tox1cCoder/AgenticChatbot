@@ -455,6 +455,13 @@ class ServerAPIClient:
             logger.warning(
                 "SSE stream read timeout on %s (this should not happen with read=None)", path
             )
+        except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            # A crashed server or reset connection mid-response is how an
+            # early end usually arrives -- not as a clean EOF.
+            if not require_done:
+                raise
+            logger.warning("SSE stream %s dropped: %s", path, type(exc).__name__)
+            raise ServerStreamIncompleteError(path) from exc
         if require_done and not done_seen:
             raise ServerStreamIncompleteError(path)
 

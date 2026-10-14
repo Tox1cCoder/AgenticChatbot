@@ -84,6 +84,37 @@ def test_contract_violations_are_reported(wire, problem):
     assert any(problem in item for item in report.problems), report.problems
 
 
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        # The direct server writes compact JSON.
+        ['data: {"type":"start"}\n\n', 'data: {"type":"text-delta","id":"t","delta":"a"}\n\n'],
+        # The sidecar re-serialises with default separators.
+        [
+            'data: {"type": "start"}\n\n',
+            'data: {"type": "text-delta", "id": "t", "delta": "a"}\n\n',
+        ],
+        # A frame split across network chunks.
+        ['data: {"type":"start"}\n\ndata: {"type":"te', 'xt-delta","id":"t","delta":"a"}\n\n'],
+    ],
+)
+def test_first_answer_is_detected_on_parsed_frames(chunks):
+    from scripts.verify_answer_streaming_contract import FirstAnswerWatch
+
+    watch = FirstAnswerWatch()
+    seen = [watch.feed(chunk) for chunk in chunks]
+
+    assert seen == [False, True]
+
+
+def test_keepalives_and_reasoning_are_not_a_first_answer():
+    from scripts.verify_answer_streaming_contract import FirstAnswerWatch
+
+    watch = FirstAnswerWatch()
+
+    assert watch.feed(': keepalive\n\ndata: {"type":"reasoning-delta","delta":"x"}\n\n') is False
+
+
 def test_history_comparison_requires_the_streamed_message_and_its_text():
     history = {
         "data": {

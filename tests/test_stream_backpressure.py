@@ -194,6 +194,40 @@ async def test_cancellation_while_the_producer_waits_to_enqueue_does_not_deadloc
     assert _other_live_tasks() == []
 
 
+@pytest.mark.asyncio
+async def test_a_stop_cancelling_the_producer_in_put_still_ends_the_stream_cleanly():
+    """A same-worker Stop cancels the task the service generator runs in -- the
+    producer -- which with a one-slot queue is often parked in ``put``. The
+    client must still get a terminal sequence, not an escaped CancelledError."""
+    producer_task: list[asyncio.Task] = []
+
+    async def source():
+        producer_task.append(asyncio.current_task())
+        for index in range(_SOURCE_EVENTS):
+            yield make_event("message_delta", sequence=index, data={"text": "x"})
+
+    frames: list[str] = []
+    stream = _adapter(source).iter_sse()
+    async for frame in stream:
+        frames.append(frame)
+        if '"text-delta"' in frame:
+            break
+    await _let_the_loop_run()  # the producer is now parked in put()
+    producer_task[0].cancel()  # what InFlightGeneration.request_cancel() does
+
+    async for frame in stream:
+        frames.append(frame)
+
+    payloads = _payloads(frames)
+    assert any(
+        p["type"] == "data-stream-error" and p["data"]["errorCode"] == "stream_incomplete"
+        for p in payloads
+    )
+    assert payloads[-1] == {"type": "finish", "finishReason": "error"}
+    assert frames[-1] == "data: [DONE]\n\n"
+    assert _other_live_tasks() == []
+
+
 # -- adapter size ceiling -----------------------------------------------------
 
 
