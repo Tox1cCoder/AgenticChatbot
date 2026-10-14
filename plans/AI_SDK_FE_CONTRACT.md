@@ -12,6 +12,9 @@ below is informational and must not override that contract.
 | `POST /api/chat/{conversationId}` | Chat stream (AI SDK UI Message Stream, SSE). |
 | `POST /ai/chat/{conversationId}` | Alias of the above. Use `/api/chat` for new integrations. |
 | `POST /ai/resume-interrupt` | Resume after a HITL interrupt. Same SSE stream format. |
+| `POST /ai/continue` | Continue a turn paused at its execution budget. Same SSE stream format. |
+| `POST /messages/stop` | Stop a running generation (`202` = accepted, not yet confirmed). |
+| `GET /messages/generations/{generationId}?conversation_id=…` | Authoritative generation status: what to read after a `202` Stop, an `error`, or a lost stream. |
 | `GET /hitl/interrupts/{interruptId}` | Read the authenticated owner's durable HITL lifecycle state for reconciliation; other owners cannot discover it. |
 | `GET /ai/conversations/{conversationId}/messages` | Message history as AI SDK `UIMessage` objects. |
 | `POST /ai/conversations`, `GET /ai/conversations`, `GET/PATCH/DELETE /ai/conversations/{id}` | Conversation CRUD (standard `ApiResponse` envelope). |
@@ -53,7 +56,7 @@ Content-Type: application/json
 | `content` | string | Fallback user text when `messages` is empty. |
 | `userId` | string | Client hint only. Ownership and user-aware features use the authenticated JWT identity, never this field. |
 | `inlineRichResponseV1` | boolean | Rich-response v1 capability flag. `inline_rich_response_v1` is an accepted equivalent. **Required for rich UI**: without it the response contains no `rich_items`, no markers, no widgets, no canvas. |
-| `streamWebAnswerV1` | boolean | Opt in to live web-answer `text-delta` chunks. The client must handle `data-answer-reconcile` and replacement `data-answer-preview` events. Default `false`. |
+| `streamWebAnswerV1` | boolean | Opt in to live web-answer `text-delta` chunks. The client must handle `data-answer-reconcile` and replacement `data-answer-preview` events. Default `false`. Send it on Chat, Resume, **and** Continue; see [answer streaming](../docs/frontend/answer-streaming.md). |
 | `deviceId` | string | Injected by the sidecar for local runtime tools. `device_id` is an accepted equivalent. |
 
 Unknown extra fields are accepted and ignored.
@@ -164,13 +167,23 @@ Every stream begins:
 `messageId` equals the persisted assistant message id — do not create a
 duplicate row after refetching history.
 
-Terminal sequences (exactly one occurs per stream):
+Terminal sequences (exactly one occurs per drained stream; `[settle]` is the
+draft cleanup below -- `data-answer-preview` `clear` and/or one
+`data-answer-reconcile`, only when there is something to retire):
 
 | Outcome | Sequence |
 |---|---|
-| Complete | optional `file` events → `data-assistant-message` → `text-end` → [`reasoning-end`] → `finish-step` → `finish` → `[DONE]` |
-| Interrupt | [`text-delta` with pause copy] → `text-end` → [`reasoning-end`] → `data-interrupt` → `finish-step` → `finish` → `[DONE]` |
-| Error | [`data-error-message`] → [`data-stream-error`] → `error` → `text-end` → [`reasoning-end`] → `finish-step` → `finish` → `[DONE]` |
+| Complete | [settle] → optional `file` events → `data-assistant-message` → `text-end` → [`reasoning-end`] → `finish-step` → `finish` → `[DONE]` |
+| Interrupt | [settle] → [`text-delta` with pause copy] → `text-end` → [`reasoning-end`] → `data-interrupt` → `finish-step` → `finish` → `[DONE]` |
+| Budget pause | [settle to the saved partial] → [`data-generation` `continuation_available`] → `text-end` → [`reasoning-end`] → `finish-step` → `finish` → `[DONE]` |
+| Error | [settle] → [`data-error-message`] → [`data-stream-error`] → `error` → `text-end` → [`reasoning-end`] → `finish-step` → `finish` `{finishReason: "error"}` → `[DONE]` |
+| Incomplete (server stream ended early, or a Stop) | [settle] → `data-stream-error` `{errorCode: "stream_incomplete"}` → `error` → `text-end` → [`reasoning-end`] → `finish-step` → `finish` `{finishReason: "error"}` → `[DONE]` |
+
+A stream whose `finish` has `finishReason: "error"` did not complete: read the
+generation status and history rather than treating the text as an answer. A
+frame larger than `STREAM_MAX_EVENT_BYTES` (sidecar: `CLIENT_STREAM_MAX_EVENT_BYTES`; default 8 MiB) is
+never written; the stream ends as an Error with `errorCode`
+`stream_event_too_large` and `statusCode` `413`.
 
 Event catalog:
 
@@ -241,16 +254,21 @@ stream sends:
 
 On `data-answer-reconcile`, replace the displayed draft for that message ID
 with `content` in application render state; AI SDK's accumulated text part is
-append-only and does not replace itself. An empty `content` discards the draft
-after an error or interrupt. If citation validation starts a second model run,
-its chunks arrive
-as `data-answer-preview` `replace`/`append` operations; show those over the
-first run's draft until reconciliation. Streamed drafts can contain unrendered
+append-only and does not replace itself. Exactly one reconcile is sent per
+response that streamed a draft. Its `content` is the persisted text as history
+projects it: the final answer on completion, the saved partial on a budget
+pause, the paused message on an interrupt, and `""` (discard; recover from
+history) on an error, a Stop, or an early end. If citation validation starts a
+second model run, its chunks arrive as `data-answer-preview` `replace`/`append`
+operations; show those over the first run's draft until reconciliation. That
+repair overlay is always cleared (`clear`) before the reconcile, and previews
+after it are not sent. Streamed drafts can contain unrendered
 `[[source:S#]]`/`[[image:I#]]` tokens or text that fails the final citation
 check. Do not persist them; the reconciliation event and message history carry
 the finalized text. Clear the local override on abort and when a history
 refresh supplies the persisted message. Clients that cannot replace a draft
-must leave `streamWebAnswerV1` unset.
+must leave `streamWebAnswerV1` unset. The full reducer contract and example
+streams are in [answer streaming](../docs/frontend/answer-streaming.md).
 
 Reasoning:
 
@@ -613,13 +631,16 @@ POST /ai/resume-interrupt
   "decisions": [
     { "type": "approve", "toolCallId": "tool-call-id", "action": "tool_name", "args": {} }
   ],
-  "inlineRichResponseV1": true
+  "inlineRichResponseV1": true,
+  "streamWebAnswerV1": true
 }
 ```
 
 `deviceId` is accepted for sidecar-scoped interrupts. Snake-case equivalents
-(`thread_id`, `tool_call_id`, `task_id`, `inline_rich_response_v1`) are
-accepted everywhere camelCase is shown.
+(`thread_id`, `tool_call_id`, `task_id`, `inline_rich_response_v1`,
+`stream_web_answer_v1`) are accepted everywhere camelCase is shown.
+`streamWebAnswerV1` has the same meaning as on Chat; a capable client sends it
+here and on `POST /ai/continue` so the resumed answer streams the same way.
 
 Decision fields:
 

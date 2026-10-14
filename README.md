@@ -877,7 +877,9 @@ local timeout wrapper.
 The backend preserves rich tool render metadata in two places:
 
 - Persisted assistant message metadata: `metadata.tool_artifacts[].render`
-- AI SDK streams: `tool-output-available.render`
+- AI SDK streams: a transient `data-tool-render` part (`data.toolCallId`, `data.render`)
+  sent just before the matching `tool-output-available`, whose strict schema has no
+  room for it
 
 The model-facing tool message remains compact text. Frontends should render from
 `render` when present and fall back to `output` when it is absent.
@@ -1344,6 +1346,17 @@ See [Client Runtime Bridge](#client-runtime-bridge).
 | `POST` | `/widgets/{widget_id}/actions/{action_key}` | Resolve an action template into a chat message |
 | `WS`  | `/widgets/{widget_id}/connect` | Widget state WebSocket |
 
+AI SDK answer streaming, in short: every frame is validated by the SDK's strict
+schemas (pinned by `tests/ai_sdk_wire/`, which parses backend output with the real
+`ai@6.0.0` package), keepalives are `: keepalive` comments, and a stream that ends
+without a terminal outcome finishes with `finishReason: "error"` and a
+`stream_incomplete` code instead of looking complete. Clients that send
+`streamWebAnswerV1: true` on Chat, Resume, and Continue get web-answer drafts as
+`text-delta` and must apply the single `data-answer-reconcile` that replaces the draft
+with the saved text. Buffering is one event per stream boundary, and no frame exceeds
+`STREAM_MAX_EVENT_BYTES` on the server and `CLIENT_STREAM_MAX_EVENT_BYTES` on the sidecar (default 8 MiB each). Frontend guide:
+[`docs/frontend/answer-streaming.md`](docs/frontend/answer-streaming.md).
+
 ### AI SDK surface ([`/ai/*` + `/api/chat/*`](app/api/ai_sdk.py))
 
 Vercel AI SDK compatible streaming + UIMessage-format routes:
@@ -1359,6 +1372,7 @@ Vercel AI SDK compatible streaming + UIMessage-format routes:
 | `POST` | `/api/chat/{conversation_id}` |
 | `POST` | `/ai/chat/{conversation_id}` |
 | `POST` | `/ai/resume-interrupt` |
+| `POST` | `/ai/continue` |
 
 Responses set `X-Vercel-Ai-UI-Message-Stream: v1` (whitelisted as a CORS expose-header).
 
@@ -1383,8 +1397,8 @@ In addition to proxying most server routes under both `/...` and `/api/...`, the
 
 | API namespace | Endpoint | Stream protocol | Primary events |
 | --- | --- | --- | --- |
-| assistant-ui / AI SDK v6 | `POST /api/chat/{conversation_id}` and `POST /ai/chat/{conversation_id}` | Vercel AI SDK UI Message Stream over SSE | `start`, `start-step`, `text-start`, `text-delta`, `reasoning-start`, `reasoning-delta`, `tool-input-start`, `tool-input-available`, `tool-output-available`, `data-interrupt`, `data-rich-items`, `data-image-preview`, `finish-step`, `finish`, `[DONE]` |
-| assistant-ui / AI SDK v6 | `POST /ai/resume-interrupt` | As above | As above |
+| assistant-ui / AI SDK v6 | `POST /api/chat/{conversation_id}` and `POST /ai/chat/{conversation_id}` | Vercel AI SDK UI Message Stream over SSE | `start`, `start-step`, `text-start`, `text-delta`, `reasoning-start`, `reasoning-delta`, `tool-input-start`, `tool-input-available`, `tool-output-available`, `data-tool-render`, `data-answer-preview`, `data-answer-reconcile`, `data-interrupt`, `data-rich-items`, `data-image-preview`, `data-stream-error`, `error`, `finish-step`, `finish`, `[DONE]` |
+| assistant-ui / AI SDK v6 | `POST /ai/resume-interrupt` and `POST /ai/continue` | As above | As above |
 | Streamlit internal client | `POST /messages/stream` and `POST /messages/resume-interrupt` | Backend JSON SSE compatibility stream | `user_message_created`, `agent_selected`, `token`, `thinking`, `tool`, `rich_items`, `image_preview`, `interrupt`, `title_updated`, `complete`, `error`, `heartbeat` |
 | Backend internal | service layer | Canonical v3 event model (`V3StreamEvent`, `schema_version="v3"`) | `message_delta`, `reasoning_delta`, `tool_call_available`, `tool_execution_end`, `image_preview`, `subagent_start`, `subagent_end`, `interrupt`, `complete`, `error` |
 | Device runtime | WS `/device-runtime/{device_id}/connect` | WebSocket | Tool dispatch + results |
