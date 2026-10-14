@@ -254,8 +254,11 @@ class AISDKV6StreamAdapter:
         state = self._state
         self._started_at = time.monotonic()
         try:
-            async for frame in self._iter_frames():
-                yield frame
+            # aclosing: closing this generator must close the source before it
+            # returns, not leave the inner generator to the GC finalizer.
+            async with contextlib.aclosing(self._iter_frames()) as frames:
+                async for frame in frames:
+                    yield frame
         finally:
             # Recorded once per response. Not closed means the client went away
             # (or we were cancelled) before the stream finished.

@@ -148,9 +148,7 @@ async def _drain(response) -> str:
 async def proxy_wire(upstream_wire: str, monkeypatch) -> str:
     """Pass a direct server stream through the sidecar's real AI SDK proxy."""
     client = await _server_client_for(upstream_wire, monkeypatch)
-    response = messages_api._build_sse_response(
-        client.stream_ai_sdk_chat("c-1", {}), ai_sdk=True
-    )
+    response = messages_api._build_sse_response(client.stream_ai_sdk_chat("c-1", {}), ai_sdk=True)
     assert response.headers[_V1_HEADER] == "v1"
     return await _drain(response)
 

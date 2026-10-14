@@ -60,9 +60,7 @@ def test_every_documented_label_is_its_own_series(operation, outcome):
     metrics = _metrics()
     metrics.record_end(operation=operation, outcome=outcome)
 
-    assert _sample(
-        metrics, "ai_sdk_stream_end_total", operation=operation, outcome=outcome
-    ) == 1.0
+    assert _sample(metrics, "ai_sdk_stream_end_total", operation=operation, outcome=outcome) == 1.0
 
 
 @pytest.mark.asyncio
@@ -77,9 +75,7 @@ async def test_a_completed_stream_records_first_answer_and_end_once():
 
     assert _sample(metrics, "ai_sdk_stream_first_answer_seconds_count", operation="resume") == 1
     assert _sample(metrics, "ai_sdk_stream_delta_to_wire_seconds_count", operation="resume") == 1
-    assert _sample(
-        metrics, "ai_sdk_stream_end_total", operation="resume", outcome="complete"
-    ) == 1
+    assert _sample(metrics, "ai_sdk_stream_end_total", operation="resume", outcome="complete") == 1
 
 
 @pytest.mark.asyncio
@@ -190,9 +186,9 @@ async def test_a_disconnect_is_recorded_once_and_never_as_an_outcome():
     await stream.aclose()
 
     rendered = metrics.render().decode()
-    assert _sample(
-        metrics, "ai_sdk_stream_end_total", operation="unknown", outcome="disconnect"
-    ) == 1
+    assert (
+        _sample(metrics, "ai_sdk_stream_end_total", operation="unknown", outcome="disconnect") == 1
+    )
     assert rendered.count("ai_sdk_stream_end_total{") == 1
 
 
