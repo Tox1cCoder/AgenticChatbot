@@ -173,6 +173,25 @@ def test_resolve_server_name_fuzzy_returns_none_for_weak_match():
     assert catalog.resolve_server_name("totally-unrelated") is None
 
 
+@pytest.mark.parametrize("query", ["web search", "image search", "search images", "search web"])
+def test_capability_queries_do_not_resolve_to_a_provider_by_generic_name_tokens(query):
+    catalog = McpToolCatalog(mcp_manager=object())
+    catalog._tools_by_server = {
+        "brave_image_search": [ToolDescriptor(
+            "brave_image_search", "brave_image_search", "Search the web for images.",
+            ["query"], ["query"], "brave-fp",
+        )],
+        "tavily": [ToolDescriptor(
+            "tavily_search", "tavily", "Search the web for current information.",
+            ["query"], ["query"], "tavily-fp",
+        )],
+    }
+    catalog._server_name_lower_map = {name: name for name in catalog._tools_by_server}
+    assert catalog.resolve_server_name(query) is None
+    assert catalog.resolve_server_name("brave") == "brave_image_search"
+    assert catalog.resolve_server_name("brave_image_search") == "brave_image_search"
+
+
 # ---------------------------------------------------------------------------
 # Phase 0 Regression: same-name server tools do not collapse
 # ---------------------------------------------------------------------------

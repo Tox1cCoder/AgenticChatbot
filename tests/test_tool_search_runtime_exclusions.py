@@ -118,6 +118,17 @@ async def test_a_raw_web_tool_is_never_autoloaded_by_an_excluded_search():
 
 
 @pytest.mark.asyncio
+async def test_filtered_web_discovery_explains_the_bound_replacements():
+    result = await _execute_tool_search(
+        query="image search", excluded_tool_names=RAW_WEB_TOOL_NAMES,
+    )
+
+    assert "web_search" in result.get("guidance", "")
+    assert "web_open" in result["guidance"]
+    assert "refining" in result["guidance"]
+
+
+@pytest.mark.asyncio
 async def test_unexcluded_web_tools_still_reach_discovery():
     """Only the three product tools replace are hidden. ``tavily_map`` has no
     product equivalent, so hiding it would remove a capability rather than

@@ -340,11 +340,13 @@ class McpToolCatalog:
 
         for candidate_name, descriptors in self._tools_by_server.items():
             candidate_tokens = set(tokenize_text(candidate_name))
+            # Capability words do not identify an integration. In particular,
+            # "web search" must not hard-scope discovery to brave_image_search.
+            name_tokens = candidate_tokens - {
+                "web", "image", "images", "search", "server", "mcp", "tool", "tools", "api"
+            }
             has_name_signal = (
-                candidate_name.lower() == query_lower
-                or candidate_name.lower().startswith(query_lower)
-                or query_lower.startswith(candidate_name.lower())
-                or bool(query_tokens & candidate_tokens)
+                bool(set(tokenize_text(server_name)) & name_tokens)
             )
             if not has_name_signal:
                 continue

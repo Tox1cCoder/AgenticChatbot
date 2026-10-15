@@ -205,6 +205,9 @@ class ToolSearchOutput(BaseModel):
         description="Number of tools that were autoloaded and ready for immediate use"
     )
     more_available: bool = Field(description="True if more results exist beyond the returned list")
+    guidance: str | None = Field(
+        default=None, description="Recovery guidance when provider tools are intentionally hidden"
+    )
 
 
 async def _execute_tool_search(
@@ -426,7 +429,14 @@ async def _execute_tool_search(
         top_k=effective_top_k + 1,  # Request one extra to detect truncation
     )
 
+    filtered_web_tools = False
     if excluded:
+        from .deferred_tool_binding import RAW_WEB_TOOL_NAMES
+
+        filtered_web_tools = any(
+            internal.get("tool_name") in (excluded & RAW_WEB_TOOL_NAMES)
+            for internal in internal_results
+        )
         kept_pairs = [
             (public, internal)
             for public, internal in zip(public_results, internal_results, strict=True)
@@ -582,6 +592,13 @@ async def _execute_tool_search(
     }
     if resolved_server_name:
         result["resolved_server_name"] = resolved_server_name
+    if filtered_web_tools:
+        result["guidance"] = (
+            "Raw web providers are intentionally hidden from discovery; refining this query "
+            "will not expose them. Use web_search directly for web and image search and "
+            "web_open for page content if those tools are bound. Otherwise, hand off to a "
+            "web-capable agent."
+        )
     if settings.mcp_tool_search_debug_scores:
         result["debug_scores"] = [
             {
