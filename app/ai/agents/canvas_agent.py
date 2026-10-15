@@ -67,6 +67,11 @@ Browser artifacts are things like HTML pages, SVGs, React apps, canvas \
 visualizations, or self-contained interactive code intended for the canvas \
 preview.
 
+For web research while building an artifact, use the bound `web_search` tool \
+directly; it supports both web and image search. Use `web_open` for page content. \
+These tools are already available and do not need `tool_search` discovery. \
+Use `tool_search` for other integrations.
+
 Canvas and inline widgets are separate outputs. Use canvas for standalone, editable \
 code previews. Use widget tools only when the user explicitly wants an inline/live \
 conversation widget and no current canvas source was provided; never replace a canvas \
@@ -222,6 +227,103 @@ def _build_previous_artifact_message(snapshot: CanvasArtifactSnapshot) -> LCHuma
     )
 
 
+def finalize_canvas_response(
+    response: AgentResponse,
+    previous_artifact: CanvasArtifactSnapshot | None = None,
+    conversation_id: str | None = None,
+) -> AgentResponse:
+    """Extract renderable source for both legacy and specialist execution paths."""
+    # If the base class returned a tool-call or error, pass it straight through.
+    if response.message.tool_calls or response.error:
+        return response
+
+    raw_text = (response.message.content or "").strip()
+    if not raw_text:
+        return response
+
+    # Extract the code artifact
+    artifact = _extract_artifact(raw_text)
+    description = _strip_code_block(raw_text)
+
+    if response.metadata is None:
+        response.metadata = {}
+
+    if previous_artifact is not None and (artifact is None or bool(artifact.get("truncated"))):
+        reason = "missing_artifact" if artifact is None else "truncated_output"
+        response.metadata["canvas_update"] = previous_artifact.update_status(
+            "failed",
+            reason=reason,
+        )
+        response.message.content = description or (
+            "I couldn't produce a complete canvas update, so I kept the current revision."
+        )
+        if description:
+            response.message.content += (
+                "\n\nI couldn't produce a complete canvas update, so I kept the current "
+                "revision."
+            )
+        return response
+
+    if previous_artifact is not None and artifact is not None:
+        if artifact["content"] == previous_artifact.content:
+            response.metadata["canvas_update"] = previous_artifact.update_status("unchanged")
+            response.message.content = description or "The canvas is already up to date."
+            return response
+
+        next_revision = previous_artifact.revision + 1
+        artifact = previous_artifact.to_artifact(
+            content=artifact["content"],
+            language=artifact["language"],
+            title=artifact["title"],
+            revision=next_revision,
+            operation="update",
+        )
+        response.metadata["canvas_update"] = previous_artifact.update_status(
+            "updated",
+            revision=next_revision,
+        )
+    elif artifact is not None:
+        artifact.update(
+            {
+                "artifact_id": CANVAS_ARTIFACT_ID,
+                "revision": 1,
+                "operation": "create",
+            }
+        )
+        response.metadata["canvas_update"] = {
+            "status": "updated",
+            "artifact_id": CANVAS_ARTIFACT_ID,
+            "base_revision": 0,
+            "revision": 1,
+        }
+
+    if artifact:
+        response.metadata["canvas_artifact"] = artifact
+        # Replace the raw LLM output (which contains the full code block) with
+        # a clean conversational description for the chat thread.
+        content = description or (
+            f"Here's your **{artifact['title']}**! "
+            "You can view and interact with it in the canvas panel. "
+            "Let me know if you'd like any changes."
+        )
+        if artifact.get("truncated"):
+            content += (
+                "\n\n> The artifact output was cut off before completion, so the "
+                "canvas may be incomplete. Ask me to regenerate it if something "
+                "looks broken."
+            )
+        response.message.content = content
+    else:
+        # The LLM didn't produce a fenced code block — return as-is so the user
+        # sees the response and can ask again.
+        logger.warning(
+            "CanvasAgent: no fenced code block found in LLM output (conversation_id=%s)",
+            conversation_id,
+        )
+
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
@@ -291,95 +393,7 @@ class CanvasAgent(BaseAgent):
             **system_prompt_kwargs,
         )
 
-        # If the base class returned a tool-call or error, pass it straight through.
-        if response.message.tool_calls or response.error:
-            return response
-
-        raw_text = (response.message.content or "").strip()
-        if not raw_text:
-            return response
-
-        # Extract the code artifact
-        artifact = _extract_artifact(raw_text)
-        description = _strip_code_block(raw_text)
-
-        if response.metadata is None:
-            response.metadata = {}
-
-        if previous_artifact is not None and (artifact is None or bool(artifact.get("truncated"))):
-            reason = "missing_artifact" if artifact is None else "truncated_output"
-            response.metadata["canvas_update"] = previous_artifact.update_status(
-                "failed",
-                reason=reason,
-            )
-            response.message.content = description or (
-                "I couldn't produce a complete canvas update, so I kept the current revision."
-            )
-            if description:
-                response.message.content += (
-                    "\n\nI couldn't produce a complete canvas update, so I kept the current "
-                    "revision."
-                )
-            return response
-
-        if previous_artifact is not None and artifact is not None:
-            if artifact["content"] == previous_artifact.content:
-                response.metadata["canvas_update"] = previous_artifact.update_status("unchanged")
-                response.message.content = description or "The canvas is already up to date."
-                return response
-
-            next_revision = previous_artifact.revision + 1
-            artifact = previous_artifact.to_artifact(
-                content=artifact["content"],
-                language=artifact["language"],
-                title=artifact["title"],
-                revision=next_revision,
-                operation="update",
-            )
-            response.metadata["canvas_update"] = previous_artifact.update_status(
-                "updated",
-                revision=next_revision,
-            )
-        elif artifact is not None:
-            artifact.update(
-                {
-                    "artifact_id": CANVAS_ARTIFACT_ID,
-                    "revision": 1,
-                    "operation": "create",
-                }
-            )
-            response.metadata["canvas_update"] = {
-                "status": "updated",
-                "artifact_id": CANVAS_ARTIFACT_ID,
-                "base_revision": 0,
-                "revision": 1,
-            }
-
-        if artifact:
-            response.metadata["canvas_artifact"] = artifact
-            # Replace the raw LLM output (which contains the full code block) with
-            # a clean conversational description for the chat thread.
-            content = description or (
-                f"Here's your **{artifact['title']}**! "
-                "You can view and interact with it in the canvas panel. "
-                "Let me know if you'd like any changes."
-            )
-            if artifact.get("truncated"):
-                content += (
-                    "\n\n> The artifact output was cut off before completion, so the "
-                    "canvas may be incomplete. Ask me to regenerate it if something "
-                    "looks broken."
-                )
-            response.message.content = content
-        else:
-            # The LLM didn't produce a fenced code block — return as-is so the user
-            # sees the response and can ask again.
-            logger.warning(
-                "CanvasAgent: no fenced code block found in LLM output (conversation_id=%s)",
-                conversation_id,
-            )
-
-        return response
+        return finalize_canvas_response(response, previous_artifact, conversation_id)
 
     # ------------------------------------------------------------------
     # Simple (non-history) entrypoint kept for compatibility with process_message

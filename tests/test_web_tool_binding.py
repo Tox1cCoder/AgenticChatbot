@@ -58,9 +58,9 @@ def _bound_names(monkeypatch, agent_key: str, **context) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize("agent_key", ["chat", "search"])
+@pytest.mark.parametrize("agent_key", ["chat", "search", "canvas"])
 @pytest.mark.parametrize("tool_name", PRODUCT_WEB_TOOLS)
-def test_each_product_tool_is_bound_for_chat_and_search(monkeypatch, agent_key, tool_name):
+def test_each_product_tool_is_bound_for_web_capable_agents(monkeypatch, agent_key, tool_name):
     assert tool_name in _bound_names(monkeypatch, agent_key)
 
 

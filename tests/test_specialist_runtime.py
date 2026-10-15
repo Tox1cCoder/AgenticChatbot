@@ -111,7 +111,8 @@ async def test_standard_specialist_is_created_per_invocation():
     assert RecordingAgent.instances[0] is not RecordingAgent.instances[1]
 
 
-async def test_each_specialist_build_gets_one_shared_but_unreused_research_session():
+@pytest.mark.parametrize("agent_key", ["chat", "search", "canvas"])
+async def test_each_specialist_build_gets_one_shared_but_unreused_research_session(agent_key):
     class ResearchService:
         def __init__(self) -> None:
             self.sessions: list[object] = []
@@ -122,7 +123,7 @@ async def test_each_specialist_build_gets_one_shared_but_unreused_research_sessi
             return session
 
     research = ResearchService()
-    definition = _definition(agent=SimpleNamespace(tools=[]))
+    definition = _definition(agent=SimpleNamespace(tools=[]), model_config_key=agent_key)
     factory = _factory(
         definitions={"chat_agent": definition}, web_research_service=research
     )

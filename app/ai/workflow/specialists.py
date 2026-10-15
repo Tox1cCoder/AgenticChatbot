@@ -26,6 +26,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
+from app.ai.agents.canvas_agent import _build_previous_artifact_message, finalize_canvas_response
 from app.ai.hitl_config import policy_from_context
 from app.ai.image_generation import current_media_delivery_service
 from app.ai.research_budget import get_research_budget
@@ -631,7 +632,7 @@ class SpecialistFactory:
         if (
             self._web_research_service is not None
             and web_research_enabled
-            and definition.model_config_key in {"chat", "search"}
+            and definition.model_config_key in {"chat", "search", "canvas"}
             and request.conversation_id
             and request.user_id
         ):
@@ -811,7 +812,12 @@ class SpecialistFactory:
         putting it after the question would separate a tool call from its
         result with a human message, which some providers reject.
         """
-        return [*request.history, *request.carried_messages, *request.messages]
+        canvas_context = []
+        if request.agent_id == "canvas_agent":
+            previous = request.extras.get("previous_artifact")
+            if previous is not None:
+                canvas_context.append(_build_previous_artifact_message(previous))
+        return [*request.history, *request.carried_messages, *canvas_context, *request.messages]
 
     @staticmethod
     def _produced_messages(request: SpecialistRequest, result: Any) -> list[Any]:
@@ -825,7 +831,7 @@ class SpecialistFactory:
         messages = result.get("messages") if isinstance(result, dict) else None
         if not isinstance(messages, list):
             return []
-        sent = len(request.history) + len(request.carried_messages) + len(request.messages)
+        sent = len(SpecialistFactory._invocation_messages(request))
         return messages[sent:] if len(messages) > sent else []
 
     def _to_outcome(
@@ -882,6 +888,10 @@ class SpecialistFactory:
             metadata=metadata,
             tool_artifacts=artifacts or None,
         )
+        if definition.agent_type == AgentType.CANVAS:
+            response = finalize_canvas_response(
+                response, request.extras.get("previous_artifact"), request.conversation_id
+            )
         return ResponseOutcome(
             agent_id=request.agent_id,
             response=response,

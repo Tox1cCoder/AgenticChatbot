@@ -667,7 +667,7 @@ class BaseAgent(ABC):
         # page extraction, and image discovery. Each spends its own budget, and
         # selected images reach the answer only through the rich-item inventory.
         if (
-            self.agent_config_key in {"chat", "search"}
+            self.agent_config_key in {"chat", "search", "canvas"}
             and effective_scope is not ToolScope.CLIENT_ONLY
         ):
             for factory in (
