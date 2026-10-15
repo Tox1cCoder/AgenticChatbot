@@ -56,6 +56,9 @@ _GEMINI_RULES = (
 )
 
 _OPENAI_RULES = (
+    # Tool calls require Responses; default reasoning must select that transport.
+    # https://developers.openai.com/api/docs/models/gpt-6.1-sol
+    (("gpt-6.1-sol",), ("low", "medium", "high", "xhigh", "max"), "medium"),
     (("o1-pro",), ("high",), "high"),
     (("o1", "o3", "o4-mini"), ("low", "medium", "high"), "medium"),
     (("gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro"), ("medium", "high", "xhigh"), "medium"),

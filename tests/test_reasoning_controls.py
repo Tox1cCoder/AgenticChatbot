@@ -46,6 +46,17 @@ def test_openai_56_retains_max() -> None:
     assert control.levels == ("none", "low", "medium", "high", "xhigh", "max")
 
 
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_gpt_61_sol_accepts_its_native_reasoning_levels(effort) -> None:
+    assert validate_reasoning_effort("openai", "gpt-6.1-sol", effort) == effort
+
+
+@pytest.mark.parametrize("effort", ["none", "minimal"])
+def test_gpt_61_sol_rejects_disabling_reasoning(effort) -> None:
+    with pytest.raises(ValueError, match="unsupported"):
+        validate_reasoning_effort("openai", "gpt-6.1-sol", effort)
+
+
 def test_openai_pro_rule_precedes_base_family() -> None:
     control = resolve_reasoning_control("openai", "gpt-5.4-pro")
     assert control.levels == ("medium", "high", "xhigh")
