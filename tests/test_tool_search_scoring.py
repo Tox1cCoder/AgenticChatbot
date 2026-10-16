@@ -271,6 +271,49 @@ def test_exact_tool_name_query_is_high_confidence_and_autoload_eligible():
     assert ranked[0].autoload_eligible is True
 
 
+@pytest.mark.parametrize(
+    "query",
+    ["client__skill_take100__run_skill_command", "+client__skill_take100__run_skill_command"],
+)
+def test_skill_command_named_exactly_outranks_the_shell_tool(query):
+    """activate_skill hands the model the command tool's exact name to load.
+
+    Every skill command tool is named ``client__skill_<name>__run_skill_command``,
+    and "run" + "command" read as a shell intent that lifts Desktop Commander's
+    start_process to within the autoload margin. With a one-word skill name the
+    named tool then stayed medium, never loaded, and the turn fell back to a
+    shell tool the skill forbids.
+    """
+    from app.ai.mcp_tool_catalog import ToolDescriptor
+    from app.ai.tool_search_scoring import rank_tool_candidates
+
+    tools = [
+        ToolDescriptor(
+            tool_name="client__skill_take100__run_skill_command",
+            server_name="skill:take100",
+            description="Run a command bundled with the take100 skill. argv[0] must be one "
+            "of: 'scripts/attendance.py', 'scripts/take100.py'.",
+            arg_names=["argv", "cwd"],
+            required_arg_names=["argv"],
+            schema_fingerprint="fp-skill",
+        ),
+        ToolDescriptor(
+            tool_name="client__desktop_commander__start_process",
+            server_name="desktop_commander",
+            description="Start a shell command or local process.",
+            arg_names=["command", "timeout_ms", "shell"],
+            required_arg_names=["command", "timeout_ms"],
+            schema_fingerprint="fp-dc",
+        ),
+    ]
+
+    ranked = rank_tool_candidates(query=query, candidates=tools)
+
+    assert ranked[0].tool.tool_name == "client__skill_take100__run_skill_command"
+    assert ranked[0].confidence == "high"
+    assert ranked[0].autoload_eligible is True
+
+
 def test_single_generic_name_token_match_does_not_reach_autoload():
     """A one-token generic name match must stay below the autoload bar.
 

@@ -226,6 +226,13 @@ def _score_candidate(intent: QueryIntent, tool: Any) -> ToolSearchScore:
     if profile.name_tokens and profile.name_tokens <= intent.tokens:
         score += 40.0
         reasons.insert(0, f"exact name match: {profile.tool_name}")
+        # A query that is literally the tool's full name (the binding activate_skill
+        # hands the model) names one tool only, so the capability bonus another tool
+        # earns from the same words must not reach it: every skill command tool ends
+        # in "run_skill_command", which reads as a shell intent and lifts the shell
+        # tool to within the autoload margin. One generic token stays excluded.
+        if len(profile.name_tokens) > 1 and _is_full_name_query(intent.raw_query, tool_name):
+            score += 100.0
 
     required_arg_overlap = intent.tokens & profile.required_arg_tokens
     if required_arg_overlap:
@@ -255,6 +262,11 @@ def _score_candidate(intent: QueryIntent, tool: Any) -> ToolSearchScore:
         profile=profile,
         autoload_eligible=False,
     )
+
+
+def _is_full_name_query(raw_query: str, tool_name: str) -> bool:
+    """True when the query is the tool's name, allowing a leading '+' name prefix."""
+    return raw_query.strip().lstrip("+").strip().lower() == tool_name.lower()
 
 
 def _capability_specific_adjustment(
