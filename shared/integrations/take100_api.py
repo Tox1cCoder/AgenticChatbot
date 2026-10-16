@@ -18,6 +18,10 @@ Unicode entries can be passed inline:
     --action submit-drafts --ids 36519,36520 | --all-saved [--dry-run]
     --action delete --application-id 30459
 
+    Leave / overtime applications (take100_applications.py):
+    --action list-applications | file-applications | submit-application-drafts
+             | delete-application
+
     # Escape hatches
     --time-in / --time-out   override the detected window
     --no-auto                skip detection entirely, use 08:00-17:00
@@ -1243,15 +1247,27 @@ COMMANDS = {
 }
 
 
+def _all_commands() -> dict:
+    """Timesheet commands plus the leave/OT application ones."""
+    # Imported here: take100_applications builds on this module.
+    from shared.integrations import take100_applications
+
+    return {**COMMANDS, **take100_applications.COMMANDS}
+
+
 def _build_parser() -> argparse.ArgumentParser:
+    from shared.integrations import take100_applications
+
     parser = argparse.ArgumentParser(description="Take100 Timesheet API Client")
     parser.add_argument(
         "--action",
-        choices=list(COMMANDS),
+        choices=list(_all_commands()),
         required=True,
-        help="check-day, save (draft), submit (for approval), save-many (several days), "
-        "submit-drafts (submit saved drafts), list (timesheets in a range), or delete",
+        help="Timesheets: check-day, save (draft), submit (for approval), save-many, "
+        "submit-drafts, list, delete. Leave/OT applications: list-applications, "
+        "file-applications, submit-application-drafts, delete-application",
     )
+    take100_applications.add_arguments(parser)
     parser.add_argument("--date", help="Date for the timesheet (YYYY-MM-DD)")
     parser.add_argument("--entries", help="JSON array of work entries")
     parser.add_argument(
@@ -1266,18 +1282,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--submit",
         action="store_true",
-        help="save-many: submit for approval instead of saving drafts",
+        help="save-many, file-applications: submit for approval instead of saving drafts",
     )
-    parser.add_argument("--ids", help="submit-drafts: comma-separated draft application ids")
+    parser.add_argument(
+        "--ids", help="submit-drafts, submit-application-drafts: comma-separated draft ids"
+    )
     parser.add_argument(
         "--all-saved",
         action="store_true",
-        help="submit-drafts: every saved draft in the range (default: current period)",
+        help="submit-drafts, submit-application-drafts: every saved draft in the range "
+        "(default: current period)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="submit-drafts: show what would be submitted without sending anything",
+        help="submit-drafts, file-applications, submit-application-drafts: show what "
+        "would be sent without sending anything",
     )
     parser.add_argument(
         "--status",
@@ -1287,7 +1307,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--from", dest="date_from", help="list: start date (default: period)")
     parser.add_argument("--to", dest="date_to", help="list: end date (default: period)")
-    parser.add_argument("--application-id", type=int, help="Application ID (for delete)")
+    parser.add_argument(
+        "--application-id", type=int, help="Application ID (delete, delete-application)"
+    )
     parser.add_argument("--message", default="", help="Optional message")
     parser.add_argument(
         "--email",
@@ -1343,7 +1365,7 @@ def main():
 
     client = Take100Client(email=email, password=password)
     try:
-        result = COMMANDS[args.action](client, args)
+        result = _all_commands()[args.action](client, args)
     except CommandRefused as refused:
         _print(refused.payload)
         sys.exit(1)

@@ -27,7 +27,7 @@ from pathlib import Path
 
 import requests
 
-from shared.integrations import take100_api
+from shared.integrations import take100_api, take100_applications
 from shared.integrations.take100_api import to_minutes
 
 DEFAULT_SESSION_CACHE_PATH = str(Path.home() / ".cache" / "attendance" / "session.json")
@@ -164,7 +164,7 @@ class AttendanceClient:
         if not session_info.get("user"):
             raise AttendanceLoginError(
                 "Login to the attendance panel failed. Check the ATTENDANCE_USERNAME / "
-                "ATTENDANCE_PASSWORD bindings in the attendance-lookup skill settings."
+                "ATTENDANCE_PASSWORD bindings in the take100 skill settings."
             )
         self._save_session_cache()
 
@@ -239,7 +239,9 @@ def _filed_summary(status: dict | None) -> dict | None:
     }
 
 
-def _day_notes(day: date, check_out: str | None, status: dict | None) -> list[str]:
+def _day_notes(
+    day: date, check_in: str, check_out: str | None, status: dict | None
+) -> list[str]:
     notes = []
     if check_out is None:
         notes.append("No check-out recorded (still at work, or the punch is missing).")
@@ -253,8 +255,59 @@ def _day_notes(day: date, check_out: str | None, status: dict | None) -> list[st
         notes.append(
             f"Overtime is filed until {status['ot_to']} but check-out was {check_out[:5]}."
         )
+    notes.extend(_underfiled_notes(day, check_in, check_out, status))
     notes.extend(status["warnings"])
     return notes
+
+
+def _underfiled_notes(day: date, check_in: str, check_out: str | None, status: dict) -> list:
+    """Filed applications that stop short of the punches; re-filing is the user's call."""
+    if day.weekday() in WEEKEND_DAYS:
+        return []
+    notes = []
+    if status["is_late"] and to_minutes(check_in) > to_minutes(status["late_until"]):
+        notes.append(
+            f"Late leave is filed until {status['late_until']} but check-in was {check_in[:5]}."
+        )
+    if status["is_overtime"] and check_out:
+        claimable = take100_applications.floor_to_step(check_out)
+        if to_minutes(claimable) > to_minutes(status["ot_to"]):
+            notes.append(
+                f"Overtime is filed until {status['ot_to']}; check-out {check_out[:5]} "
+                f"would allow {claimable}."
+            )
+    return notes
+
+
+def suggest_applications(record: dict, status: dict | None) -> list[dict]:
+    """
+    Late and overtime applications a weekday's punches call for but take100 lacks.
+
+    They follow the conventions of the applications already on file: a late leave
+    runs 08:00 to the check-in minute, and overtime runs 17:00 to the check-out
+    rounded down to 5 minutes. The reason is left for the user to supply.
+    """
+    if status is None or not status["data_available"] or status["is_all_day_leave"]:
+        return []
+    day = date.fromisoformat(record["attendanceDate"])
+    if day.weekday() in WEEKEND_DAYS:
+        return []
+
+    iso, check_in, check_out = record["attendanceDate"], record["checkIn"], record.get("checkOut")
+    suggestions = []
+    late_until = check_in[:5]
+    if (
+        not status["is_late"]
+        and to_minutes(SHIFT_START) < to_minutes(late_until) < to_minutes(SHIFT_END)
+    ):
+        suggestions.append({"kind": "hour-leave", "date": iso, "from": SHIFT_START,
+                            "to": late_until, "reason": None})
+    if check_out and not status["is_overtime"]:
+        ot_to = take100_applications.floor_to_step(check_out)
+        if to_minutes(ot_to) > to_minutes(SHIFT_END):
+            suggestions.append({"kind": "overtime", "date": iso, "from": SHIFT_END,
+                                "to": ot_to, "reason": None})
+    return suggestions
 
 
 def analyze_day(record: dict, status: dict | None) -> dict:
@@ -274,7 +327,7 @@ def analyze_day(record: dict, status: dict | None) -> dict:
         **_check_in_fields(check_in, status),
         **_check_out_fields(check_out, status),
         "filed": _filed_summary(status),
-        "notes": _day_notes(day, check_out, status),
+        "notes": _day_notes(day, check_in, check_out, status),
     }
 
 
@@ -323,6 +376,11 @@ def build_report(
         "shift": {"start": SHIFT_START, "end": SHIFT_END},
         "days": days,
         "missing_workdays": missing_workdays(records, date_from, date_to, lookup),
+        "suggested_applications": [
+            suggestion
+            for record in records
+            for suggestion in suggest_applications(record, lookup.get(record["attendanceDate"]))
+        ],
         "totals": {
             "days_with_punches": len(days),
             "days_late": sum(1 for day in days if day["late_minutes"] > 0),
@@ -410,7 +468,7 @@ def main():
     password = os.getenv("ATTENDANCE_PASSWORD")
     if not username or not password:
         _fail("Missing credentials. Bind ATTENDANCE_USERNAME/ATTENDANCE_PASSWORD in the "
-              "attendance-lookup skill secret settings.")
+              "take100 skill secret settings.")
 
     session_cache_path = os.getenv("ATTENDANCE_SESSION_CACHE_PATH") or DEFAULT_SESSION_CACHE_PATH
     # The panel's address is an ngrok tunnel that changes; it is never baked in here.

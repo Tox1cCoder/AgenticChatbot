@@ -373,3 +373,65 @@ def test_take100_employee_code_is_none_when_the_field_is_missing(monkeypatch, tm
     monkeypatch.setattr(client, "_request", lambda *a, **k: FakeResponse(text="<form></form>"))
 
     assert client.get_employee_code() is None
+
+
+# --- suggested applications ---------------------------------------------------------
+
+
+def test_late_and_overtime_without_applications_are_suggested():
+    record = _record("2026-10-14", "08:51:03", "19:36:38")
+
+    suggestions = attendance_api.suggest_applications(record, _status("2026-10-14", []))
+
+    assert suggestions == [
+        {"kind": "hour-leave", "date": "2026-10-14", "from": "08:00", "to": "08:51",
+         "reason": None},
+        {"kind": "overtime", "date": "2026-10-14", "from": "17:00", "to": "19:35",
+         "reason": None},
+    ]
+
+
+def test_filed_late_and_overtime_are_not_suggested_again():
+    day = "2026-10-01"
+    status = _status(day, [_late_app(day, "08:57"), _ot_app(day, "20:05")])
+
+    assert attendance_api.suggest_applications(_record(day, "08:57:59", "20:06:52"), status) == []
+
+
+def test_checkout_inside_the_rounding_step_is_not_overtime():
+    record = _record("2026-10-02", "07:56:58", "17:04:59")
+
+    assert attendance_api.suggest_applications(record, _status("2026-10-02", [])) == []
+
+
+def test_no_suggestions_without_applications_weekend_or_missing_checkout():
+    assert attendance_api.suggest_applications(_record("2026-10-14", "09:00:00", None), None) == []
+    weekend = _record("2026-10-17", "09:00:00", "18:00:00")
+    assert attendance_api.suggest_applications(weekend, _status("2026-10-17", [])) == []
+    still_at_work = _record("2026-10-16", "07:50:00", None)
+    assert attendance_api.suggest_applications(still_at_work, _status("2026-10-16", [])) == []
+
+
+def test_underfiled_applications_become_notes_not_suggestions():
+    day = "2026-10-12"
+    status = _status(day, [_late_app(day, "08:30"), _ot_app(day, "19:00")])
+
+    report = attendance_api.analyze_day(_record(day, "08:45:10", "19:36:38"), status)
+
+    assert any("filed until 08:30 but check-in was 08:45" in note for note in report["notes"])
+    assert any("would allow 19:35" in note for note in report["notes"])
+    assert attendance_api.suggest_applications(_record(day, "08:45:10", "19:36:38"), status) == []
+
+
+def test_report_lists_suggestions_across_days():
+    records = [_record("2026-10-13", "07:50:00", "18:31:00"),
+               _record("2026-10-14", "08:05:00", "17:00:30")]
+    statuses = {day: _status(day, []) for day in ("2026-10-13", "2026-10-14")}
+
+    report = attendance_api.build_report(records, date(2026, 10, 13), date(2026, 10, 14), statuses)
+
+    suggested = report["suggested_applications"]
+    assert [(item["kind"], item["date"], item["to"]) for item in suggested] == [
+        ("overtime", "2026-10-13", "18:30"),
+        ("hour-leave", "2026-10-14", "08:05"),
+    ]
