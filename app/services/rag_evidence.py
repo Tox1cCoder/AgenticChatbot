@@ -8,7 +8,6 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from types import MappingProxyType
 from typing import Any, Literal
 from uuid import UUID
 
@@ -18,6 +17,26 @@ from app.services.rag_retrieval import RetrievalCandidate, RetrievalScope
 logger = logging.getLogger(__name__)
 
 _ATOMIC_KINDS = frozenset({"table", "image", "equation"})
+
+
+class _ReadOnlyDict(dict[str, Any]):
+    """A ``dict`` that refuses writes and that checkpoint serializers encode natively.
+
+    ``MappingProxyType`` is read-only too, but msgpack cannot encode it, so an
+    ``EvidencePack`` in graph state could never be checkpointed.
+    """
+
+    __slots__ = ()
+
+    def _refuse(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError("evidence trace metadata is read-only")
+
+    __setitem__ = __delitem__ = __ior__ = _refuse
+    clear = pop = popitem = setdefault = update = _refuse
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # The default dict-subclass reduce rebuilds through __setitem__.
+        return (_ReadOnlyDict, (dict(self),))
 
 
 @dataclass(frozen=True)
@@ -33,6 +52,11 @@ class EvidenceRecord:
     modality: Literal["text", "image"]
     content: str
     trace_metadata: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        # Coerced here, not at each call site, so a record restored from a
+        # checkpoint is as read-only as one the assembler built.
+        object.__setattr__(self, "trace_metadata", _ReadOnlyDict(self.trace_metadata))
 
 
 @dataclass(frozen=True)
@@ -381,7 +405,7 @@ class EvidenceAssembler:
             section_path=tuple(candidate.section_path),
             modality=candidate.modality,
             content=candidate.content.strip(),
-            trace_metadata=MappingProxyType(trace),
+            trace_metadata=trace,
         )
 
     def _count(self, text: str) -> tuple[int, str]:

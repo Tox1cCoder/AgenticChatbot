@@ -23,7 +23,6 @@ import logging
 import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
@@ -696,7 +695,7 @@ def _record_from_payload(raw: Any) -> EvidenceRecord | None:
         section_path=tuple(str(part) for part in section_path),
         modality="image" if raw.get("modality") == "image" else "text",
         content=str(raw.get("content") or ""),
-        trace_metadata=MappingProxyType({}),
+        trace_metadata={},
     )
 
 

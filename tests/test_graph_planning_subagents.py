@@ -28,6 +28,7 @@ from app.ai.schemas import (
     AgentType,
     MessageRole,
 )
+from app.ai.workflow.contracts import AgentTransition
 
 
 def _ok(content: str = "ok") -> AgentResponse:
@@ -206,6 +207,12 @@ async def test_execute_tool_calls_remains_sequential_for_dependent_tools(monkeyp
 # ---------------------------------------------------------------------------
 
 
+def _accepted_handoff(source: str, target: str, tool_call_id: str) -> AgentTransition:
+    return AgentTransition(
+        from_agent_id=source, to_agent_id=target, source="handoff", tool_call_id=tool_call_id
+    )
+
+
 def test_delegated_agent_messages_strip_handoff_control_messages():
     """When a hand_off is the routing reason for this turn, the delegated
     agent must receive only the user's request — not the source agent's
@@ -229,19 +236,58 @@ def test_delegated_agent_messages_strip_handoff_control_messages():
     state: dict[str, Any] = {
         "active_agent_id": "search_agent",
         "messages": messages,
-        "context": {
-            "handoff": {
-                "active": True,
-                "source_agent": "planning_agent",
-                "target_agent": "search_agent",
-                "tool_call_id": "handoff-1",
-            }
-        },
+        "agent_history": [_accepted_handoff("planning_agent", "search_agent", "handoff-1")],
     }
 
     delegated = workflow._messages_for_active_agent(state, "search_agent", messages)
 
     assert delegated == [messages[0]]
+
+
+def test_a_handoff_tool_result_never_reaches_the_agent_without_its_tool_call():
+    """``hand_off`` returns a parent command, so the call that produced the
+    result lives in the source agent's private messages and never reaches the
+    parent. The delegated agent would otherwise be sent a tool result with no
+    call, which OpenAI rejects: "No tool call found for function call output".
+    """
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    messages = [
+        HumanMessage(content="open the site and summarise it"),
+        ToolMessage(
+            id="handoff:call_4NHaeEgazno6MBxoJJsXA8Lb",
+            content="handoff_requested",
+            tool_call_id="call_4NHaeEgazno6MBxoJJsXA8Lb",
+            name="hand_off",
+        ),
+    ]
+    state: dict[str, Any] = {
+        "active_agent_id": "chat_agent",
+        "messages": messages,
+        "context": {},
+        "agent_history": [
+            _accepted_handoff("search_agent", "chat_agent", "call_4NHaeEgazno6MBxoJJsXA8Lb")
+        ],
+    }
+
+    delegated = workflow._messages_for_active_agent(state, "chat_agent", messages)
+
+    assert delegated == [messages[0]]
+
+
+def test_a_handoff_to_another_agent_leaves_this_agents_messages_alone():
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    messages = [
+        HumanMessage(content="question"),
+        ToolMessage(content="refused", tool_call_id="c1", name="hand_off", status="error"),
+    ]
+    state: dict[str, Any] = {
+        "active_agent_id": "search_agent",
+        "messages": messages,
+        "context": {},
+        "agent_history": [_accepted_handoff("search_agent", "chat_agent", "c0")],
+    }
+
+    assert workflow._messages_for_active_agent(state, "search_agent", messages) == messages
 
 
 def test_delegated_agent_messages_passthrough_when_no_active_handoff():

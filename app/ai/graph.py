@@ -85,6 +85,7 @@ from .utils import (
 )
 from .workflow.continuation import ContinuationResume, pending_continuation_payload
 from .workflow.contracts import (
+    AgentTransition,
     OutcomeProvenance,
     ResponseOutcome,
     TurnIdentity,
@@ -762,33 +763,38 @@ class MultiAgentWorkflow(
     ) -> list:
         """Return the current-turn message slice scoped for ``agent_name``.
 
-        When the active turn started as a handoff (``state["context"]["handoff"]
-        ["active"]`` is True and the target matches ``agent_name``), strip the
-        source agent's handoff narration ``AIMessage`` and its matching
-        ``ToolMessage(name="hand_off")`` so the delegated agent receives the
-        user's original request without the routing chatter as conversational
-        context.
+        When the resolver accepted a handoff into ``agent_name`` this turn
+        (an ``AgentTransition`` with ``source="handoff"`` in ``agent_history``),
+        strip the source agent's handoff ``AIMessage`` and the
+        ``ToolMessage(name="hand_off")`` that answers it. The delegated agent
+        receives the user's request without routing chatter, and never a tool
+        result whose call it was not sent: ``hand_off`` returns a parent
+        command, so the call stays in the source agent's private messages and
+        the provider rejects the orphaned result.
 
         Falls back to ``_get_current_turn_messages`` semantics when no handoff
-        is active or the target does not match.
+        into ``agent_name`` was accepted.
         """
         current_turn = self._get_current_turn_messages(messages)
 
-        handoff = (state.get("context") or {}).get("handoff") if isinstance(state, dict) else None
-        if (
-            not isinstance(handoff, dict)
-            or not handoff.get("active")
-            or handoff.get("target_agent") != agent_name
-        ):
+        history = state.get("agent_history") if isinstance(state, dict) else None
+        handoffs = [
+            transition
+            for transition in (history or [])
+            if isinstance(transition, AgentTransition)
+            and transition.source == "handoff"
+            and transition.to_agent_id == agent_name
+        ]
+        if not handoffs:
             return current_turn
 
-        tool_call_id = handoff.get("tool_call_id")
+        handoff_call_ids = {transition.tool_call_id for transition in handoffs}
         filtered: list = []
         for message in current_turn:
             if isinstance(message, ToolMessage):
                 if getattr(message, "name", None) == "hand_off":
                     continue
-                if tool_call_id and getattr(message, "tool_call_id", None) == tool_call_id:
+                if getattr(message, "tool_call_id", None) in handoff_call_ids:
                     continue
             elif isinstance(message, AIMessage):
                 tool_calls = getattr(message, "tool_calls", None) or []

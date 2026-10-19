@@ -15,11 +15,15 @@ that can be replaced wholesale cannot be streamed.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import NotRequired, TypedDict
 
 import pytest
 from langchain_core.messages import ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphBubbleUp
+from langgraph.graph import START, StateGraph
 
+from app.ai.checkpoint import _build_checkpoint_serializer
 from app.ai.workflow.rag_execution import (
     EvidenceIdAllocator,
     ProductionRagRuntime,
@@ -860,3 +864,36 @@ async def test_the_rag_model_is_only_offered_tools_inside_the_scope():
     )
 
     assert captured["message"].metadata["allowed_tool_ids"] == ("search_documents",)
+
+
+# ----------------------------------------------------------------------
+# Checkpointing: the graph runs inside a parent that persists its state
+# ----------------------------------------------------------------------
+
+
+class _ParentState(TypedDict):
+    evidence_ids: NotRequired[tuple[str, ...]]
+
+
+async def test_the_rag_state_can_be_persisted_by_the_parents_checkpointer():
+    """A compiled graph with no checkpointer inherits the caller's, so every
+    retrieved ``EvidencePack`` is serialized by the production serializer."""
+    runtime = ScriptedRagRuntime(
+        turns=_retrieve_then_answer("E1"), evidence=_evidence_payload("E1")
+    )
+    rag = _graph(runtime)
+
+    async def rag_agent(state: _ParentState) -> dict:
+        result = await rag.ainvoke(_request())
+        return {"evidence_ids": result.evidence_ids}
+
+    parent = StateGraph(_ParentState)
+    parent.add_node("rag_agent", rag_agent)
+    parent.add_edge(START, "rag_agent")
+    compiled = parent.compile(
+        checkpointer=InMemorySaver(serde=_build_checkpoint_serializer())
+    )
+
+    final = await compiled.ainvoke({}, config={"configurable": {"thread_id": "rag-ckpt"}})
+
+    assert final["evidence_ids"] == ("E1",)

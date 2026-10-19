@@ -1,227 +1,538 @@
 # Deterministic Tool Loading Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Use `superpowers:executing-plans` to implement this plan
+> task by task. Use `superpowers:subagent-driven-development` only if the user chooses
+> delegated execution. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make a deferred tool callable whenever the model asks for it by name, when a skill is activated, or when search returns it. A confidence score or a ranking margin must never withhold it.
+**Goal:** Make exact selection and skill activation independent of ranking, with
+truthful loading results and one shared authorization/loading path.
 
-**Architecture:**
-- Separate binding from ranking. Add exact selection (`tool_search(select=[...])`) in a new `app/ai/tool_selection.py`, which is the one place that resolves names to load references.
-- `activate_skill` reuses that module to load its own command tool.
-- Keyword search loads its top 3 results, ungated. Inventory modes load nothing.
-- The system prompt lists the deferred tool names the agent may load.
-- Client tool names and client-tool expiry are fixed first, because exact selection depends on both.
+**Architecture:** `tool_selection.py` owns request policy, authorized catalog
+snapshots, exact resolution and shared loading. Search keeps ranking but delegates
+loading to that module; skill activation does the same. Acquire prompt inventory
+asynchronously and format it in a pure `deferred_tool_inventory.py` function.
 
-**Tech Stack:** Python 3.13 (`.venv`), LangChain/LangGraph tools, pydantic, pytest. No new dependencies.
+**Tech Stack:** Existing Python `.venv`, LangChain/LangGraph, Pydantic and pytest.
+No new runtime dependency or database migration.
 
-**Spec:** `docs/superpowers/specs/2026-10-16-deterministic-tool-loading-design.md`
+**Spec:** `docs/superpowers/specs/2026-10-16-deterministic-tool-loading-design.md`.
+Read it before implementation; it defines error precedence, identity and budgets.
 
-## Global Constraints
-- Line length 100 (ruff E501 is enforced). Functions ≤ 100 lines, cyclomatic complexity ≤ 8, ≤ 5 positional parameters.
-- Run tests and lint with the app interpreter: `.venv/Scripts/python.exe -m pytest ...` and `.venv/Scripts/python.exe -m ruff check ...`.
-- Never load a tool the agent's allowlist forbids or that `RAW_WEB_TOOL_NAMES` excludes (`app/ai/deferred_tool_binding.py:88-94`).
-- Inventory mode (empty `query`, with or without `server_name`) loads nothing.
-- No new runtime dependency.
-- Commit after each task with only that task's files staged. Other sessions share this working tree, so never use `git add -A` and never stash.
+## Global constraints
 
-## Review Focus
-1. **Selecting a name a custom agent may not use.** It must come back as `not_found` and must not load, so that existence does not leak. Test in Task 3.
-2. **Selecting an excluded raw web tool** (`tavily_search`). It must be refused and not loaded, with the existing web guidance. Test in Task 3.
-3. **The device reconnects between activation and the call.** The new session means the load returns nothing. Activation must not claim the tool is callable; it falls back to telling the model to `select` it. Test in Task 4.
-4. **A long conversation with many searches.** A client tool used in this turn must not be evicted by LRU, and a tool idle past the TTL must expire. Test in Task 2.
-5. **Inventory at the limits** (0 tools, more than the cap, a 500-character description). The prompt block must stay bounded and well formed. Test in Task 6.
+- Line length 100. New/extracted functions at most 100 lines, complexity at most 8,
+  and at most 5 positional parameters; use keyword-only policy/context arguments.
+- Use `.venv/Scripts/python.exe -m pytest` and `-m ruff check`.
+- `None` allowlist means unrestricted; `[]` means none. Filter before aliases,
+  counts, ranking, public output or prompt rendering.
+- Ordinary loading excludes raw web providers by raw and public identity. Preserve
+  only the explicit existing server-side diagnostic opt-in.
+- One shared discovery/activation loader; retain existing approval and dispatch checks.
+- Inventory never loads or refreshes tools. A last-use refresh does not pin a turn.
+- Keep loaded capacity at 8 per origin scope. Autoload defaults to 3 eligible results.
+- Select limit defaults to 8. Prompt inventory defaults to 20 entries, with a fixed
+  4,000-character total budget and 80-character normalized purposes.
+- No unrelated refactor, ranking replacement, provider framework or dependency.
+- Record Task 9's baseline before starting Task 1. Use the execution worktree.
+  Other sessions may have edits: never stash or use `git add -A`; stage only files
+  changed for the task. Commit passing tasks according to session instructions.
 
----
+## File responsibilities and dependency order
 
-### Task 1: Client tool names agree between catalog and runtime
+| File | Responsibility |
+| --- | --- |
+| `app/ai/client_runtime_tools.py`, `client_tool_catalog.py` | Identical validated client names and raw identity |
+| `app/ai/mcp_tool_catalog.py` | Unique server call names |
+| `app/ai/deferred_tool_state.py` | Accurate batches, capacity and last-use lifecycle |
+| `app/services/custom_agent_capability_resolver.py` | Selected skills become exact live command refs |
+| `app/ai/tool_selection.py` (new) | Policy, snapshots, resolution and shared loading |
+| `app/ai/tool_search_tool.py` | Thin entry points and mode orchestration |
+| `app/ai/skills_tool.py` | Activate instructions, then request command loading |
+| `app/ai/deferred_tool_inventory.py` (new) | Pure bounded prompt rendering |
+| Agent factories and workflow middleware | Prepare request data, bind and refresh consistently |
 
-`ClientToolCatalog._rebuild_from_catalog` (`app/ai/client_tool_catalog.py:227-232`) builds names without de-duplication. The runtime (`client_runtime_tools._build_exposed_name`, L94-117) appends `_2`, `_3` on collision. So selecting by exact name, and binding by name (`base_agent.py:768`), miss a tool whose name collided.
+Tasks 1–3 establish identity, lifecycle and authorization. Task 4 supplies the loader.
+Tasks 5–7 integrate selection, activation and discovery. Task 8 adds bounded prompt
+inventory. Task 9 verifies behavior and actual simplification.
 
-**Files:**
-- Modify: `app/ai/client_runtime_tools.py` (add a public helper next to `get_exposed_client_tool_name`, L169)
-- Modify: `app/ai/client_tool_catalog.py:227-232`
-- Test: `tests/test_client_tool_isolation.py`
+### Task 1: Make catalog identities agree with callable runtime names
 
-**Interfaces:**
-- Produces: `exposed_names_by_qualified_id(catalog: dict[str, Any]) -> dict[str, str]` in `client_runtime_tools.py`, built from `_parse_tool_specs(catalog)` (`spec.qualified_tool_id -> spec.exposed_name`). `ClientToolCatalog` descriptors use these names.
+**Files:** Modify `app/ai/client_runtime_tools.py`, `app/ai/client_tool_catalog.py`,
+`app/ai/mcp_tool_catalog.py`. Test `tests/test_client_tool_isolation.py`,
+`tests/test_mcp_tool_catalog_refresh.py`, `tests/test_deferred_tool_binding.py`.
 
-- [ ] **Step 1: Write the failing test.** Add `test_catalog_names_match_runtime_names_on_collision`. Build a session catalog with an MCP entry and a skill entry that collide, using the same fixture shape as `tests/test_skills_tool.py:108-151`. Assert that `{d.tool_name for d in catalog.list_all()} == {t.name for t in <runtime tools for that catalog>}`. Assert that `catalog.get_tool("client__skill_client_skill__run_skill_command_2")` is not None.
-- [ ] **Step 2: Run it and confirm it fails.** Run `.venv/Scripts/python.exe -m pytest tests/test_client_tool_isolation.py -k collision -v`. Expected: FAIL, because `get_tool` returns None for the `_2` name.
-- [ ] **Step 3: Implement.** Add `exposed_names_by_qualified_id`. In `_rebuild_from_catalog`, take each entry's exposed name from that map, keyed by the entry's qualified id. Fall back to the current sanitize expression only for an entry the map lacks.
-- [ ] **Step 4: Run the suites.** Run `.venv/Scripts/python.exe -m pytest tests/test_client_tool_isolation.py tests/test_skills_tool.py tests/test_custom_agent_client_tool_resync.py tests/test_client_tool_scope.py -q`. Expected: all pass.
-- [ ] **Step 5: Commit** with the message `fix(client-tools): name catalog tools exactly as the runtime binds them`.
+**Interfaces:** Add
+`exposed_names_by_qualified_id(catalog: dict[str, Any]) -> dict[str, str]` from
+`_parse_tool_specs`. Add `source_tool_name: str = ""` to `ClientToolDescriptor`,
+populated from the validated runtime entry's raw name. Add server lookup
+`get_by_call_name(name: str) -> ToolDescriptor | None`; it resolves exact public
+names only. Task 4 resolves raw shorthand and visible aliases over filtered snapshots,
+never an unfiltered `aliases_for` response.
 
-### Task 2: Client tools stay loaded while they are used
+- [ ] **Step 1: Add regression tests.** Reuse the MCP/skill collision fixture in
+  `tests/test_skills_tool.py::test_activation_appends_exact_model_callable_skill_tool_name`.
+  Assert catalog/runtime name sets agree, the skill is accessible by the `_2` name,
+  rejected parser entries are absent from both, and the raw source name survives.
+  Add server fixtures for `a-b/search` versus `a_b/search`, alias-versus-raw-name
+  collision, input-order reversal, and duplicate qualified IDs. Valid public names
+  must be unique and deterministic; duplicate identities produce a catalog error.
 
-`_mark_tool_used_if_deferred` (`app/ai/tool_execution.py:761-782`) calls `DeferredToolState.mark_tool_used` (`deferred_tool_state.py:788`). That method only looks at server tools, so a client tool's TTL and LRU run from its last `add`.
+  ```python
+  def test_client_name_map_uses_runtime_collision_suffix():
+      from app.ai.client_runtime_tools import exposed_names_by_qualified_id
 
-**Files:**
-- Modify: `app/ai/deferred_tool_state.py` (new method beside `mark_tool_used`)
-- Modify: `app/ai/tool_execution.py:761-782`
-- Modify: `app/core/config.py:1792`: change the default of `mcp_tool_search_max_loaded_tools_per_conversation` from 8 to 16
-- Test: `tests/test_deferred_tool_state_lifecycle.py`
-
-**Interfaces:**
-- Produces: `DeferredToolState.mark_client_tool_used(conversation_id: str | None, agent_key: str | None, tool_name: str, device_id: str | None, session_id: str | None = None, user_id: str | None = None) -> None`. It updates `LoadedClientTool.last_used` and the scope's `last_active`. It does nothing when the tool is not loaded.
-
-- [ ] **Step 1: Write the failing tests.**
-  - `test_client_tool_ttl_runs_from_last_use`: load a client tool. Advance the monotonic clock (patch it as the existing lifecycle tests do) to TTL − 1 min, then call `mark_client_tool_used`, then advance 2 min more. Assert the tool is still in `get_loaded_client_tools`. Advance past the TTL again with no use, and assert it is gone.
-  - `test_used_client_tool_survives_lru`: with `max_tools=2`, load A and B, mark A used, load C. Assert A and C are loaded and B is gone.
-- [ ] **Step 2: Run them and confirm they fail.** Run `.venv/Scripts/python.exe -m pytest tests/test_deferred_tool_state_lifecycle.py -k "last_use or survives_lru" -v`. Expected: FAIL.
-- [ ] **Step 3: Implement.** Add `mark_client_tool_used`, resolving the session the same way `get_loaded_client_tools` does (L710-732). In `_mark_tool_used_if_deferred`, call it for names starting with `client__`, passing the tool context's `device_id` and `user_id`. Change the config default to 16.
-- [ ] **Step 4: Run the suites.** Run `.venv/Scripts/python.exe -m pytest tests/test_deferred_tool_state_lifecycle.py tests/test_client_tool_isolation.py tests/test_tool_execution_recovery.py -q`. Expected: all pass.
-- [ ] **Step 5: Commit** with the message `fix(deferred-tools): keep client tools loaded while they are used`.
-
-### Task 3: Exact selection — `tool_search(select=[...])`
-
-**Files:**
-- Create: `app/ai/tool_selection.py`
-- Modify: `app/ai/mcp_tool_catalog.py` (two lookups on `McpToolCatalog`)
-- Modify: `app/ai/tool_search_tool.py`: add a `select` field to `ToolSearchInput` (L115-143), and branch to selection at the top of `_execute_tool_search` (L213), before inventory and search
-- Modify: `app/core/config.py`: add `mcp_tool_search_max_select: int = 8` next to L1764, and register it in the `_non_negative_int` validator list (L2130-2139)
-- Test: create `tests/test_tool_selection.py`
-
-**Interfaces:**
-- Consumes: `exposed_names_by_qualified_id` (Task 1). Also `ClientToolCatalog.get_tool(name, server_name=None)` (`client_tool_catalog.py:407`), the catalogs' `_descriptor_matches_allowlist` statics, `ToolReference` and `ClientToolReference`, and `DeferredToolState.autoload` / `autoload_client_tools`.
-- Produces:
-  - `McpToolCatalog.get_by_call_name(name: str) -> ToolDescriptor | None`. It matches `get_call_name()`; a raw name matches only when it is not ambiguous.
-  - `McpToolCatalog.aliases_for(tool_name: str) -> list[str]`. It returns the call names of every descriptor with that raw name, sorted.
-  - In `app/ai/tool_selection.py`:
-    ```python
-    @dataclass(frozen=True)
-    class Selection:
-        server_refs: list[ToolReference]
-        client_refs: list[ClientToolReference]
-        found: list[dict[str, Any]]      # public dicts: tool_name, description, arg_hints
-        not_found: list[str]
-        ambiguous: dict[str, list[str]]  # raw name -> aliases
-        excluded: list[str]              # names refused by the runtime exclusions
-
-    def resolve_selection(names: list[str], *, server_catalog: McpToolCatalog | None,
-                          client_catalog: ClientToolCatalog | None,
-                          server_allowlist: list[str] | None, client_allowlist: list[str] | None,
-                          excluded_tool_names: frozenset[str]) -> Selection
-    def load_selection(selection: Selection, *, ctx: ToolContext,
-                       client_session_id: str | None) -> set[str]   # names actually loaded
-    ```
-  - The `tool_search` output for a selection is `{"mode": "select", "results": [found... with is_loaded], "not_found", "ambiguous", "excluded", "loaded_count", "next_action"}`. `next_action` is `"call_a_loaded_tool"` when anything loaded, else `"refine_search"`.
-
-- [ ] **Step 1: Write the failing tests** in `tests/test_tool_selection.py`. Use fake catalogs in the style of `tests/test_unified_tool_search.py` and the real `DeferredToolState`. Each test asserts loaded names via `get_loaded` / `get_loaded_client_tools`.
-  - `test_select_loads_named_server_and_client_tools`: selecting `["read_file", "client__skill_take100__run_skill_command"]` loads both. The output has `mode == "select"`, `loaded_count == 2`, and every result has `is_loaded is True`.
-  - `test_select_loads_regardless_of_query_scoring`: a tool that no keyword query ranks "high" still loads by name.
-  - `test_select_unknown_name_is_not_found`
-  - `test_select_name_outside_custom_agent_allowlist_is_not_found_and_not_loaded` (Review Focus 1)
-  - `test_select_excluded_raw_web_tool_is_refused` (Review Focus 2): `"tavily_search"` appears in `excluded`, nothing loads, and `guidance` is the existing web-provider text (`tool_search_tool.py:595-601`).
-  - `test_select_ambiguous_raw_name_returns_aliases`: two servers expose `search`, so `ambiguous == {"search": ["a__search", "b__search"]}` and nothing loads. Selecting `"a__search"` loads it.
-  - `test_select_more_than_cap_is_refused_whole`: 9 names with cap 8 produce an `error` key and no loads.
-  - `test_select_duplicates_load_once`
-- [ ] **Step 2: Run them and confirm they fail.** Run `.venv/Scripts/python.exe -m pytest tests/test_tool_selection.py -v`. Expected: FAIL (import error, `tool_selection` does not exist).
-- [ ] **Step 3: Implement** the two catalog lookups, `tool_selection.py`, the `select` field and the branch in `_execute_tool_search`.
-  - Field description: "Exact tool names to load, as listed under Deferred tools or returned by an earlier search. Loads every named tool you may use; query and top_k are ignored when this is set."
-  - Order of resolution per name: client catalog first (names start with `client__`), then server `get_by_call_name`, then `aliases_for`.
-  - Allowlists and exclusions are applied before a name counts as found.
-- [ ] **Step 4: Run the suites.** Run `.venv/Scripts/python.exe -m pytest tests/test_tool_selection.py tests/test_unified_tool_search.py tests/test_tool_search_runtime_exclusions.py tests/test_custom_agents_tools.py tests/test_specialist_middleware.py -q`. Expected: all pass.
-- [ ] **Step 5: Commit** with the message `feat(tool-search): load tools by exact name with select`.
-
-### Task 4: `activate_skill` loads its own command tool
-
-**Files:**
-- Modify: `app/ai/skills_tool.py:111-155`
-- Modify: `app/ai/tool_execution.py:56`: change `TOOL_LOADING_TOOLS` to `{"tool_search", "activate_skill"}` so the same-batch map refresh (L2173-2184) runs after activation too
-- Modify (only if Step 2's custom-agent test fails on the allowlist): `app/ai/custom_agent_runtime.py:102-120`. `client_tool_search_allowlist()` also returns `skill::<name>::run_skill_command` for each name in `allowed_skill_refs`.
-- Test: `tests/test_skills_tool.py`
-
-**Interfaces:**
-- Consumes: `resolve_selection` and `load_selection` (Task 3), with `server_catalog=None` and the agent's client allowlist. Also `get_tool_context()` for `conversation_id` and `agent_key`, and `get_client_tool_catalog(device_id, user_id)`.
-- Produces: activation output. On a successful load the binding paragraph reads "The command tool `<name>` is loaded and callable now. Call it with an argv array; do not call the internal qualified id `<qid>` directly." When nothing loaded, it reads "Load it with tool_search(select=["<name>"]), then call it with an argv array."
-
-- [ ] **Step 1: Write the failing tests.**
-  - `test_activation_loads_the_command_tool`: after `activate_skill("take100")` in a tool context with a conversation id, `get_loaded_client_tools` contains `client__skill_take100__run_skill_command`, and the output contains "loaded and callable now".
-  - `test_activation_after_session_change_does_not_claim_callable` (Review Focus 3): the catalog session differs from the bound session, so nothing is loaded and the output contains `tool_search(select=`.
-  - `test_custom_agent_activation_binds_the_allowed_skills_command`: a custom agent whose `allowed_skill_refs` includes the skill gets the command tool from `_get_tools_for_binding` after activation.
-  - Update the existing `_2`-name test at L108-151 to the new wording.
-- [ ] **Step 2: Run them and confirm they fail.** Run `.venv/Scripts/python.exe -m pytest tests/test_skills_tool.py -v`. Expected: the new tests FAIL.
-- [ ] **Step 3: Implement.** After a successful dispatch, resolve `[exposed_name]` and load it, then write the wording above. Apply the `custom_agent_runtime` change only if the custom-agent test fails on the allowlist.
-- [ ] **Step 4: Run the suites.** Run `.venv/Scripts/python.exe -m pytest tests/test_skills_tool.py tests/test_skill_device_isolation.py tests/test_skill_installation_chat_integration.py tests/test_custom_agents_tools.py tests/test_hitl_client_and_deferred.py tests/test_tool_execution_recovery.py -q`. Expected: all pass.
-- [ ] **Step 5: Commit** with the message `feat(skills): activation loads the skill's command tool`.
-
-### Task 5: Search loads its top results; ranking no longer gates binding
-
-**Files:**
-- Modify: `app/ai/tool_search_tool.py`
-  - autoload loop (L458-516): drop the `_autoload_eligible` and confidence gates; keep the score floor, the ambiguity skip and the exclusions; honor a new internal `_load_blocked` flag
-  - `_prioritize_external_action_results` (L731-759): set `_load_blocked = True` where it now sets `_autoload_eligible = False`
-  - `_build_recommendation` (L690-728): replace it with `_next_action(public_results: list[dict]) -> str`
-  - inventory paths (L331-351, L385-400, and per-server inventory): load nothing
-  - both docstrings (L841-881, L921-947)
-- Modify: `app/core/config.py:1764`: change the default of `mcp_tool_search_autoload_top_k` from 1 to 3
-- Modify: `app/ai/prompts.py:337-351` (`TOOL_EXPLORATION_SUFFIX`), `app/ai/prompts.py:173-178` and `app/ai/prompts.py:311-314`
-- Modify: `README.md:735`
-- Test: `tests/test_unified_tool_search.py`, `tests/test_tool_search_runtime_exclusions.py`, `tests/test_tool_search_prompt_guidance.py`, `tests/test_tool_search_scoring.py:148`
-
-**Interfaces:**
-- Produces: the discovery output `{"query", "mode", "results", "next_action", "loaded_count", "more_available", "resolved_server_name"?, "guidance"?, "debug_scores"?}`. It no longer has `recommended_tool` or `requires_refinement`. `next_action` is `"call_a_loaded_tool" | "refine_search" | "inspect_inventory"`.
-- Prompt wording (exact): "Results with `is_loaded: true` are callable now: pick the one that fits and call it. To load a specific tool by name, use `tool_search(select=[...])`. Refine the query only when no loaded result fits."
-
-- [ ] **Step 1: Write the failing tests and update the pinned ones.**
-  - New: `test_search_loads_top_three_without_confidence_gate`. Three medium-confidence matches are all loaded and `next_action == "call_a_loaded_tool"`.
-  - New: `test_per_server_inventory_loads_nothing`. The current behavior autoloads the first listed tool.
-  - New: `test_external_open_server_opener_stays_blocked`. This replaces the `_autoload_eligible` assertion at `test_unified_tool_search.py:973`.
-  - Rewrite these to the new shape:
-    - the `recommended_tool` / `requires_refinement` / `next_action` assertions at `test_unified_tool_search.py` L730, L842, L1002
-    - `test_tool_search_runtime_exclusions.py:109` (keep: raw web tools never load)
-    - `test_tool_search_prompt_guidance.py:97` (assert the new wording, and that "recommended_tool" and "requires_refinement" are absent)
-    - `test_tool_search_scoring.py:148` (keep: below the score floor, nothing loads)
-  - Leave the `rank_tool_candidates` confidence/eligibility tests alone: they test ranking, which Plan B replaces.
-- [ ] **Step 2: Run them and confirm they fail.** Run `.venv/Scripts/python.exe -m pytest tests/test_unified_tool_search.py tests/test_tool_search_runtime_exclusions.py tests/test_tool_search_prompt_guidance.py -q`. Expected: the new and rewritten tests FAIL.
-- [ ] **Step 3: Implement** the loop, the flag, `_next_action`, the no-load inventory paths, the docstrings, the prompt text and the README line.
-- [ ] **Step 4: Run every tool-search, deferred and specialist suite.** Run `.venv/Scripts/python.exe -m pytest tests/test_tool_search_accuracy.py tests/test_tool_search_action_intent.py tests/test_tool_search_scoring.py tests/test_unified_tool_search.py tests/test_tool_search_runtime_exclusions.py tests/test_tool_search_prompt_guidance.py tests/test_tool_selection.py tests/test_deferred_tool_binding.py tests/test_specialist_middleware.py tests/test_planning_binds_only_what_it_executes.py tests/test_hitl_client_and_deferred.py -q`. Expected: all pass.
-- [ ] **Step 5: Commit** with the message `feat(tool-search): load top results; ranking no longer gates binding`.
-
-### Task 6: Deferred tool names in the system prompt
-
-**Files:**
-- Create: `app/ai/deferred_tool_inventory.py`
-- Modify: `app/ai/agents/base_agent.py:2228`: append the inventory right after `TOOL_EXPLORATION_SUFFIX`
-- Modify: `app/ai/agents/rag_agent.py:225` and `:1304`: same placement
-- Modify: `app/ai/agents/custom_agent.py`: override the new suffix method to pass the spec's allowlists, following the `_build_skills_suffix` override at L94-104
-- Modify: `app/ai/agents/planning_agent.py`: override the new suffix method to return "". Planning strips `TOOL_EXPLORATION_SUFFIX` with `str.replace` (L189), which would leave an inventory appended after it in place, and Planning binds no `tool_search`.
-- Modify: `app/core/config.py`: add `mcp_tool_search_prompt_inventory_max_tools: int = 60` and register it in `_non_negative_int`
-- Test: create `tests/test_deferred_tool_inventory.py`
-
-**Interfaces:**
-- Consumes: the catalogs' `list_all(allowlist=...)`, `ordinary_excluded_tool_names` (`deferred_tool_binding.py:97-112`), and `tool_search_profiles.infer_tool_profile(...).purpose`.
-- Produces:
-  - `build_deferred_tool_inventory(*, server_tools: list[ToolDescriptor], client_tools: list[ClientToolDescriptor], excluded_tool_names: frozenset[str], max_tools: int) -> str`. It returns "" when no tool remains.
-  - `BaseAgent._build_deferred_tool_inventory_suffix(self, *, user_id: str | None, device_id: str | None) -> str`.
-- Format (exact):
+      catalog = {"tools": [
+          {"name": "run_skill_command", "origin": "mcp",
+           "server_name": "skill_take100", "qualified_id": "mcp::collision"},
+          {"name": "run_skill_command", "origin": "skill",
+           "server_name": "skill_take100",
+           "qualified_id": "skill::take100::run_skill_command"},
+      ]}
+      names = exposed_names_by_qualified_id(catalog)
+      assert names["skill::take100::run_skill_command"] == (
+          "client__skill_take100__run_skill_command_2"
+      )
+      assert len(set(names.values())) == 2
   ```
-  ── Deferred tools ──
-  Load any of these with tool_search(select=["name", ...]) before calling it.
-  • <call name> – <purpose, ≤ 80 chars>
-  ...
-  (+N more — use tool_search(query=...) to find them)
-  ── End Deferred tools ──
+
+- [ ] **Step 2: Run the regression tests and record their failures.**
+  `.venv/Scripts/python.exe -m pytest tests/test_client_tool_isolation.py tests/test_mcp_tool_catalog_refresh.py -q`
+- [ ] **Step 3: Implement shared client naming and unique server aliases.** Skip
+  catalog entries missing from the validated name map; never guess a fallback name.
+  Reuse the map in `get_exposed_client_tool_name`. Reserve all server raw names before
+  allocating aliases; process qualified IDs in sorted order. Keep noncolliding names.
+  On an alias conflict append `__` plus a SHA-256 qualified-ID prefix, growing the
+  prefix until unique. Newly generated aliases must fit 64 characters. Truncate only
+  their readable prefix, never the identity suffix; use a digest form when needed.
+  Check uniqueness rather than assuming no collision.
+  Reject duplicate qualified IDs. Never use randomized `hash()` or input order.
+- [ ] **Step 4: Verify each alias binds the correct runtime tool.** Run the suites
+  above plus `tests/test_skills_tool.py`, `tests/test_custom_agent_client_tool_resync.py`,
+  `tests/test_client_tool_scope.py`, `tests/test_deferred_tool_binding.py`; Ruff changed
+  files. Suggested commit: `fix(tools): align catalog and runtime identities`.
+
+### Task 2: Make state results and client last-use tracking truthful
+
+**Files:** Modify `app/ai/deferred_tool_state.py`, `app/ai/tool_execution.py`.
+Test `tests/test_deferred_tool_state_lifecycle.py`, `tests/test_tool_execution_recovery.py`.
+
+**Interfaces:** Add `mark_client_tool_used` with keyword-only fields
+`conversation_id`, `agent_key`, `tool_name`, `device_id`, `session_id`, `user_id`,
+`catalog_version`, `tool_instance_id`; return `bool`. Extend
+`_mark_tool_used_if_deferred(tool_name, *, tool_metadata=None)` to pass the actual
+executed tool's metadata. Add `DeferredToolState.load_batch` taking keyword-only
+`conversation_id`, `agent_key`, `server_refs`, `client_refs`, `device_id`, `session_id`,
+`user_id`, `max_tools`; return the retained server/client reference lists.
+
+- [ ] **Step 1: Add lifecycle and batch regression tests.** Use at minute 29 must
+  survive minute 31 with TTL 30, then expire after 30 idle minutes. With capacity two,
+  touching A before loading C evicts B. Wrong user/device/session/instance cannot
+  touch a same-named entry. Existing autoload methods loading A/B/C at capacity two
+  return only B/C. `load_batch` with three refs at capacity two raises `ValueError`
+  before either pool changes; a mixed batch fitting each origin succeeds.
+
+  ```python
+  def test_autoload_reports_only_retained_references():
+      from app.ai.deferred_tool_state import DeferredToolState
+      from app.ai.mcp_tool_catalog import ToolReference
+
+      state = DeferredToolState()
+      refs = [ToolReference(name, "files") for name in ("a", "b", "c")]
+      returned = state.autoload("conv", "chat", refs, max_tools=2)
+      retained = state.get_loaded("conv", "chat")
+      assert {r.tool_name for r in returned} == {r.tool_name for r in retained}
+      assert len(returned) == 2
   ```
-  The last `(+N more …)` line appears only past the cap. Lines are sorted by call name.
 
-- [ ] **Step 1: Write the failing tests.**
-  - `test_inventory_lists_call_names_with_short_purpose`
-  - `test_inventory_omits_excluded_raw_web_tools`
-  - `test_inventory_is_empty_without_tools` (returns "")
-  - `test_inventory_caps_and_counts_the_rest`: 70 tools with cap 60 give 60 lines plus "(+10 more".
-  - `test_inventory_truncates_long_purpose` (Review Focus 5)
-  - `test_custom_agent_inventory_respects_its_allowlist`
-  - `test_planning_prompt_has_no_inventory`: Planning replaces `TOOL_EXPLORATION_SUFFIX`, so the inventory must not leak in.
-- [ ] **Step 2: Run them and confirm they fail.** Run `.venv/Scripts/python.exe -m pytest tests/test_deferred_tool_inventory.py -v`. Expected: FAIL (module missing).
-- [ ] **Step 3: Implement.** Write the module, the BaseAgent method (it reads the catalogs the way `_execute_tool_search` does, with the same client-only-scope rule), the custom-agent override, the three injection sites and the setting.
-- [ ] **Step 4: Run the suites.** Run `.venv/Scripts/python.exe -m pytest tests/test_deferred_tool_inventory.py tests/test_tool_search_prompt_guidance.py tests/test_planning_binds_only_what_it_executes.py tests/test_custom_agents_tools.py tests/test_search_agent_time_context.py tests/test_widget_runtime.py -q`. Expected: all pass.
-- [ ] **Step 5: Commit** with the message `feat(prompt): list deferred tool names the agent can load`.
+- [ ] **Step 2: Run new tests and confirm intended failures.**
+  `.venv/Scripts/python.exe -m pytest tests/test_deferred_tool_state_lifecycle.py -q`
+- [ ] **Step 3: Implement under the existing state lock.** Deduplicate refs, validate
+  both origin capacities before mutation, and reuse scope add/cleanup operations.
+  Do not acquire the non-reentrant lock twice. Existing autoload methods filter their
+  returns against final retained state. Client use refreshes entry and scope only when
+  exact bound identity agrees. Pass `getattr(tool, "metadata", None)` after successful
+  execution; failed/denied calls and old sessions do not refresh a new instance.
+- [ ] **Step 4: Verify lifecycle, isolation, recovery and approval suites.** Include
+  `tests/test_client_tool_isolation.py` and `tests/test_hitl_client_and_deferred.py`;
+  Ruff changed files. Suggested commit:
+  `fix(deferred-tools): report retained loads and track client use`.
 
-### Task 7: Live verification and memory
+### Task 3: Authorize selected skill commands through exact live references
 
-- [ ] **Step 1: Run the full suite.** Run `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider`. Expected: the same pass/skip counts as before this plan, plus the new tests. Investigate any failure; per `test-and-lint-baseline` memory, the suite was fully green.
-- [ ] **Step 2: Live chat check (needs Thai).** With the sidecar connected:
-  - Ask "tháng này tôi OT bao nhiêu giờ".
-  - Expected trace: `activate_skill("take100")` is followed directly by `client__skill_take100__run_skill_command`, with no `tool_search` in between.
-  - Then ask for something that needs an MCP tool by name. Expected: `tool_search(select=[...])` once, then the tool.
-- [ ] **Step 3: Update memory.** Update `take100-merged-skill-and-applications-api.md`: loading is deterministic now, and the +100 boost is ranking-only. Add a line to MEMORY.md under "MCP and tools".
+**Files:** Modify `app/services/custom_agent_capability_resolver.py`,
+`app/ai/agents/custom_agent.py`, and `app/ai/custom_agent_runtime.py` only where needed
+for resolved refs. Test `tests/test_custom_agent_capability_resolver.py`,
+`tests/test_custom_agent_client_tool_resync.py`, `tests/test_custom_agents_tools.py`.
+
+**Interfaces:** Keep `resolve_custom_agent_capabilities` and `CapabilityResolution`.
+Extend `resolved_client_tool_refs` to include commands for selected, enabled,
+device-local live skills. `CustomAgent._request_spec` remains the request policy
+source; make its resolved spec available to subsequent factories without mutating
+`self._spec` or caching per-user policy on the shared agent.
+
+- [ ] **Step 1: Add tests for a selected skill with no selected client tools.** The
+  resolved refs include its current command instance. Final `_get_tools_for_binding`
+  admits that command once loaded and rejects unrelated skill commands. Repeat after
+  session/catalog/instance rotation, with a missing command, disabled skill, name
+  collision and second device. Repeated selections do not duplicate refs. Existing
+  management capability-status tests must still pass.
+- [ ] **Step 2: Run the three suites and confirm the new assertions fail.**
+- [ ] **Step 3: Resolve canonical names before deriving command IDs.** Match each
+  selected ref to a live skill using `skill_refs_match`. Derive
+  `skill::<live.name>::run_skill_command`; require the matching live tool's client-skill
+  origin and requesting device. Copy exact live identity into a ref with `type="client"`
+  and deduplicate by full identity. Missing commands are unavailable capabilities.
+  Keep `client_ref_matches_metadata` strict. Do not merely add wildcard or qualified
+  strings to a search allowlist. Use a small resolver helper for this mapping.
+- [ ] **Step 4: Verify all three suites plus `tests/test_skill_device_isolation.py`;
+  Ruff changed files.** Suggested commit:
+  `fix(custom-agents): resolve selected skill command instances`.
+
+### Task 4: Introduce one authorized snapshot and loading implementation
+
+**Files:** Create `app/ai/tool_selection.py`. Modify `app/ai/deferred_tool_binding.py`
+to re-export moved exclusions. Create `tests/test_tool_selection.py`.
+
+**Interfaces:** Define these types in `tool_selection.py`:
+
+```python
+@dataclass(frozen=True)
+class ToolLoadingPolicy:
+    server_allowlist: tuple[str, ...] | None = None
+    client_allowlist: tuple[str, ...] | None = None
+    excluded_tool_names: frozenset[str] = frozenset()
+    allow_raw_web_tools: bool = False
+
+@dataclass(frozen=True)
+class ToolCatalogSnapshot:
+    server_tools: tuple[ToolDescriptor, ...]
+    client_tools: tuple[ClientToolDescriptor, ...]
+    server_generation: int
+    client_session_id: str | None
+    client_catalog_version: int | None
+
+@dataclass
+class Selection:
+    server_refs: list[ToolReference]
+    client_refs: list[ClientToolReference]
+    results: list[dict[str, Any]]
+    not_found: list[str]
+    ambiguous: dict[str, list[str]]
+    excluded: list[str]
+```
+
+`async acquire_tool_catalog_snapshot(*, ctx: ToolContext,
+policy: ToolLoadingPolicy) -> ToolCatalogSnapshot` acquires and copies current data.
+`resolve_selection(names: list[str], *, snapshot: ToolCatalogSnapshot,
+policy: ToolLoadingPolicy) -> Selection` is pure.
+`async load_selection(selection: Selection, *, snapshot: ToolCatalogSnapshot,
+ctx: ToolContext, policy: ToolLoadingPolicy) -> set[str]` performs the shared load,
+updates result `is_loaded`/`unavailable_reason`, and returns retained public names.
+Callers await it; runtime counterpart verification may need asynchronous MCP access.
+
+- [ ] **Step 1: Add resolution/loading tests with real descriptors and state.**
+  Cover `None` versus empty allowlists on both origins; forbidden aliases/descriptions
+  absent; two visible raw matches, one, and none; raw/public/client-source exclusions;
+  diagnostic opt-in; low-ranked exact selection; duplicates; missing conversation/device;
+  mixed-origin capacity preflight; stale session, catalog republish, wrong instance,
+  and a session change during loading.
+
+  ```python
+  def test_empty_server_allowlist_cannot_resolve_a_tool():
+      from app.ai.mcp_tool_catalog import ToolDescriptor
+      from app.ai.tool_selection import (
+          ToolCatalogSnapshot, ToolLoadingPolicy, resolve_selection,
+      )
+
+      tool = ToolDescriptor("read_file", "files", "Read a file", [], [], "fp")
+      snapshot = ToolCatalogSnapshot((tool,), (), 0, None, None)
+      selection = resolve_selection(
+          ["read_file"], snapshot=snapshot,
+          policy=ToolLoadingPolicy(server_allowlist=()),
+      )
+      assert selection.not_found == ["read_file"]
+      assert selection.results == []
+      assert selection.server_refs == []
+  ```
+
+- [ ] **Step 2: Run the new suite and record import/behavior failures.**
+  `.venv/Scripts/python.exe -m pytest tests/test_tool_selection.py -q`
+- [ ] **Step 3: Implement policy and resolution.** Move `RAW_WEB_TOOL_NAMES` and
+  `ordinary_excluded_tool_names` here. This module must not import
+  `deferred_tool_binding` or `tool_search_tool`. Obtain catalog lists without passing
+  empty allowlists; explicitly filter `None`/empty/nonempty policy and copy descriptors
+  into a snapshot. Keep authorized excluded descriptors internally for select's
+  `excluded` response; discovery/inventory remove them before ranking/counting. Apply
+  policy again in the pure resolver so manually supplied snapshots cannot bypass it.
+  Resolve public names first, then visible raw server shorthand. Respect client-only
+  scope even without a device. Catalog failure yields empty affected-origin data and
+  internal diagnostics; never fall back to another device or a broader policy.
+- [ ] **Step 4: Implement shared loading.** Check context and both capacities before
+  mutation. Validate current server generation and ownership-checked client session,
+  catalog and instance against the snapshot; mark stale refs unavailable without
+  substitution. Call `load_batch` once, inspect final retained state and recheck identity.
+  A change after loading makes affected results unloaded. Confirm refs have live runtime
+  counterparts through existing binding helpers; a state entry alone is not proof its
+  schema can be offered. Keep existing execution approval checks.
+- [ ] **Step 5: Verify selection, state, deferred-binding and runtime-exclusion suites;
+  Ruff changed files.** Suggested commit:
+  `refactor(tools): centralize authorized deferred loading`.
+
+### Task 5: Wire exact selection through every public entry point
+
+**Files:** Modify `app/ai/tool_search_tool.py`, `app/core/config.py`, `.env.example`.
+Extend `tests/test_tool_selection.py`, `tests/test_config_validation.py`,
+`tests/test_custom_agents_tools.py`, `tests/test_tool_search_runtime_exclusions.py`.
+
+**Interfaces:** Add `select: list[str] | None = None` to `ToolSearchInput`, exported
+`tool_search`, factory `tool_search_impl`, and `_execute_tool_search`, forwarding it
+through every call. Add `mcp_tool_search_max_select=8` with nonnegative validation;
+zero disables explicit selection. Add the environment example entry.
+
+- [ ] **Step 1: Test actual `.ainvoke` calls.** Exercise exported, ordinary factory,
+  and custom-agent factory tools. Assert select mode reaches the loader; unknown names
+  return `not_found`; denied names and aliases remain hidden; ordinary custom-agent
+  raw-provider selection is refused without callers supplying exclusions. Validate
+  `[]`, blanks, duplicates, limit after deduplication, select with server_name,
+  query/top-k precedence, zero limit, and missing context.
+
+  ```python
+  import pytest
+
+  @pytest.mark.asyncio
+  async def test_public_tool_rejects_empty_select_instead_of_listing_inventory():
+      import json
+      from app.ai.tool_search_tool import tool_search
+
+      result = json.loads(await tool_search.ainvoke({"select": []}))
+      assert result["mode"] == "select"
+      assert result["error"] == "select must contain at least one tool name"
+      assert result["loaded_count"] == 0
+  ```
+
+- [ ] **Step 2: Run the four suites and confirm new public-entry-point tests fail.**
+- [ ] **Step 3: Route selection before query/inventory logic.** Validate names before
+  catalog I/O; preserve input order when deduplicating. Empty select and blank names
+  are errors; reject nonempty server_name with select. Ignore query/top-k for valid
+  selection. Acquire the snapshot, resolve names and await the shared loader. Ordinary
+  factories always supply ordinary exclusions; custom factories use the current
+  resolved request spec. Keep diagnostic opt-in a server-side keyword, never a model
+  input. Do not append another loading loop.
+- [ ] **Step 4: Match response fields and error precedence in the spec.** Forbidden
+  names are `not_found` before exclusion/ambiguity classification. Request/capacity
+  errors change neither pool. Partial unknown names can coexist with loaded authorized
+  results. `loaded_count` counts distinct currently loaded returned results.
+- [ ] **Step 5: Verify public schemas, final binding, all four suites and Ruff.**
+  Suggested commit: `feat(tool-search): select deferred tools by exact name`.
+
+### Task 6: Load activated commands and refresh the actual execution map
+
+**Files:** Modify `app/ai/skills_tool.py`, `app/ai/agents/base_agent.py`,
+`app/ai/agents/custom_agent.py`, `app/ai/tool_execution.py` and affected execution
+integration in `app/ai/workflow/middleware.py`.
+Test `tests/test_skills_tool.py`, `tests/test_tool_execution_recovery.py`,
+`tests/test_specialist_middleware.py`, `tests/test_hitl_client_and_deferred.py`.
+
+**Interfaces:** Add optional keyword-only `loading_policy: ToolLoadingPolicy | None`
+to `create_activate_skill_tool`. Base callers construct ordinary policy; custom callers
+pass policy from the same resolved request spec used by search and binding.
+Add `activate_skill` to `TOOL_LOADING_TOOLS`.
+
+- [ ] **Step 1: Add activation-to-call tests.** Exercise a base agent and a skill-only
+  custom agent, including the collision-suffixed name. After activation, assert the
+  command appears in final binding and executes next without search. Cover same-batch
+  activation/command, reconnect during dispatch, republish during loading, missing
+  conversation, missing command, failed activation and an unrelated forbidden command.
+  A mutating command must still encounter approval.
+- [ ] **Step 2: Run all four suites and confirm new behavior fails.**
+- [ ] **Step 3: Resolve/load the canonical command after successful dispatch.** Capture
+  the activation session/version before awaiting dispatch; do not derive an old command
+  name from a new session afterward. Use the shared snapshot/resolver/loader and supplied
+  policy, awaiting the shared loader. Failed dispatch appends no success paragraph.
+  If loaded, say
+  `The command tool <name> is loaded for this session.` and give argv guidance. For a
+  changed session/version, explain tools need refreshing; do not suggest selecting an
+  obsolete name. Suggest `tool_search(select=[...])` only for a current available command
+  when selection can succeed. Missing/forbidden commands get unavailable guidance.
+- [ ] **Step 4: Refresh through current agent binding.** Preserve invocation exclusions,
+  scope and strict custom policy. Replace stale external map entries instead of only
+  appending unseen names; retain required invocation-local internal tools. Middleware
+  must offer live schemas on the next model call. Do not create an activation-specific
+  refresh implementation alongside the existing one.
+- [ ] **Step 5: Run the four suites plus `tests/test_skill_device_isolation.py`,
+  `tests/test_skill_installation_chat_integration.py`,
+  `tests/test_custom_agent_client_tool_resync.py`,
+  `tests/test_client_runtime_result_binding.py`; Ruff changed files.** Suggested commit:
+  `feat(skills): load authorized commands during activation`.
+
+### Task 7: Simplify discovery and delete obsolete binding gates
+
+**Files:** Modify `app/ai/tool_search_tool.py`, `app/ai/tool_search_scoring.py`,
+`app/ai/mcp_tool_catalog.py`, `app/ai/client_tool_catalog.py`, `app/ai/prompts.py`,
+`app/core/config.py`, `.env.example`, `README.md`.
+Test `tests/test_unified_tool_search.py`, `tests/test_tool_search_scoring.py`,
+`tests/test_tool_search_action_intent.py`, `tests/test_tool_search_accuracy.py`,
+`tests/test_tool_search_runtime_exclusions.py`, `tests/test_tool_search_prompt_guidance.py`.
+
+**Interfaces:** Make `_execute_tool_search` keyword-only orchestration of normalization,
+snapshot acquisition and mode handlers. Extract inventory, discovery and response
+helpers within global size limits. Selection delegates to Task 4. Delete
+`RecommendedTool`, `autoload_eligible`, `high_confidence_margin`, `_build_recommendation`,
+`recommended_tool`, `requires_refinement`, and `call_recommended_tool` from active
+contracts. Retain confidence calculations only where ranking diagnostics use them.
+
+- [ ] **Step 1: Add discovery behavior tests; update obsolete contract tests.** Three
+  medium-confidence eligible results load. Blocked server openers do not consume load
+  slots; retain blocking with and without client actions for external-open discovery,
+  while deliberate authorized selection succeeds. Global, per-server and inferred
+  named-integration inventory make zero mutations. No-match searches produce no
+  fabricated scores or fallback loads. Previously loaded status is truthful. Capacity
+  below autoload count is respected. Ranking tests assert ordering/relevance/confidence
+  instead of deleted eligibility fields; keep exact skill-name ranking coverage.
+- [ ] **Step 2: Run the six suites and confirm the new assertions fail.**
+- [ ] **Step 3: Unify discovery loading.** Rank visible nonexcluded candidates. Pass
+  `settings.mcp_tool_search_min_relevance_score` explicitly to `rank_tool_candidates`;
+  replace its `value or 1.0` floor expression with an explicit `None` check so zero works.
+  Remove `mcp_tool_search_autoload_min_relevance_score` from config, examples and active
+  docs; existing deployment keys become obsolete, ignored keys rather than another
+  threshold. Change autoload default/example to 3; keep loaded capacity/example at 8.
+  Collect the first eligible returned candidates, scanning past discovery-blocked
+  results, capped by the autoload setting, returned count and each origin's capacity.
+  Resolve their public names through Task 4 and await `load_selection` once.
+- [ ] **Step 4: Delete dead plumbing and test-only compatibility.** Remove the old
+  state-loading loops and gate-only eligibility/margin calculations. Preserve numeric
+  ranking bonuses. Replace legacy plain-descriptor/tuple merge fallbacks with the
+  actual `ToolSearchScore` contract and migrate fake catalogs in the same task; never
+  fabricate `1000 - idx` scores. Preserve inventory's separate unscored contract.
+  Update output models for select mode, error/guidance and next actions; remove
+  recommendation-specific logging. Do not leave unused response models.
+- [ ] **Step 5: Update prompts and docs.** Use this guidance:
+  `Results with is_loaded: true are available in this session. Pick the one that fits
+  and call it. Load a known tool with tool_search(select=[...]). Refine the query when
+  no loaded result fits.` Explain browsing without loading, the removed environment
+  key and per-origin capacity. Discovery-blocked results explain server-host execution;
+  they do not claim a tool is forbidden by security policy.
+- [ ] **Step 6: Verify all six suites plus selection, binding, specialist and approval
+  suites; Ruff changed files.** Suggested commit:
+  `refactor(tool-search): share loading and remove recommendation gates`.
+
+### Task 8: Acquire prompt inventory asynchronously and render within budget
+
+**Files:** Create `app/ai/deferred_tool_inventory.py`, `tests/test_deferred_tool_inventory.py`.
+Modify `app/ai/workflow/specialists.py`, `app/ai/workflow/middleware.py`,
+`app/ai/agents/base_agent.py`, `app/ai/agents/custom_agent.py`,
+`app/ai/agents/rag_agent.py`, `app/ai/agents/chat_agent.py`,
+`app/ai/agents/search_agent.py`, `app/ai/agents/canvas_agent.py`,
+`app/ai/agents/image_generator_agent.py`, `app/ai/agents/planning_agent.py`,
+`app/core/config.py`, `.env.example`, `README.md` at affected preparation/call sites.
+
+**Interfaces:** Pure
+`build_deferred_tool_inventory(*, snapshot: ToolCatalogSnapshot,
+policy: ToolLoadingPolicy, offered_names: frozenset[str], max_tools: int,
+max_chars: int = 4000) -> str`.
+Add `mcp_tool_search_prompt_inventory_max_tools=20`, nonnegative validation and example.
+Use `deferred_tool_inventory: str = ""` as an explicit prompt-factory input or
+invocation-local request extra. Do not acquire catalogs in a synchronous suffix method.
+
+- [ ] **Step 1: Add formatting tests.** Cover empty input, zero cap, 70 visible tools,
+  long purposes/newlines, a name too long for the remaining budget, stable sorting,
+  no truncated names, accurate overflow, already offered tools, and total length at
+  most 4,000. Both limits include header/footer/overflow text. Add integration tests
+  for empty custom allowlists, reconnect/rebased refs, raw exclusions, concurrent users
+  sharing one agent, client-only scope without a device, worker restrictions, deferred
+  mode off, forced-final mode, Planning, direct SDK and both RAG paths. Eligible prompts
+  contain the block exactly once.
+
+  ```python
+  def test_inventory_is_empty_when_disabled():
+      from app.ai.deferred_tool_inventory import build_deferred_tool_inventory
+      from app.ai.tool_selection import ToolCatalogSnapshot, ToolLoadingPolicy
+
+      result = build_deferred_tool_inventory(
+          snapshot=ToolCatalogSnapshot((), (), 0, None, None),
+          policy=ToolLoadingPolicy(), offered_names=frozenset(), max_tools=0,
+      )
+      assert result == ""
+  ```
+
+- [ ] **Step 2: Run the inventory and prompt integration tests; confirm failures.**
+- [ ] **Step 3: Implement pure formatting.** Reapply policy; remove excluded and offered
+  names, sort, normalize purpose whitespace and cap purposes at 80 characters. Reserve
+  complete header/footer/overflow space before adding entries. Omit entries instead of
+  truncating names. Return empty when no entry fits. Format `Deferred tools`, a select
+  instruction, complete `name — purpose` rows, optional
+  `(+N more; use tool_search(query=...))`, and `End deferred tools`. Counts never include
+  forbidden entries.
+- [ ] **Step 4: Prepare data before synchronous formatting.** Initialize tools and
+  resolve the custom request spec first. Acquire the snapshot with explicit
+  conversation/user/device/scope/policy. In specialist construction, finalize offered
+  tools, disabled-tool handling and worker restrictions before inventory preparation
+  and system-prompt construction. Pass the rendered string through request-local data
+  to prompt factories; never cache per-user inventory on the agent. Catalog failure
+  yields an empty block with internal diagnostics rather than a failed answer.
+  The live binding middleware must suppress/remove inventory when current offered
+  tools no longer contain `tool_search`; do not retain a stale initial block after
+  restrictions change. Direct SDK and RAG preparation await acquisition before their
+  synchronous formatters. Never use `asyncio.run` inside a running event loop.
+- [ ] **Step 5: Verify inventory, prompt guidance, specialist, custom-agent, planning,
+  search time-context and widget suites; Ruff changed files.** Suggested commit:
+  `feat(prompts): add bounded request-scoped deferred tool inventory`.
+
+### Task 9: Verify behavior, measure complexity and document limits
+
+**Files:** Verification only, plus README corrections for inaccurate claims. Use a
+local report or temporary output for measurements; no new benchmark framework or
+unrequested external agent-memory edits.
+
+- [ ] **Step 1: Record fresh baselines before Task 1.** Record branch, dirty files,
+  interpreter version and full-suite outcome. The preceding review's 394 targeted
+  passes and clean Ruff are useful evidence, not a full-suite baseline. Record schema
+  tokens, inventory tokens and search rounds for the scenarios below with fixed
+  catalogs/prompts and the same existing tokenizer. Do not invent before measurements
+  after implementation.
+- [ ] **Step 2: Run final automated checks.**
+
+  ```powershell
+  .venv/Scripts/python.exe -m pytest -q -p no:cacheprovider
+  .venv/Scripts/python.exe -m ruff check app/ai app/services/custom_agent_capability_resolver.py app/core/config.py tests
+  rg -n 'autoload_eligible|high_confidence_margin|recommended_tool|requires_refinement|call_recommended_tool|mcp_tool_search_autoload_min_relevance_score' app tests .env.example README.md
+  rg -n '\.autoload\(|\.autoload_client_tools\(|\.load_batch\(' app/ai
+  ```
+
+  Expected: no new test/lint failures relative to baseline. No obsolete active
+  runtime/test consumers; literal assertions that obsolete response keys are absent
+  and a README migration note for the removed environment key are allowed. Loader
+  search shows one discovery/activation caller of state loading;
+  account for checkpoint restore/state internals separately. Fix extra callers rather
+  than renaming them to evade the check.
+- [ ] **Step 3: Verify representative traces.** With the sidecar connected, request
+  `tháng này tôi OT bao nhiêu giờ`: activation must proceed directly to the canonical
+  command. Repeat with a skill-only custom agent, collision-suffixed command, exact
+  server selection, inventory browsing, reconnect between activation/call, and a
+  mutating command requiring approval. If the live environment is unavailable, record
+  unrun checks explicitly; automated tests are not live evidence.
+- [ ] **Step 4: Compare actual costs.** Record changed runtime LOC, executor size,
+  loader call sites, removed symbols, offered schemas/tokens, inventory tokens and
+  search rounds. Require one shared loader, no obsolete binding gates, mode helpers
+  within size limits, capacity still 8, and inventory within budget. State measured
+  context increases as costs. Do not claim general codebase debloating or reduced
+  total tokens without evidence.
+- [ ] **Step 5: Review the final diff and report.** Check authorization, approvals,
+  migration guidance and unrelated edits. Report behavior, tests, measured tradeoffs
+  and unrun live checks. Update external agent memory only if explicitly requested.
+
+## Review coverage
+
+| Verified review gap | Required task/test coverage |
+| --- | --- |
+| Public wrappers omit select | Task 5 real `.ainvoke` tests for every factory |
+| Empty allowlists and alias leaks | Tasks 4, 5 and 8 filter before output/counts |
+| Skill-only custom binding fails | Task 3 exact refs; Task 6 binding/execution |
+| Old-session load reports success | Tasks 2, 4 and 6 identity/reconnect tests |
+| Ordinary custom raw-provider bypass | Tasks 4 and 5 factory defaults/exclusions |
+| Sanitized and raw/alias collisions | Task 1 unique deterministic identities |
+| Batch reports evicted tools; caps conflict | Tasks 2 and 4 preflight/final-state tests |
+| Synchronous or stale inventory | Task 8 async request-local data and restrictions |
+| Conflicting discovery guarantees | Task 7 one return floor and explicit routing preference |
+| Stale models/config/logging | Tasks 5 and 7 complete contract/environment migration |
+| Complexity added without deletion | Tasks 7 and 9 removed gates, one loader, measured costs |

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -7,6 +8,7 @@ from uuid import UUID
 
 import pytest
 
+from app.ai.checkpoint import _build_checkpoint_serializer
 from app.ai.token_counter import TokenCount
 from app.services.rag_retrieval import RetrievalCandidate, RetrievalScope
 
@@ -80,6 +82,26 @@ def test_evidence_ids_and_metadata_are_server_owned_and_immutable() -> None:
         pack.records[0].filename = "changed.pdf"  # type: ignore[misc]
     with pytest.raises(TypeError):
         pack.records[0].trace_metadata["dense_score"] = 999  # type: ignore[index]
+
+
+def test_an_evidence_pack_can_be_encoded_by_the_checkpoint_serializer() -> None:
+    """A pack lives in graph state, which a checkpointer serializes on every step."""
+    pack = _assembler().assemble("question", [_candidate(1, rerank_score=0.91)], max_tokens=500)
+
+    encoding, payload = _build_checkpoint_serializer().dumps_typed(pack)
+
+    assert encoding == "msgpack"
+    assert payload
+
+
+def test_trace_metadata_stays_read_only_whatever_mapping_built_the_record() -> None:
+    pack = _assembler().assemble("question", [_candidate(1)], max_tokens=500)
+    rebuilt = replace(pack.records[0], trace_metadata={"dense_score": 1})
+
+    for record in (rebuilt, copy.deepcopy(pack.records[0])):
+        with pytest.raises(TypeError):
+            record.trace_metadata["dense_score"] = 999  # type: ignore[index]
+    assert copy.deepcopy(pack).records[0].trace_metadata == pack.records[0].trace_metadata
 
 
 def test_evidence_serialization_marks_content_untrusted_and_counts_exact_rendering() -> None:
