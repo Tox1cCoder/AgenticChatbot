@@ -35,7 +35,7 @@ def test_scratch_and_skill_scripts_do_not_restart_the_server(relative):
     [
         "app/main.py",
         "client_backend/main.py",
-        "shared/integrations/take100_api.py",
+        "shared/skills/hashing.py",
     ],
 )
 def test_server_source_changes_still_restart_the_server(relative):

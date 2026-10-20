@@ -122,6 +122,8 @@ allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The take100 skill bundle carries its own client package, take100_lib.
+pythonpath = ["skills/take100"]
 markers = [
     "live_provider: calls a configured external model provider",
 ]
@@ -151,6 +153,9 @@ exclude = [
 
 # Độ dài tối đa của một dòng (Black mặc định là 88, nhiều dự án dùng 100-120)
 line-length = 100
+
+# First-party import roots; skills/take100 holds the take100_lib package.
+src = [".", "skills/take100"]
 
 # Phiên bản Python tối thiểu dự án hỗ trợ
 target-version = "py311"

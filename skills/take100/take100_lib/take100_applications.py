@@ -37,7 +37,7 @@ from datetime import date, datetime, timedelta
 
 import requests
 
-from shared.integrations.take100_api import (
+from take100_lib.take100_api import (
     BASE_URL,
     DEFAULT_TIME_IN,
     DEFAULT_TIME_OUT,

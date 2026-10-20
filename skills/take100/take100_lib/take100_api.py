@@ -9,8 +9,8 @@ Late arrivals and overtime are detected automatically: save/submit look up the d
 applications on take100dot.com and derive time_in / time_out from them, then refuse to
 send entries that do not match that working window.
 
-Usage — the skill runtime runs ``scripts/take100.py`` with argv and no shell, so
-Unicode entries can be passed inline:
+Usage — ``python scripts/take100.py`` from the skill folder. A skill runtime passes
+argv with no shell, so Unicode entries can be passed inline:
     --action list                                   timesheets + weekdays still missing
     --action check-day --date 2026-03-03            the day's working window
     --action save --date 2026-03-03 --entries '[...]'      draft (submit: --action submit)
@@ -1250,13 +1250,13 @@ COMMANDS = {
 def _all_commands() -> dict:
     """Timesheet commands plus the leave/OT application ones."""
     # Imported here: take100_applications builds on this module.
-    from shared.integrations import take100_applications
+    from take100_lib import take100_applications
 
     return {**COMMANDS, **take100_applications.COMMANDS}
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    from shared.integrations import take100_applications
+    from take100_lib import take100_applications
 
     parser = argparse.ArgumentParser(description="Take100 Timesheet API Client")
     parser.add_argument(
@@ -1357,8 +1357,8 @@ def main():
         _print(
             {
                 "success": False,
-                "error": "Missing credentials. Provide --email/--password, "
-                "bind TAKE100_EMAIL/TAKE100_PASSWORD in the skill secret settings.",
+                "error": "Missing credentials. Set TAKE100_EMAIL/TAKE100_PASSWORD in the "
+                "take100 skill's secret settings or as environment variables.",
             }
         )
         sys.exit(1)
@@ -1386,7 +1386,3 @@ def main():
     _print(result)
     if not result.get("success", True):
         sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

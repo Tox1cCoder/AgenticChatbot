@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from shared.integrations import take100_api
-from shared.integrations.take100_api import CommandRefused
+from take100_lib import take100_api
+from take100_lib.take100_api import CommandRefused
 
 PERIOD = {"from": "2026-09-21", "to": "2026-10-20", "month": "this_month"}
 

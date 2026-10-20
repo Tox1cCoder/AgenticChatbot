@@ -128,4 +128,7 @@ mcp_config.json
 # directory. `shared/skills/` (importable shared code) and
 # `tests/fixtures/skills/` (CI fixtures) are not matched and stay tracked;
 # bytecode under them is still ignored by the __pycache__/ rule above.
-/skills/
+# `take100` is the exception: it carries its own client code and the tests
+# under tests/ import it, so it must be versioned.
+/skills/*
+!/skills/take100/

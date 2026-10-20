@@ -5,8 +5,8 @@ import json
 import pytest
 import requests
 
-from shared.integrations import take100_applications as apps
-from shared.integrations.take100_api import CommandRefused
+from take100_lib import take100_applications as apps
+from take100_lib.take100_api import CommandRefused
 
 # One row exactly as /other-applications renders it (2026-10-16), trimmed of the
 # progress bar markup.

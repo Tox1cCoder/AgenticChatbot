@@ -9,11 +9,11 @@ The panel is a Next.js app behind an ngrok tunnel. It authenticates with a NextA
 credentials provider (identifier = email or Mã NV) and serves
 ``GET /api/attendance?fromDate=&toDate=&maNhanVien=`` as ``{"data": [...]}``.
 
-Usage (called by the agent via bash):
-    python skills/attendance/scripts/attendance.py
-    python skills/attendance/scripts/attendance.py --from 2026-09-21 --to 2026-10-12
-    python skills/attendance/scripts/attendance.py --employee VT0123
-    python skills/attendance/scripts/attendance.py --base-url https://xxxx.ngrok-free.app
+Usage, from the skill folder:
+    python scripts/attendance.py
+    python scripts/attendance.py --from 2026-09-21 --to 2026-10-12
+    python scripts/attendance.py --employee VT0123
+    python scripts/attendance.py --base-url https://xxxx.ngrok-free.app
 """
 
 import argparse
@@ -27,8 +27,8 @@ from pathlib import Path
 
 import requests
 
-from shared.integrations import take100_api, take100_applications
-from shared.integrations.take100_api import to_minutes
+from take100_lib import take100_api, take100_applications
+from take100_lib.take100_api import to_minutes
 
 DEFAULT_SESSION_CACHE_PATH = str(Path.home() / ".cache" / "attendance" / "session.json")
 
@@ -467,8 +467,8 @@ def main():
     username = os.getenv("ATTENDANCE_USERNAME")
     password = os.getenv("ATTENDANCE_PASSWORD")
     if not username or not password:
-        _fail("Missing credentials. Bind ATTENDANCE_USERNAME/ATTENDANCE_PASSWORD in the "
-              "take100 skill secret settings.")
+        _fail("Missing credentials. Set ATTENDANCE_USERNAME/ATTENDANCE_PASSWORD in the "
+              "take100 skill's secret settings or as environment variables.")
 
     session_cache_path = os.getenv("ATTENDANCE_SESSION_CACHE_PATH") or DEFAULT_SESSION_CACHE_PATH
     # The panel's address is an ngrok tunnel that changes; it is never baked in here.
@@ -506,7 +506,3 @@ def main():
     except requests.RequestException as exc:
         _fail(f"Could not reach {base_url}: {exc}. If the tunnel moved, ask the user for "
               f"the current ngrok URL and pass --base-url.", base_url=base_url)
-
-
-if __name__ == "__main__":
-    main()

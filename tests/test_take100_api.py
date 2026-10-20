@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import requests
 
-from shared.integrations import take100_api
+from take100_lib import take100_api
 
 BASE_URL = take100_api.BASE_URL
 Take100Client = take100_api.Take100Client

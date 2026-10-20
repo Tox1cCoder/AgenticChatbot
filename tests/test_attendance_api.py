@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import requests
 
-from shared.integrations import attendance_api, take100_api
+from take100_lib import attendance_api, take100_api
 
 BASE = "https://abcd-1-2-3-4.ngrok-free.app"
 AttendanceClient = attendance_api.AttendanceClient
