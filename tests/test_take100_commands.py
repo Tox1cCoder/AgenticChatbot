@@ -218,14 +218,15 @@ def test_save_many_files_every_day_with_its_own_window():
     client = StubClient(applications=[late])
     days = [
         {"date": "2026-09-29", "entries": _entries()},
-        {"date": "2026-09-30", "entries": _entries(time_in="09:24")},
+        {"date": "2026-09-30", "entries": _entries(time_in="09:23")},
     ]
 
     result = take100_api._cmd_save_many(client, _args(action="save-many", days=json.dumps(days)))
 
     assert result["success"] is True
+    # Work resumes at the minute the paid leave ends: leave 08:00-09:23, time_in 09:23.
     assert [(day, time_in) for day, time_in, _, _ in client.saved] == [
-        ("2026-09-29", "08:00"), ("2026-09-30", "09:24"),
+        ("2026-09-29", "08:00"), ("2026-09-30", "09:23"),
     ]
 
 

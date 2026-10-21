@@ -23,7 +23,7 @@ If a command reports missing Python packages, relay the install command it print
 ## Company rules
 - Shift **C001 08:00–17:00**, lunch **12:00–13:00**. Payroll period: the **21st → the 20th** of the next month. Commands default to the current period.
 - CRITICAL: check today's date (a time tool, or the system date) before working with dates.
-- **Late** = an hourly paid leave from 08:00 to the check-in minute (check-in 08:51:03 → leave 08:00–08:51). The timesheet then starts one minute later (08:52).
+- **Late** = an hourly paid leave from 08:00 to the check-in minute (check-in 08:51:03 → leave 08:00–08:51). The timesheet then starts at that same minute (08:51).
 - **Overtime** = 17:00 to the check-out rounded **down** to 5 minutes (check-out 19:36 → OT 17:00–19:35).
 - Order matters: **applications first, then timesheets** — the timesheet window (time_in/time_out) is derived from the filed applications.
 
@@ -93,7 +93,7 @@ Only when the user asks. Submitted applications usually cannot be deleted; the s
 ## Step C — Timesheets
 ### Default content
 - **Morning warm-up** (5 min): `"Tập thể dục, báo cáo buổi sáng"`, project=**K202201**, work_item_id=**122**. **TUESDAY: 25 min** with `"Tập thể dục, báo cáo buổi sáng, Trực nhật vệ sinh"`.
-- The warm-up starts at `time_in` (08:00, or the late start such as 08:52) and keeps its duration.
+- The warm-up starts at `time_in` (08:00, or the late start such as 08:51) and keeps its duration.
 - Main tasks: project=**F131**, `work_item_id` by the work described: 125 Requirement analysis | 126 Database design | 127 UI Design | 128 Logic Handle | 129 Geological data Input and Check.
 - **K202201** (管理・その他): 122=その他, 121=会議参加, 120=面談, 119=活動管理, 118=法務業務, 117=総務業務, 116=経理業務.
 
@@ -113,8 +113,8 @@ Returns `timesheets` (date, status, `id`, `no`) and `weekdays_without_timesheet`
 Each entry: `from`, `to`, `project_id`, `work_item_id`, `work_content`. Entries must **tile the window** `recommended_time_in` → `recommended_time_out` exactly: no overlaps, no gaps except 12:00–13:00. Late until 08:51, OT to 18:00:
 ```json
 [
-  {"from": "08:52", "to": "08:57", "project_id": "K202201", "work_item_id": 122, "work_content": "Tập thể dục, báo cáo buổi sáng"},
-  {"from": "08:57", "to": "12:00", "project_id": "F131", "work_item_id": 128, "work_content": "Task A"},
+  {"from": "08:51", "to": "08:56", "project_id": "K202201", "work_item_id": 122, "work_content": "Tập thể dục, báo cáo buổi sáng"},
+  {"from": "08:56", "to": "12:00", "project_id": "F131", "work_item_id": 128, "work_content": "Task A"},
   {"from": "13:00", "to": "18:00", "project_id": "F131", "work_item_id": 128, "work_content": "Task B"}
 ]
 ```

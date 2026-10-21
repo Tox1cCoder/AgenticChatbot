@@ -72,10 +72,6 @@ REASON_ID_ALL_DAY_LEAVE = 1
 REASON_ID_HOUR_LEAVE = 5
 REASON_ID_OVERTIME = 6
 
-# Observed convention: paid leave until 08:48 is filed with time_in 08:49 — work
-# resumes the minute after the leave window closes.
-LATE_RESUME_OFFSET_MINUTES = 1
-
 # /my-workingtimes ignores ?from=&to= and serves a payroll period (21st -> 20th)
 # chosen by ?month=. These are the only two values its month selector offers.
 AVAILABLE_PERIODS = ("this_month", "last_month")
@@ -380,9 +376,8 @@ def summarize_day(date: str, period: dict | None, applications: list) -> dict:
         )
         ot_to = None
 
-    recommended_time_in = DEFAULT_TIME_IN
-    if late_until:
-        recommended_time_in = from_minutes(to_minutes(late_until) + LATE_RESUME_OFFSET_MINUTES)
+    # Work resumes at the minute the paid leave ends: leave 08:00-08:02, time_in 08:02.
+    recommended_time_in = late_until or DEFAULT_TIME_IN
 
     recommended_time_out = DEFAULT_TIME_OUT
     if early_from and ot_to:
