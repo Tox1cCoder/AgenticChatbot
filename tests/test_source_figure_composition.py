@@ -154,6 +154,58 @@ def test_singleton_figure_keeps_its_own_metadata_through_selection():
     assert selected["payload"]["caption"] == "One view."
 
 
+def test_a_revised_figure_over_the_same_images_keeps_every_cell():
+    """Review finding: an earlier unplaced figure claimed the media of its revision."""
+    cells = [_cell(1), _cell(2)]
+    first = build_source_figure(cells, caption="v1", caption_evidence=(), turn_key="t")
+    revised = build_source_figure(cells, caption="v2", caption_evidence=(), turn_key="t")
+
+    selected = select_rich_item_candidates([first, revised], policy=_POLICY)
+
+    assert [item["id"] for item in selected] == [first["id"], revised["id"]]
+    assert all(len(item["payload"]["items"]) == 2 for item in selected)
+    assert all(item["payload"]["caption"] for item in selected)
+
+
+def test_overlapping_figures_keep_their_own_cells_and_captions():
+    shared, other_a, other_b = _cell(1), _cell(2), _cell(3)
+    a = build_source_figure([shared, other_a], caption="a", caption_evidence=(), turn_key="t")
+    b = build_source_figure([shared, other_b], caption="b", caption_evidence=(), turn_key="t")
+
+    selected = select_rich_item_candidates([a, b], policy=_POLICY)
+
+    by_id = {item["id"]: item for item in selected}
+    assert by_id[b["id"]]["type"] == "image_group"
+    assert len(by_id[b["id"]]["payload"]["items"]) == 2
+    assert "comparison_unavailable" not in by_id[b["id"]]["payload"]
+
+
+def test_figures_do_not_count_against_the_image_cap():
+    policy = ImageSelectionPolicy(
+        max_items=1, min_width_px=1, min_height_px=1, min_aspect_ratio=0.1, max_aspect_ratio=10
+    )
+    figures = [_figure(caption=f"figure {n}") for n in range(3)]
+
+    selected = select_rich_item_candidates(figures, policy=policy)
+
+    assert len(selected) == 3
+
+
+def test_legacy_projection_turns_a_one_cell_remnant_into_an_image():
+    """Review finding: a pre-figure client was sent an invalid one-cell group."""
+    from app.core.source_figures import legacy_source_figure
+
+    figure = _public(_figure())
+    remnant = degrade_source_figure(figure, [figure["payload"]["items"][0]])
+
+    legacy = legacy_source_figure(remnant)
+
+    assert legacy["type"] == "image"
+    assert "label" not in legacy["payload"]
+    assert "comparison_unavailable" not in legacy["payload"]
+    validate_public_rich_item(legacy)
+
+
 def test_selected_group_survives_a_competing_singleton_for_the_same_media():
     figure = _figure()
     singleton = {
@@ -255,17 +307,19 @@ def test_fork_drops_an_unavailable_cell_and_the_comparison_caption():
     assert kept["payload"]["comparison_unavailable"] is True
 
 
-def test_selection_that_leaves_one_cell_keeps_its_label_and_marks_the_loss():
-    figure = _figure()
-    figure["payload"]["items"][0]["url"] = "/not-a-protected-route/x"
+def test_one_cell_remnant_as_an_image_keeps_its_label_and_marks_the_loss():
+    from app.core.source_figures import figure_group_as_image
 
-    [selected] = select_rich_item_candidates([figure], policy=_POLICY)
+    figure = _public(_figure())
+    remnant = degrade_source_figure(figure, [figure["payload"]["items"][1]])
 
-    assert selected["type"] == "image"
-    assert selected["payload"]["label"] == "Setting 2"
-    assert selected["payload"]["comparison_unavailable"] is True
-    assert "caption" not in selected["payload"]
-    validate_public_rich_item(_public(selected))
+    image = figure_group_as_image(remnant)
+
+    assert image["type"] == "image"
+    assert image["payload"]["label"] == "Setting 2"
+    assert image["payload"]["comparison_unavailable"] is True
+    assert "caption" not in image["payload"]
+    validate_public_rich_item(image)
 
 
 # ---------------------------------------------------------------------------

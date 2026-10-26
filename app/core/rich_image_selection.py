@@ -14,12 +14,7 @@ from .rich_response import (
     ALLOWED_URL_SCHEMES,
     PROTECTED_IMAGE_URL_PREFIXES,
 )
-from .source_figures import (
-    SOURCE_FIGURE_SOURCE,
-    degrade_source_figure,
-    figure_group_as_image,
-    is_source_figure,
-)
+from .source_figures import is_source_figure
 
 _IMAGE_TYPES = frozenset({"image", "image_group"})
 _DIRECT_SOURCES = frozenset({"rag_document", "tool_image", "generated_image"})
@@ -110,10 +105,6 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _intent_rank(candidate: Mapping[str, Any]) -> int | None:
     source = str(candidate.get("source") or "")
-    if source == SOURCE_FIGURE_SOURCE:
-        # Composed from inspected images on purpose; it claims its media before
-        # any standalone candidate for the same reference can.
-        return -1
     if source in _DIRECT_SOURCES:
         return 0
     if source == "image_search":
@@ -326,11 +317,6 @@ def _normalize_candidate(
     if not surviving_items:
         return None
     seen_locators.update(claimed_locators)
-    if is_source_figure(candidate):
-        degraded = degrade_source_figure(candidate, surviving_items)
-        if degraded is not None and len(surviving_items) == 1:
-            degraded = figure_group_as_image(degraded)
-        return degraded
     if len(surviving_items) == 1:
         candidate["type"] = "image"
         candidate["payload"] = surviving_items[0]
@@ -372,10 +358,21 @@ def select_rich_item_candidates(
     """Return a stable, capped candidate sequence without mutating input."""
 
     copied = [deepcopy(dict(candidate)) for candidate in candidates]
-    non_images = [candidate for candidate in copied if not is_image_candidate(candidate)]
+    # A composed figure is built from media already validated, shown to the
+    # model, and pinned. Ranking it against other candidates before anyone
+    # knows which figure the answer places let an earlier draft claim a
+    # revision's media, so figures pass through; finalization admits only the
+    # placed ones.
+    passthrough = [
+        candidate
+        for candidate in copied
+        if not is_image_candidate(candidate) or is_source_figure(candidate)
+    ]
     indexed_images = [
         (index, candidate)
         for index, candidate in enumerate(copied)
-        if is_image_candidate(candidate) and _intent_rank(candidate) is not None
+        if is_image_candidate(candidate)
+        and not is_source_figure(candidate)
+        and _intent_rank(candidate) is not None
     ]
-    return [*non_images, *_select_ranked_images(indexed_images, policy)]
+    return [*passthrough, *_select_ranked_images(indexed_images, policy)]

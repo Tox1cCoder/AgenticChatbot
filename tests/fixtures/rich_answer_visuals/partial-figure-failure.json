@@ -29,25 +29,21 @@
       "content": "Compare the shadows:\n\n**Figure**\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n\n_The comparison is unavailable because one of its images could not be kept._\n\n<!--rich:figure:242d1a004a09969dee7f9860-->",
       "rich_items": [
         {
-          "alt_text": "Comparison unavailable: Shadows: High",
+          "alt_text": "Car with a soft contact shadow under the chassis",
           "display_policy": "inline_only",
           "id": "figure:242d1a004a09969dee7f9860",
           "payload": {
-            "items": [
-              {
-                "height": 720,
-                "mime_type": "image/jpeg",
-                "source_url": "https://screens1.example/graphics",
-                "url": "/web-images/00000000-0000-4000-8000-000000000001",
-                "width": 1280
-              }
-            ]
+            "height": 720,
+            "mime_type": "image/jpeg",
+            "source_url": "https://screens1.example/graphics",
+            "url": "/web-images/00000000-0000-4000-8000-000000000001",
+            "width": 1280
           },
           "provenance": {
             "provider": "source_figure"
           },
           "source": "source_figure",
-          "type": "image_group"
+          "type": "image"
         }
       ]
     },
@@ -119,25 +115,21 @@
       "content": "Compare the shadows:\n\n**Figure**\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n\n_The comparison is unavailable because one of its images could not be kept._\n\n<!--rich:figure:242d1a004a09969dee7f9860-->",
       "rich_items": [
         {
-          "alt_text": "Comparison unavailable: Shadows: High",
+          "alt_text": "Car with a soft contact shadow under the chassis",
           "display_policy": "inline_only",
           "id": "figure:242d1a004a09969dee7f9860",
           "payload": {
-            "items": [
-              {
-                "height": 720,
-                "mime_type": "image/jpeg",
-                "source_url": "https://screens1.example/graphics",
-                "url": "/web-images/00000000-0000-4000-8000-000000000001",
-                "width": 1280
-              }
-            ]
+            "height": 720,
+            "mime_type": "image/jpeg",
+            "source_url": "https://screens1.example/graphics",
+            "url": "/web-images/00000000-0000-4000-8000-000000000001",
+            "width": 1280
           },
           "provenance": {
             "provider": "source_figure"
           },
           "source": "source_figure",
-          "type": "image_group"
+          "type": "image"
         }
       ]
     }

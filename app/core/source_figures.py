@@ -251,7 +251,14 @@ def figure_group_as_image(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def legacy_source_figure(item: dict[str, Any]) -> dict[str, Any]:
-    """The figure as a pre-figure client reads it: exact legacy payload fields."""
+    """The figure as a pre-figure client reads it: exact legacy payload fields.
+
+    A group of one is only valid as a declared comparison remnant, which an
+    older client cannot read, so it becomes an ordinary image.
+    """
+    cells = (item.get("payload") or {}).get("items")
+    if item.get("type") == "image_group" and isinstance(cells, list) and len(cells) < 2:
+        item = figure_group_as_image(item)
     legacy = copy.deepcopy(item)
     payload = legacy.get("payload") or {}
     if legacy.get("type") == "image_group":

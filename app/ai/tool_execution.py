@@ -285,6 +285,18 @@ def build_live_widget_candidate_from_tool_result(
 _DESCRIPTOR_TOOLS = frozenset({CREATE_ANSWER_VISUAL_TOOL_NAME, COMPOSE_SOURCE_FIGURE_TOOL_NAME})
 
 
+def is_server_descriptor_tool(tool: Any) -> bool:
+    """Whether ``tool`` is this server's own descriptor tool, not a namesake.
+
+    Trust follows the internal identity the server stamped on its tool. A
+    third-party tool that merely shares the name never gets its output
+    promoted to a public rich item.
+    """
+    metadata = getattr(tool, "metadata", None) or {}
+    qualified = metadata.get("qualified_tool_id") if isinstance(metadata, dict) else None
+    return any(qualified == f"internal::{name}" for name in _DESCRIPTOR_TOOLS)
+
+
 def build_dedicated_rich_candidate(
     result: Any,
     *,
@@ -2028,6 +2040,7 @@ class _ToolCallResults:
         tool_args: Any,
         execution_detail: dict[str, Any],
         capture_images: bool,
+        descriptor_tool: bool = False,
     ) -> None:
         public_result = (
             sanitize_public_image_fields(make_json_safe(result))
@@ -2035,7 +2048,7 @@ class _ToolCallResults:
             else result
         )
         descriptor = None
-        if canonical_tool_name in _DESCRIPTOR_TOOLS:
+        if descriptor_tool:
             # The descriptor belongs to the artifact, not to the model's context.
             public_result, descriptor = split_rich_item_result(public_result)
             result = public_result
@@ -2220,6 +2233,7 @@ async def execute_tool_calls(
             results.append_result(
                 result,
                 canonical_tool_name=canonical_tool_name,
+                descriptor_tool=is_server_descriptor_tool(tool),
                 tool_call_id=tool_id,
                 tool_name=tool_name,
                 tool_args=tool_args,

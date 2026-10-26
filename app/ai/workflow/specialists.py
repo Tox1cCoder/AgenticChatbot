@@ -77,6 +77,7 @@ from app.core.rich_response import (
     is_admitted_candidate,
     merge_rich_item_candidates,
     parse_inline_rich_references,
+    validate_public_rich_item,
 )
 from app.observability.routing import get_routing_metrics_recorder
 
@@ -457,7 +458,10 @@ class SpecialistFactory:
             if build.web_research_session is not None:
                 parser = GroundingParser(build.web_research_session)
                 grounding = parser.resolve(_final_text(produced))
-                if build.web_research_session.answer_sources and not grounding.source_ids:
+                cites_a_source = bool(grounding.source_ids) or bool(
+                    placed_descriptor_citations(build.tool_execution.artifacts, grounding.text)
+                )
+                if build.web_research_session.answer_sources and not cites_a_source:
                     correction = HumanMessage(
                         content=(
                             "Your previous draft cannot be published because it did not cite an "
@@ -884,13 +888,13 @@ class SpecialistFactory:
         web_sources: tuple[dict[str, Any], ...] = ()
         rich_items: tuple[dict[str, Any], ...] = ()
         final_text = _final_text(produced)
-        admitted_items = _admitted_rich_items(
+        admitted_items, descriptor_source_ids = _admitted_rich_items(
             grounding.rich_items if grounding is not None else (), artifacts, final_text
         )
         if web_research_session is not None:
             cited = [
                 *(grounding.source_ids if grounding is not None else ()),
-                *_visual_source_ids(admitted_items),
+                *descriptor_source_ids,
             ]
             web_sources = tuple(
                 source.model_dump(mode="json")
@@ -1224,38 +1228,59 @@ def with_answer_authoring_tools(tools: list[Any], definition: Any, request: Any)
     return [*tools, *added] if added else tools
 
 
-def _admitted_rich_items(
-    grounded: tuple[dict[str, Any], ...],
-    artifacts: list[dict[str, Any]],
-    final_text: str,
-) -> tuple[dict[str, Any], ...]:
-    """Grounded items plus the tool descriptors this answer admits.
-
-    Recorded on provenance so a continuation can find the descriptors without
-    recovering them from prose.
-    """
-    tool_candidates = [
+def _artifact_candidates(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
         candidate
         for artifact in artifacts
         if isinstance(artifact, dict)
         for candidate in artifact.get("_rich_item_candidates") or ()
         if isinstance(candidate, dict)
     ]
-    merged, _conflicts = merge_rich_item_candidates(grounded, tool_candidates)
-    referenced = set(parse_inline_rich_references(final_text))
-    return tuple(item for item in merged if is_admitted_candidate(item, referenced))
 
 
-def _visual_source_ids(items: tuple[dict[str, Any], ...]) -> list[str]:
-    """Turn-local source IDs cited inside admitted visuals.
+def _admitted_rich_items(
+    grounded: tuple[dict[str, Any], ...],
+    artifacts: list[dict[str, Any]],
+    final_text: str,
+) -> tuple[tuple[dict[str, Any], ...], list[str]]:
+    """Grounded items plus the tool descriptors this answer admits.
 
-    A source a reader can only reach through a visual's citation is still a
-    source the answer rests on, so it is published like one cited in prose.
+    Returns the public form of each admitted item -- recorded on provenance so
+    a continuation can find it without recovering it from prose, and
+    persisted as-is by a paused partial, so never the private record -- and
+    the turn-local source ids those descriptors rest on. A source a reader can
+    only reach through a visual or figure is published like one cited in prose.
     """
+    merged, _conflicts = merge_rich_item_candidates(grounded, _artifact_candidates(artifacts))
+    referenced = set(parse_inline_rich_references(final_text))
+    public: list[dict[str, Any]] = []
+    source_ids: list[str] = []
+    for item in merged:
+        if not is_admitted_candidate(item, referenced):
+            continue
+        try:
+            validated = validate_public_rich_item(
+                {key: value for key, value in item.items() if key != "_internal"}
+            )
+        except ValueError:
+            continue
+        public.append(validated.model_dump(mode="json", exclude_none=True))
+        source_ids.extend(str(i) for i in (item.get("_internal") or {}).get("web_source_ids") or ())
+    return tuple(public), source_ids
+
+
+def placed_descriptor_citations(artifacts: list[dict[str, Any]], text: str) -> list[str]:
+    """Source ids cited by visuals or figure captions the answer places.
+
+    A figure's cells name where each image came from; that is attribution,
+    not a citation, so only its caption evidence counts.
+    """
+    referenced = set(parse_inline_rich_references(text))
     return [
         str(source_id)
-        for item in items
-        for source_id in ((item.get("_internal") or {}).get("web_source_ids") or ())
+        for candidate in _artifact_candidates(artifacts)
+        if candidate.get("id") in referenced
+        for source_id in (candidate.get("_internal") or {}).get("cited_source_ids") or ()
     ]
 
 

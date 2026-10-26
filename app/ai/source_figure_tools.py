@@ -154,6 +154,8 @@ def _compose(
                 [*(prepared.record.source_id for prepared in images), *(ref.id for ref in refs)]
             )
         ),
+        # Cell sources are attribution; only caption evidence is a citation.
+        "cited_source_ids": list(dict.fromkeys(ref.id for ref in refs)),
     }
     session.pin_figure(item["id"], candidate_ids)
     return item

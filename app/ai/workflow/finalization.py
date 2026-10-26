@@ -200,15 +200,17 @@ class WebEvidencePolicy:
 
 
 def _visual_citation_urls(items: Any, content: str) -> set[str]:
-    """Source URLs cited inside answer visuals the answer actually places."""
+    """Source URLs cited inside visuals and figure captions the answer places.
+
+    A figure cell's source is attribution for the image, not a citation.
+    """
     referenced = set(parse_inline_rich_references(content))
     return {
         str(source.get("url"))
         for item in items or ()
-        if isinstance(item, dict)
-        and item.get("type") == "answer_visual"
-        and item.get("id") in referenced
-        for source in ((item.get("payload") or {}).get("evidence") or ())
+        if isinstance(item, dict) and item.get("id") in referenced
+        for key in ("evidence", "caption_evidence")
+        for source in ((item.get("payload") or {}).get(key) or ())
         if isinstance(source, dict) and source.get("url")
     }
 

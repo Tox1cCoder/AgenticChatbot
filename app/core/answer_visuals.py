@@ -197,6 +197,13 @@ class PublicEvidence(_Public):
     url: str
     label: str
 
+    @model_validator(mode="after")
+    def _web_url(self) -> PublicEvidence:
+        # A citation target is a public web page; anything else is not one.
+        if urlsplit(self.url).scheme.lower() not in {"http", "https"}:
+            raise ValueError(f"evidence url must be http(s): {self.url!r}")
+        return self
+
 
 class StepItem(_Public):
     title: Label
@@ -387,7 +394,11 @@ def build_answer_visual(
             f"visual is {size} bytes; the limit is {ANSWER_VISUAL_MAX_ITEM_BYTES} bytes. "
             "Shorten labels and notes or split it; never drop facts silently"
         )
-    item["_internal"] = {"web_source_ids": list(binder.source_ids)}
+    # Every source a visual names is one it cites.
+    item["_internal"] = {
+        "web_source_ids": list(binder.source_ids),
+        "cited_source_ids": list(binder.source_ids),
+    }
     return item
 
 
