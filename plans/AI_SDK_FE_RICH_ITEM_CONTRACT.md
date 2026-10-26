@@ -57,6 +57,26 @@ contract. `inline_rich_response_v1` is an accepted alias.
 | AI SDK compatibility projection | no | no | selected images | standard AI SDK parts |
 | Pre-v1 legacy message | no | no | legacy-compatible | legacy projection |
 
+### Per-feature capabilities
+
+Each newer item family has its own flag, sent alongside `inlineRichResponseV1`
+on chat, resume, Continue, and history requests (`?answerVisualsV1=true` on
+history). A flag counts only with the base capability and the server's rollout
+gate; both default off. Flags are independent: supporting one family says
+nothing about another.
+
+| Flag | Item family | Without the flag |
+|---|---|---|
+| `answerVisualsV1` (`answer_visuals_v1`) | `answer_visual` | The visual's `fallback_markdown` replaces its marker, as its own paragraph; the descriptor is omitted from `rich_items`. |
+
+Stored messages are canonical and never change with a client's flags; the
+projection is computed per request. During a live stream a client without
+`answerVisualsV1` never sees a visual marker in `text-delta`; if one was
+withheld, the stream ends with `data-answer-reconcile` carrying the projected
+final text, fallback included. The server only offers the visual tool to a turn
+whose client advertised the flag, so a capable client never waits on a
+fallback.
+
 ### AI SDK rich-capable
 
 A rich-capable v1 response contains finalized image items in terminal
@@ -184,8 +204,78 @@ type RichItem =
   | RichImageGroupItem
   | LiveWidgetItem
   | CanvasArtifactItem
-  | ToolRenderItem;
+  | ToolRenderItem
+  | AnswerVisualItem;
 ```
+
+### type: "answer_visual"
+
+A compact static visual created by the answering model through the
+server-owned `create_answer_visual` tool. Requires `answerVisualsV1`. Ids are
+server-assigned and start with `visual:`.
+
+```ts
+type Citations = number[]; // 1-based indexes into payload.evidence
+
+type AnswerVisualEvidence = { title?: string; url: string; label: string };
+
+type AnswerVisualCommon = {
+  title: string;              // <= 160 chars
+  caption?: string;           // <= 500 chars
+  caption_citations: Citations;
+  evidence: AnswerVisualEvidence[];
+  fallback_markdown: string;  // same content and citations, as Markdown
+};
+
+type AnswerVisualItem = RichItemBase & {
+  type: "answer_visual";
+  display_policy: "inline_only";
+  payload:
+    | (AnswerVisualCommon & {
+        variant: "steps";
+        steps: Array<{ title: string; note?: string; citations: Citations }>; // 1-12
+      })
+    | (AnswerVisualCommon & {
+        variant: "bars";
+        unit: string;
+        basis: "measured" | "calculated" | "illustrative";
+        assumptions?: string;       // present for calculated / illustrative
+        scale: { min: 0; max: number }; // shared linear scale
+        bars: Array<{ label: string; value: number; citations: Citations }>; // 1-12
+      })
+    | (AnswerVisualCommon & {
+        variant: "comparison_table";
+        columns: string[];          // 1-6 cell columns; the row label is extra
+        rows: Array<{
+          label: string;
+          cells: Array<{ text: string; citations: Citations }>;
+          assessment?: {
+            status: "positive" | "neutral" | "caution" | "negative";
+            label: string;
+            reason: string;
+            citations: Citations;
+          };
+        }>; // 1-12
+      });
+};
+```
+
+Rendering rules:
+
+- `steps`: number the sequence. Never draw a check or success state; a step is
+  an instruction, not something the app did.
+- `bars`: width = `value / scale.max` on one shared axis starting at zero. Show
+  the unit and numeric value on every bar. Show `basis` visibly; for
+  `calculated` and `illustrative`, show `assumptions` next to the chart so a
+  synthetic example cannot read as a benchmark.
+- `comparison_table`: badge color comes from your theme token for `status`, and
+  the badge always shows `label` as text beside `reason`. Wide tables scroll
+  horizontally.
+- Citations link to `evidence[n - 1].url` with `label` as the visible text.
+- Copy/export of a message expands each placed visual to its
+  `fallback_markdown`, even on a capable client, so copied text keeps values
+  and citations.
+- An answer places at most six visuals.
 
 Unknown future item types degrade to a neutral unavailable/unsupported block;
 never render unknown payloads as trusted HTML.
@@ -212,8 +302,10 @@ Transient `data-rich-items` events contain safe non-image upserts only:
 }
 ```
 
-Images never arrive through this transient candidate channel. Final image items
-arrive only after backend selection/externalization.
+Images never arrive through this transient candidate channel, and neither does
+any other `inline_only` item such as `answer_visual`: those become public only
+when the final answer places them. Final image items arrive only after backend
+selection/externalization; a placed visual arrives with the terminal registry.
 
 ## 6. Streaming and history parity
 

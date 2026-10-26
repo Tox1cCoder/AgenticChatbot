@@ -29,6 +29,7 @@ from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.services.event_streaming.ai_sdk_projection import (
     attach_image_parts_to_message,
+    effective_answer_visuals,
     ensure_leading_text_part,
     is_v1_rich_items_message,
     project_ai_sdk_message_for_capability,
@@ -72,6 +73,15 @@ class AISDKChatRequest(BaseModel):
         description=(
             "Stream web answer drafts as text-delta parts. The client must handle "
             "data-answer-reconcile to replace the draft with the persisted final text."
+        ),
+    )
+    answer_visuals_v1: bool = Field(
+        default=False,
+        alias="answerVisualsV1",
+        description=(
+            "Render `answer_visual` rich items (steps, bars, comparison tables). Requires "
+            "inlineRichResponseV1. Without it the answer carries each visual's Markdown "
+            "fallback at the marker position."
         ),
     )
 
@@ -445,6 +455,8 @@ def get_conversation_messages_ai_sdk(
     pagination: MessagePaginationParams,
     inline_rich_response_v1: Annotated[bool, Query(alias="inlineRichResponseV1")] = False,
     inline_rich_response_v1_snake: Annotated[bool, Query(alias="inline_rich_response_v1")] = False,
+    answer_visuals_v1: Annotated[bool, Query(alias="answerVisualsV1")] = False,
+    answer_visuals_v1_snake: Annotated[bool, Query(alias="answer_visuals_v1")] = False,
 ) -> ApiResponse[AISDKMessagesData]:
     """Get conversation messages in Vercel AI SDK UIMessage format."""
     paginated_result = message_service.get_conversation_messages(
@@ -459,6 +471,9 @@ def get_conversation_messages_ai_sdk(
     rich_response_capable = bool(
         (inline_rich_response_v1 or inline_rich_response_v1_snake)
         and getattr(settings, "inline_rich_response_enabled", False)
+    )
+    visuals_capable = effective_answer_visuals(
+        base=rich_response_capable, requested=answer_visuals_v1 or answer_visuals_v1_snake
     )
 
     messages: list[AISDKUIMessage] = []
@@ -487,6 +502,7 @@ def get_conversation_messages_ai_sdk(
             message_payload = project_ai_sdk_message_for_capability(
                 message_payload,
                 inline_rich_response_v1=rich_response_capable,
+                answer_visuals_v1=visuals_capable,
             )
             message_payload = attach_image_parts_to_message(
                 message_payload,
@@ -583,6 +599,9 @@ async def chat_ui_message_stream(
         or extra.get("inline_rich_response_v1")
         or extra.get("inlineRichResponseV1")
     )
+    answer_visuals_v1 = effective_answer_visuals(
+        base=inline_rich_response_v1, requested=payload.answer_visuals_v1
+    )
     state = StreamState(
         message_id=str(bot_message_id),
         text_id=str(uuid4()),
@@ -591,6 +610,7 @@ async def chat_ui_message_stream(
             inline_rich_response_v1 and getattr(settings, "inline_rich_response_enabled", False)
         ),
         stream_web_answer_v1=bool(payload.stream_web_answer_v1),
+        answer_visuals_v1=answer_visuals_v1,
         operation="chat",
     )
 
@@ -602,6 +622,7 @@ async def chat_ui_message_stream(
             attachments=user_attachments or None,
             device_id=extra.get("device_id") or extra.get("deviceId"),
             inline_rich_response_v1=inline_rich_response_v1,
+            answer_visuals_v1=answer_visuals_v1,
         )
         return message_service.create_message_stream(
             message_create, current_user_id, bot_message_id=bot_message_id
@@ -644,6 +665,9 @@ async def resume_interrupt_ai_sdk(
             inline_rich_response_v1 and getattr(settings, "inline_rich_response_enabled", False)
         ),
         stream_web_answer_v1=resume_request.stream_web_answer_v1,
+        answer_visuals_v1=effective_answer_visuals(
+            base=inline_rich_response_v1, requested=resume_request.answer_visuals_v1
+        ),
         operation="resume",
     )
 
@@ -744,6 +768,9 @@ async def continue_generation_ai_sdk(
             inline_rich_response_v1 and getattr(settings, "inline_rich_response_enabled", False)
         ),
         stream_web_answer_v1=continue_request.stream_web_answer_v1,
+        answer_visuals_v1=effective_answer_visuals(
+            base=inline_rich_response_v1, requested=continue_request.answer_visuals_v1
+        ),
         operation="continue",
     )
 

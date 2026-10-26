@@ -110,6 +110,13 @@ class WorkflowExecutionRequest(BaseModel):
             "surface marker syntax / rich-item inventory to agents."
         ),
     )
+    answer_visuals_v1: bool = Field(
+        default=False,
+        description=(
+            "Effective answer-visual capability from the API boundary: when true, "
+            "public chat/search answers may author static visuals."
+        ),
+    )
     hitl_policy: dict[str, Any] | None = Field(
         default=None,
         description=(

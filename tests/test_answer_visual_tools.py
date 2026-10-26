@@ -301,13 +301,14 @@ def _bound(
     model_config_key: str = "chat",
     *,
     capable: bool = True,
+    visuals: bool = True,
     worker: bool = False,
 ) -> list[str]:
     from app.ai.workflow.specialists import with_answer_authoring_tools
 
     definition = SimpleNamespace(model_config_key=model_config_key)
     request = SimpleNamespace(
-        state={"context": {"inline_rich_response_v1": capable}},
+        state={"context": {"inline_rich_response_v1": capable, "answer_visuals_v1": visuals}},
         extras={"worker": True} if worker else {},
     )
     tools = with_answer_authoring_tools([SimpleNamespace(name="web_search")], definition, request)
@@ -352,12 +353,23 @@ def test_non_rich_request_does_not_bind_the_tool(monkeypatch):
     assert CREATE_ANSWER_VISUAL_TOOL_NAME not in _bound(capable=False)
 
 
+def test_client_without_visual_capability_does_not_bind_the_tool(monkeypatch):
+    """A live stream cannot substitute a fallback it has never seen, so a
+    visual is only authored for a client that will render it."""
+    _gate(monkeypatch)
+
+    assert CREATE_ANSWER_VISUAL_TOOL_NAME not in _bound(visuals=False)
+
+
 def test_binding_does_not_duplicate_an_existing_tool(monkeypatch):
     from app.ai.workflow.specialists import with_answer_authoring_tools
 
     _gate(monkeypatch)
     existing = [SimpleNamespace(name=CREATE_ANSWER_VISUAL_TOOL_NAME)]
-    request = SimpleNamespace(state={"context": {"inline_rich_response_v1": True}}, extras={})
+    request = SimpleNamespace(
+        state={"context": {"inline_rich_response_v1": True, "answer_visuals_v1": True}},
+        extras={},
+    )
 
     tools = with_answer_authoring_tools(
         existing, SimpleNamespace(model_config_key="chat"), request

@@ -460,6 +460,51 @@ async def test_web_repair_fixture_keeps_the_draft_for_a_vanilla_sdk_consumer(mon
     assert [p["data"]["content"] for p in reconcile] == ["Final cited answer"]
 
 
+_VISUAL_FALLBACK = "**Reset**\n\n1. Unplug it\n2. Wait"
+
+
+async def _withheld_visual_source():
+    yield make_event("message_delta", sequence=1, data={"text": "Do this.\n\n<!--rich:vis"})
+    yield make_event("message_delta", sequence=2, data={"text": "ual:v1-->\n\nDone."})
+    message = {
+        "id": "m-1",
+        "content": "Do this.\n\n<!--rich:visual:v1-->\n\nDone.",
+        "metadata": {
+            "rich_items_version": 1,
+            "rich_items": [
+                {
+                    "id": "visual:v1",
+                    "type": "answer_visual",
+                    "display_policy": "inline_only",
+                    "payload": {"fallback_markdown": _VISUAL_FALLBACK},
+                }
+            ],
+        },
+    }
+    yield make_event("complete", sequence=3, data={"message": message})
+
+
+@pytest.mark.asyncio
+async def test_withheld_visual_marker_fixture_reconciles_to_the_fallback(monkeypatch):
+    """A client without answer visuals never parses a visual marker as text."""
+    direct = await direct_wire(
+        _withheld_visual_source, state=_state(inline_rich_response_v1=True)
+    )
+    proxied = await proxy_wire(direct, monkeypatch)
+    requires = ["data-answer-reconcile"]
+    sdk_text = "Do this.\n\n\n\nDone."
+    record_fixture("visual-withheld-direct", direct, requires=requires, sdk_text=sdk_text)
+    record_fixture("visual-withheld-proxied", proxied, requires=requires, sdk_text=sdk_text)
+
+    assert_standard_frames_are_strict(direct)
+    assert payloads(proxied) == payloads(direct)
+    assert "<!--rich:" not in "".join(
+        p["delta"] for p in payloads(direct) if p["type"] == "text-delta"
+    )
+    [reconcile] = [p for p in payloads(direct) if p["type"] == "data-answer-reconcile"]
+    assert reconcile["data"]["content"] == f"Do this.\n\n{_VISUAL_FALLBACK}\n\nDone."
+
+
 @pytest.mark.asyncio
 async def test_web_failure_fixture_discards_the_draft_before_the_error():
     async def source():

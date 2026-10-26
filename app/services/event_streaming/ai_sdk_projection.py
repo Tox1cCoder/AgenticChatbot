@@ -25,8 +25,13 @@ import base64
 import json
 from typing import Any
 
+from app.core.answer_visuals import ANSWER_VISUAL_ID_PREFIX, ANSWER_VISUAL_TYPE
+from app.core.config import settings
 from app.core.rich_response import (
     PROTECTED_IMAGE_URL_PREFIXES,
+    expand_inline_rich_references,
+    parse_inline_rich_references,
+    remove_inline_rich_reference,
     sanitize_public_rich_metadata,
     strip_inline_rich_markers,
 )
@@ -256,37 +261,149 @@ def selected_image_file_parts_from_rich_items(
     return file_parts
 
 
+def effective_answer_visuals(*, base: bool, requested: bool) -> bool:
+    """Whether a client may receive answer visuals as rich items.
+
+    The feature rides on the base rich contract and its own rollout gate; a
+    client that asks without either gets the Markdown fallback.
+    """
+    return bool(
+        requested
+        and base
+        and getattr(settings, "inline_rich_response_enabled", False)
+        and getattr(settings, "answer_visuals_enabled", False)
+    )
+
+
+def _answer_visual_fallbacks(metadata: dict[str, Any] | None) -> dict[str, str]:
+    """Fallback Markdown for each persisted answer visual, keyed by id."""
+    rich_items = metadata.get("rich_items") if isinstance(metadata, dict) else None
+    fallbacks: dict[str, str] = {}
+    for item in rich_items if isinstance(rich_items, list) else ():
+        if not isinstance(item, dict) or item.get("type") != ANSWER_VISUAL_TYPE:
+            continue
+        fallback = (item.get("payload") or {}).get("fallback_markdown")
+        if isinstance(item.get("id"), str) and isinstance(fallback, str) and fallback:
+            fallbacks[item["id"]] = fallback
+    return fallbacks
+
+
+def _expand_answer_visuals(content: str, fallbacks: dict[str, str]) -> str:
+    """Put each visual's fallback at its marker; drop visual markers with none."""
+    expanded = expand_inline_rich_references(content, fallbacks)
+    for item_id in parse_inline_rich_references(expanded):
+        if item_id.startswith(ANSWER_VISUAL_ID_PREFIX) and item_id not in fallbacks:
+            expanded = remove_inline_rich_reference(expanded, item_id)
+    return expanded
+
+
 def project_ai_sdk_message_for_capability(
     message: dict[str, Any],
     *,
     inline_rich_response_v1: bool,
+    answer_visuals_v1: bool = False,
 ) -> dict[str, Any]:
     """Project a persisted assistant message for an AI SDK consumer.
 
-    When ``inline_rich_response_v1`` is True, the message passes through
-    unchanged (markers preserved, ``rich_items`` available). When False, the
-    standalone HTML-comment marker lines are stripped from ``content`` so
-    non-capable clients do not render them verbatim, and ``rich_items`` /
+    Each rich feature the client did not advertise is projected on its own.
+    Answer visuals become their derived Markdown at the marker position and
+    leave ``rich_items``. Without ``inline_rich_response_v1`` every remaining
+    marker is stripped from ``content`` and ``rich_items`` /
     ``rich_items_version`` keys are removed from any metadata field present.
+    A fully capable client receives the message unchanged; the input is never
+    mutated, so the stored message stays canonical.
     """
     if not isinstance(message, dict):
         return message
-    if inline_rich_response_v1:
+    visuals_supported = inline_rich_response_v1 and answer_visuals_v1
+    if inline_rich_response_v1 and visuals_supported:
         return message
     projected = dict(message)
     content = projected.get("content")
+    fallbacks = _answer_visual_fallbacks(find_message_metadata(message))
     if isinstance(content, str) and "<!--rich:" in content:
-        projected["content"] = strip_inline_rich_markers(content)
+        content = _expand_answer_visuals(content, fallbacks)
+        if not inline_rich_response_v1:
+            content = strip_inline_rich_markers(content)
+        projected["content"] = content
     for meta_key in _METADATA_KEYS:
         meta = projected.get(meta_key)
-        if isinstance(meta, dict):
-            scrubbed = {
+        if not isinstance(meta, dict):
+            continue
+        if not inline_rich_response_v1:
+            projected[meta_key] = {
                 k: v
                 for k, v in meta.items()
                 if k not in {"rich_items", "rich_items_version", "rich_reference_warnings"}
             }
-            projected[meta_key] = scrubbed
+        elif isinstance(meta.get("rich_items"), list):
+            projected[meta_key] = {
+                **meta,
+                "rich_items": [
+                    item
+                    for item in meta["rich_items"]
+                    if not (isinstance(item, dict) and item.get("type") == ANSWER_VISUAL_TYPE)
+                ],
+            }
     return projected
+
+
+class VisualMarkerStreamFilter:
+    """Withholds answer-visual markers from text sent to a client without them.
+
+    Only text that is, or could still become, ``<!--rich:visual:...-->`` is
+    held; every other byte passes straight through. ``withheld`` records that
+    the stream lost a marker, so the terminal answer must replace the draft.
+    """
+
+    _OPEN = "<!--rich:" + ANSWER_VISUAL_ID_PREFIX
+    _CLOSE = "-->"
+    _MAX_HELD = len(_OPEN) + 128 + len(_CLOSE)
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self.withheld = False
+
+    def feed(self, text: str) -> str:
+        self._pending += str(text or "")
+        out: list[str] = []
+        while self._pending:
+            index = self._candidate(self._pending)
+            if index == -1:
+                out.append(self._pending)
+                self._pending = ""
+                break
+            out.append(self._pending[:index])
+            rest = self._pending[index:]
+            if not rest.startswith(self._OPEN):
+                self._pending = rest  # a partial open: wait for more
+                break
+            close = rest.find(self._CLOSE, len(self._OPEN))
+            if close == -1:
+                if len(rest) > self._MAX_HELD:
+                    out.append(rest)
+                    self._pending = ""
+                else:
+                    self._pending = rest
+                break
+            self.withheld = True
+            self._pending = rest[close + len(self._CLOSE) :]
+        return "".join(out)
+
+    def flush(self) -> str:
+        remainder, self._pending = self._pending, ""
+        return remainder
+
+    def _candidate(self, text: str) -> int:
+        start = 0
+        while True:
+            index = text.find("<", start)
+            if index == -1:
+                return -1
+            rest = text[index:]
+            if rest.startswith(self._OPEN) or self._OPEN.startswith(rest):
+                return index
+            start = index + 1
 
 
 def visible_image_file_parts(

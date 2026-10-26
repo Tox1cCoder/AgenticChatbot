@@ -828,6 +828,56 @@ def replace_inline_rich_references(
     return "\n".join(output), found
 
 
+def expand_inline_rich_references(markdown: str, blocks: dict[str, str]) -> str:
+    """Replace each marker naming a key of ``blocks`` with that Markdown block.
+
+    The first marker for an id becomes its block, set apart as its own
+    paragraph; later markers for the same id are removed, so a fallback is
+    shown once. Code fences, indented code, and inline code are preserved.
+    Block text is inserted verbatim and never re-scanned for markers.
+    """
+    if not markdown or not blocks or "<!--rich:" not in markdown:
+        return markdown
+    normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    in_fence = _strip_fenced_code_blocks(lines)
+    expanded: set[str] = set()
+    changed = False
+    output: list[str] = []
+    for line, inside in zip(lines, in_fence, strict=False):
+        if inside or _is_indented_code(line):
+            output.append(line)
+            continue
+        matches = [
+            match
+            for match in _iter_inline_rich_marker_matches(line)
+            if match.group(1) in blocks
+        ]
+        if not matches:
+            output.append(line)
+            continue
+        changed = True
+        pieces: list[str] = []
+        text = ""
+        cursor = 0
+        for match in matches:
+            text += line[cursor : match.start()]
+            cursor = match.end()
+            item_id = match.group(1)
+            if item_id in expanded:
+                continue
+            expanded.add(item_id)
+            if text.strip():
+                pieces.append(text.strip())
+            text = ""
+            pieces.append(blocks[item_id])
+        text += line[cursor:]
+        if text.strip():
+            pieces.append(text.strip())
+        output.append("\n\n".join(pieces))
+    return "\n".join(output) if changed else markdown
+
+
 # ---------------------------------------------------------------------------
 # Validation warnings
 # ---------------------------------------------------------------------------
@@ -960,6 +1010,9 @@ def select_transient_upsert_items(
             # Canvas source is the asset; do not stream until terminal
             # finalization confirms the boundary review.
             continue
+        if _get_display_policy(item) == RichDisplayPolicy.inline_only.value:
+            # Public only once the answer places it, which finalization decides.
+            continue
         if _payload_has_inline_binary(item):
             continue
         try:
@@ -979,6 +1032,15 @@ def _get_type(item: Any) -> str | None:
     if isinstance(raw, str):
         return raw
     return None
+
+
+def _get_display_policy(item: Any) -> str | None:
+    raw = getattr(item, "display_policy", None)
+    if raw is None and isinstance(item, dict):
+        raw = item.get("display_policy")
+    if isinstance(raw, RichDisplayPolicy):
+        return raw.value
+    return raw if isinstance(raw, str) else None
 
 
 def _payload_has_inline_binary(item: Any) -> bool:
@@ -1157,6 +1219,7 @@ __all__ = [
     "ToolRenderPayload",
     "ToolRenderRichItem",
     "build_rich_item_inventory_block",
+    "expand_inline_rich_references",
     "is_admitted_candidate",
     "merge_rich_item_candidates",
     "parse_inline_rich_references",

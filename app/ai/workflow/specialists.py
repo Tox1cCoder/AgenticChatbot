@@ -1174,17 +1174,22 @@ def with_answer_authoring_tools(
     """Add ``create_answer_visual`` where a public answer may use it.
 
     Bound only behind the rollout gate, the inline rich-response kill switch,
-    and the request's rich capability, and never for a private Planning worker,
-    whose markers the parent strips.
+    and the request's rich and answer-visual capabilities, and never for a
+    private Planning worker, whose markers the parent strips. A live stream can
+    only show a visual its client renders, so one that cannot is never offered
+    the tool.
     """
     if definition.model_config_key not in _ANSWER_VISUAL_AGENT_KEYS:
         return tools
     if request.extras.get("worker"):
         return tools
+    context = request.state.get("context")
     if not (
         getattr(app_settings, "answer_visuals_enabled", False)
         and getattr(app_settings, "inline_rich_response_enabled", False)
-        and rich_response_capable_from_context(request.state.get("context"))
+        and rich_response_capable_from_context(context)
+        and isinstance(context, dict)
+        and context.get("answer_visuals_v1")
     ):
         return tools
     if any(getattr(tool, "name", None) == CREATE_ANSWER_VISUAL_TOOL_NAME for tool in tools):

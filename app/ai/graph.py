@@ -576,6 +576,7 @@ class MultiAgentWorkflow(
             "messages": [HumanMessage(**human_message_kwargs)],
             "context": {
                 "inline_rich_response_v1": bool(getattr(request, "inline_rich_response_v1", False)),
+                "answer_visuals_v1": bool(getattr(request, "answer_visuals_v1", False)),
                 "hitl_policy": getattr(request, "hitl_policy", None),
             },
         }

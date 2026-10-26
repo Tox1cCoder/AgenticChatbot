@@ -4902,6 +4902,7 @@ class MessageService(IMessageService):
             inline_rich_response_v1=bool(
                 getattr(message_create_data, "inline_rich_response_v1", False)
             ),
+            answer_visuals_v1=bool(getattr(message_create_data, "answer_visuals_v1", False)),
             hitl_policy=hitl_policy,
         )
         return resolved_user_id, sanitized_persona, request

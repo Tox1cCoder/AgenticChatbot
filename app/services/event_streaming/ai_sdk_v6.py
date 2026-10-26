@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
@@ -22,6 +23,7 @@ from app.models.generation import GenerationStatus
 from app.observability.streaming import StreamingMetrics, streaming_metrics
 
 from .ai_sdk_projection import (
+    VisualMarkerStreamFilter,
     attach_image_parts_to_message,
     clean_tool_output,
     coerce_json_object,
@@ -187,6 +189,20 @@ def _ai_sdk_error_frames_from_data(data: dict[str, Any]) -> list[str]:
     )
 
 
+_VISUAL_MARKER_RE = re.compile(r"<!--rich:visual:[^\n]*?-->")
+
+
+def _overlay_text(state: AISDKV6StreamState, text: str) -> str:
+    """Preview overlay text without visual markers the client cannot render.
+
+    An overlay is replaced wholesale by the terminal answer, so complete
+    markers are simply dropped rather than held across chunks.
+    """
+    if state.answer_visuals_v1:
+        return text
+    return _VISUAL_MARKER_RE.sub("", text)
+
+
 class AISDKV6StreamState:
     """Streaming state carried across an AI SDK UI message stream response."""
 
@@ -198,6 +214,7 @@ class AISDKV6StreamState:
         *,
         inline_rich_response_v1: bool = False,
         stream_web_answer_v1: bool = False,
+        answer_visuals_v1: bool = False,
         operation: str = "unknown",
     ) -> None:
         self.message_id = message_id
@@ -229,6 +246,21 @@ class AISDKV6StreamState:
         self.tool_seq = 0
         self.pending_tool_call_ids: list[str] = []
         self.inline_rich_response_v1 = bool(inline_rich_response_v1)
+        # Effective: already requires the base contract and its rollout gate.
+        self.answer_visuals_v1 = bool(answer_visuals_v1 and inline_rich_response_v1)
+        # A client without visuals never sees their markers; when one is
+        # withheld, the terminal answer replaces the draft with the fallback.
+        self.visual_marker_filter = None if self.answer_visuals_v1 else VisualMarkerStreamFilter()
+
+    @property
+    def visual_markers_withheld(self) -> bool:
+        return bool(self.visual_marker_filter and self.visual_marker_filter.withheld)
+
+    def answer_text(self, text: str) -> str:
+        """The part of streamed answer text this client may see now."""
+        if self.visual_marker_filter is None:
+            return text
+        return self.visual_marker_filter.feed(text)
 
 
 class AISDKV6StreamAdapter:
@@ -350,7 +382,13 @@ class AISDKV6StreamAdapter:
         state = self._state
         state.answer_settled = True
         frames = self._preview_clear_frames()
-        if state.web_answer_streamed and not state.web_reconciled:
+        held = state.visual_marker_filter.flush() if state.visual_marker_filter else ""
+        if held and not state.text_ended:
+            # Text that only looked like the start of a visual marker.
+            state.any_text_delta = True
+            frames.append(_sse({"type": "text-delta", "id": state.text_id, "delta": held}))
+        needs_reconcile = state.web_answer_streamed or state.visual_markers_withheld
+        if needs_reconcile and not state.web_reconciled:
             state.web_reconciled = True
             self._metrics.record_reconcile(changed=(content or "") != state.streamed_draft)
             frames.append(
@@ -369,6 +407,7 @@ class AISDKV6StreamAdapter:
         projected = project_ai_sdk_message_for_capability(
             message,
             inline_rich_response_v1=self._state.inline_rich_response_v1,
+            answer_visuals_v1=self._state.answer_visuals_v1,
         )
         return str(projected.get("content") or "")
 
@@ -508,15 +547,17 @@ class AISDKV6StreamAdapter:
                 yield _sse(
                     {
                         "type": "data-answer-preview",
-                        "data": {"operation": operation, "text": chunk},
+                        "data": {"operation": operation, "text": _overlay_text(state, chunk)},
                         "transient": True,
                     }
                 )
             else:
                 state.web_answer_streamed = True
-                state.any_text_delta = True
-                state.streamed_draft += chunk
-                yield _sse({"type": "text-delta", "id": state.text_id, "delta": chunk})
+                visible = state.answer_text(chunk)
+                if visible:
+                    state.any_text_delta = True
+                    state.streamed_draft += visible
+                    yield _sse({"type": "text-delta", "id": state.text_id, "delta": visible})
             return
 
         if state.stream_web_answer_v1 and state.web_answer_streamed and etype == "message_delta":
@@ -560,14 +601,14 @@ class AISDKV6StreamAdapter:
             yield _sse(
                 {
                     "type": "data-answer-preview",
-                    "data": {"operation": operation, "text": text},
+                    "data": {"operation": operation, "text": _overlay_text(state, text)},
                     "transient": True,
                 }
             )
             return
 
         if etype == "message_delta":
-            delta = data.get("text") or ""
+            delta = state.answer_text(data.get("text") or "")
             if delta:
                 state.any_text_delta = True
                 yield _sse({"type": "text-delta", "id": state.text_id, "delta": delta})
@@ -941,6 +982,7 @@ class AISDKV6StreamAdapter:
             message = project_ai_sdk_message_for_capability(
                 original_message,
                 inline_rich_response_v1=state.inline_rich_response_v1,
+                answer_visuals_v1=state.answer_visuals_v1,
             )
             message = attach_image_parts_to_message(
                 message,

@@ -30,6 +30,9 @@ from pydantic import (
 
 ANSWER_VISUAL_TYPE = "answer_visual"
 ANSWER_VISUAL_SOURCE = "answer_visual_tool"
+#: Server-assigned id namespace, so a marker can be recognized as a visual
+#: before its descriptor is known.
+ANSWER_VISUAL_ID_PREFIX = "visual:"
 
 #: Serialized public JSON per item, fallback and evidence included.
 ANSWER_VISUAL_MAX_ITEM_BYTES = 16 * 1024
@@ -371,7 +374,7 @@ def build_answer_visual(
     )
     digest = hashlib.sha256(f"{turn_key}\n{canonical}".encode()).hexdigest()[:24]
     item: dict[str, Any] = {
-        "id": f"visual:{digest}",
+        "id": f"{ANSWER_VISUAL_ID_PREFIX}{digest}",
         "type": ANSWER_VISUAL_TYPE,
         "source": ANSWER_VISUAL_SOURCE,
         "display_policy": "inline_only",
@@ -596,6 +599,7 @@ def _number(value: float) -> str:
 
 
 __all__ = [
+    "ANSWER_VISUAL_ID_PREFIX",
     "ANSWER_VISUAL_MAX_ITEM_BYTES",
     "ANSWER_VISUAL_MAX_PER_ANSWER",
     "ANSWER_VISUAL_MAX_TOTAL_BYTES",
