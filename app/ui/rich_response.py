@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
+from app.core.rich_projection import project_rich_content, project_rich_items
 from app.core.rich_response import (
     RICH_ITEMS_VERSION,
     RichDisplayPolicy,
@@ -330,6 +331,9 @@ def _renderable_rich_items(metadata: dict[str, Any]) -> list[Any]:
 def build_rich_response_view(
     content: str | None,
     metadata: dict[str, Any] | None,
+    *,
+    answer_visuals: bool = False,
+    source_figures: bool = False,
 ) -> RichResponseView:
     """Return an ordered presentation view for an assistant message.
 
@@ -340,6 +344,9 @@ def build_rich_response_view(
       ids produce ``unavailable`` segments, and unreferenced items with
       ``display_policy == inline_or_append`` are returned in ``append_items``.
       Unreferenced image items (``inline_only``) are never appended.
+    * Item families the renderer does not support natively -- by default
+      answer visuals and composed figures -- arrive through the shared
+      fallback: Markdown for a visual, text plus a legacy image for a figure.
     * If the message is not a v1 message but carries legacy
       ``metadata["images"]``, the caller is told to fall back to its existing
       image-gallery renderer via ``use_legacy_image_gallery=True``.
@@ -348,6 +355,10 @@ def build_rich_response_view(
     body = content or ""
     is_v1 = metadata.get("rich_items_version") == RICH_ITEMS_VERSION
     raw_items = _renderable_rich_items(metadata)
+    if is_v1:
+        capabilities = {"answer_visuals": answer_visuals, "source_figures": source_figures}
+        body = project_rich_content(body, raw_items, rich=True, **capabilities)
+        raw_items = project_rich_items(raw_items, **capabilities)
     items_by_id: dict[str, dict[str, Any]] = {}
     for item in raw_items:
         if not isinstance(item, dict):

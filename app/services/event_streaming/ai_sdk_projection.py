@@ -25,17 +25,13 @@ import base64
 import json
 from typing import Any
 
-from app.core.answer_visuals import ANSWER_VISUAL_ID_PREFIX, ANSWER_VISUAL_TYPE
+from app.core.answer_visuals import ANSWER_VISUAL_ID_PREFIX
 from app.core.config import settings
+from app.core.rich_projection import needs_projection, project_rich_content, project_rich_items
 from app.core.rich_response import (
     PROTECTED_IMAGE_URL_PREFIXES,
-    expand_inline_rich_references,
-    parse_inline_rich_references,
-    remove_inline_rich_reference,
     sanitize_public_rich_metadata,
-    strip_inline_rich_markers,
 )
-from app.core.source_figures import is_source_figure, legacy_source_figure
 
 LEGACY_METADATA_KEYS = frozenset(
     {
@@ -291,22 +287,6 @@ def _rich_items_of(metadata: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [item for item in rich_items or () if isinstance(item, dict)]
 
 
-def _fallbacks(items: list[dict[str, Any]], predicate: Any) -> dict[str, str]:
-    """Stored fallback Markdown for each matching item, keyed by id."""
-    fallbacks: dict[str, str] = {}
-    for item in items:
-        if not predicate(item):
-            continue
-        fallback = (item.get("payload") or {}).get("fallback_markdown")
-        if isinstance(item.get("id"), str) and isinstance(fallback, str) and fallback:
-            fallbacks[item["id"]] = fallback
-    return fallbacks
-
-
-def _is_answer_visual(item: dict[str, Any]) -> bool:
-    return item.get("type") == ANSWER_VISUAL_TYPE
-
-
 def project_ai_sdk_message_for_capability(
     message: dict[str, Any],
     *,
@@ -334,28 +314,17 @@ def project_ai_sdk_message_for_capability(
         return message
     rich = bool(inline_rich_response_v1)
     items = _rich_items_of(find_message_metadata(message))
-    blocks: dict[str, str] = {}
-    if not (rich and answer_visuals_v1):
-        blocks.update(_fallbacks(items, _is_answer_visual))
-    figures = {} if rich and source_figures_v1 else _fallbacks(items, is_source_figure)
-    for item_id, fallback in figures.items():
-        blocks[item_id] = f"{fallback}\n\n<!--rich:{item_id}-->" if rich else fallback
+    capabilities = {
+        "rich": rich,
+        "answer_visuals": bool(answer_visuals_v1),
+        "source_figures": bool(source_figures_v1),
+    }
     content = message.get("content")
-    dangling_visuals = (
-        not answer_visuals_v1
-        and isinstance(content, str)
-        and f"<!--rich:{ANSWER_VISUAL_ID_PREFIX}" in content
-    )
-    if rich and not blocks and not dangling_visuals:
+    if not needs_projection(content, items, **capabilities):
         return message
     projected = dict(message)
-    if isinstance(content, str) and "<!--rich:" in content:
-        content = expand_inline_rich_references(content, blocks)
-        if not (rich and answer_visuals_v1):
-            content = _drop_dangling_visual_markers(content, blocks)
-        if not rich:
-            content = strip_inline_rich_markers(content)
-        projected["content"] = content
+    if isinstance(content, str):
+        projected["content"] = project_rich_content(content, items, **capabilities)
     for meta_key in _METADATA_KEYS:
         meta = projected.get(meta_key)
         if not isinstance(meta, dict):
@@ -369,34 +338,12 @@ def project_ai_sdk_message_for_capability(
         elif isinstance(meta.get("rich_items"), list):
             projected[meta_key] = {
                 **meta,
-                "rich_items": _project_rich_items(
+                "rich_items": project_rich_items(
                     meta["rich_items"],
-                    answer_visuals_v1=answer_visuals_v1,
-                    source_figures_v1=source_figures_v1,
+                    answer_visuals=bool(answer_visuals_v1),
+                    source_figures=bool(source_figures_v1),
                 ),
             }
-    return projected
-
-
-def _drop_dangling_visual_markers(content: str, known: dict[str, str]) -> str:
-    """Remove visual markers with no descriptor; nothing else names them."""
-    for item_id in parse_inline_rich_references(content):
-        if item_id.startswith(ANSWER_VISUAL_ID_PREFIX) and item_id not in known:
-            content = remove_inline_rich_reference(content, item_id)
-    return content
-
-
-def _project_rich_items(
-    items: list[Any], *, answer_visuals_v1: bool, source_figures_v1: bool
-) -> list[Any]:
-    projected: list[Any] = []
-    for item in items:
-        if isinstance(item, dict) and _is_answer_visual(item) and not answer_visuals_v1:
-            continue
-        if isinstance(item, dict) and is_source_figure(item) and not source_figures_v1:
-            projected.append(legacy_source_figure(item))
-            continue
-        projected.append(item)
     return projected
 
 

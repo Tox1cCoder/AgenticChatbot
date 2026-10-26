@@ -493,3 +493,81 @@ def test_stream_state_does_not_track_unselected_image_until_finalize():
     # No marker → image is not in segments and not appended (inline_only).
     assert all(s.kind != "rich" or (s.item or {}).get("type") != "image" for s in view.segments)
     assert view.append_items == []
+
+
+# ---------------------------------------------------------------------------
+# Answer visuals and source figures: Streamlit advertises neither, so it
+# renders the shared Markdown fallback and legacy images.
+# ---------------------------------------------------------------------------
+
+
+def _answer_visual() -> dict:
+    from app.core.answer_visuals import build_answer_visual
+
+    item = build_answer_visual(
+        {"variant": "steps", "title": "Reset", "steps": [{"title": "Unplug"}]},
+        resolve_evidence=lambda ref: None,
+        turn_key="t",
+    )
+    item.pop("_internal")
+    return item
+
+
+def _figure() -> dict:
+    from app.core.source_figures import FigureCell, build_source_figure
+
+    cells = [
+        FigureCell(
+            url=f"/web-images/{n}",
+            mime_type="image/png",
+            source_url=f"https://site{n}.example/p",
+            label=f"View {n}",
+            alt_text=f"Shot {n}",
+        )
+        for n in (1, 2)
+    ]
+    return build_source_figure(cells, caption="Compare edges.", caption_evidence=(), turn_key="t")
+
+
+def _v1(items: list[dict]) -> dict:
+    return {"rich_items_version": 1, "rich_items": items}
+
+
+def test_streamlit_renders_an_answer_visual_as_its_markdown_fallback():
+    visual = _answer_visual()
+    content = f"Do this:\n\n<!--rich:{visual['id']}-->\n\nDone."
+
+    view = build_rich_response_view(content, _v1([visual]))
+
+    markdown = "\n\n".join(s.text or "" for s in view.segments if s.kind == "markdown")
+    assert visual["payload"]["fallback_markdown"] in markdown
+    assert all(s.kind != "rich" for s in view.segments)
+    assert all(s.kind != "unavailable" for s in view.segments)
+
+
+def test_streamlit_renders_a_figure_as_text_then_a_legacy_group():
+    figure = _figure()
+    content = f"Compare:\n\n<!--rich:{figure['id']}-->"
+
+    view = build_rich_response_view(content, _v1([figure]))
+
+    kinds = [segment.kind for segment in view.segments]
+    assert kinds == ["markdown", "rich"]
+    assert "Compare edges." in (view.segments[0].text or "")
+    legacy = view.segments[1].item
+    assert "caption" not in legacy["payload"]
+    assert all("label" not in cell for cell in legacy["payload"]["items"])
+
+
+def test_stream_state_never_flashes_unavailable_for_a_pending_visual():
+    from app.ui.rich_response import RichStreamState
+
+    visual = _answer_visual()
+    state = RichStreamState()
+    state.append_text(f"Do this:\n\n<!--rich:{visual['id']}-->")
+
+    assert all(s.kind != "unavailable" for s in state.build_view().segments)
+
+    state.replace_with_finalized([visual])
+    markdown = "\n\n".join(s.text or "" for s in state.build_view().segments)
+    assert visual["payload"]["fallback_markdown"] in markdown
