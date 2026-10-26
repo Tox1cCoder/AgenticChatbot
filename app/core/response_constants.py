@@ -11,6 +11,8 @@ from .rich_response import (
     RICH_ITEMS_VERSION,
     RichDisplayPolicy,
     RichItemType,
+    is_admitted_candidate,
+    merge_rich_item_candidates,
     parse_inline_rich_references,
     validate_public_rich_item,
     validate_rich_references,
@@ -252,6 +254,7 @@ def _finalize_rich_items(
     candidates: list[dict[str, Any]],
     widget_items: list[dict[str, Any]],
     canvas_item: dict[str, Any] | None = None,
+    conflicting_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Resolve the final ``rich_items`` registry and validation warnings.
 
@@ -263,6 +266,8 @@ def _finalize_rich_items(
             tool artifacts.
         canvas_item: Public ``canvas_artifact`` rich item derived from the
             legacy canvas metadata, when the response produced one.
+        conflicting_ids: Ids an earlier merge already dropped because two
+            sources supplied different records for them.
 
     Returns:
         A tuple ``(rich_items, warnings)`` where ``rich_items`` is the
@@ -301,14 +306,17 @@ def _finalize_rich_items(
         rich_items.append(public_item)
         seen_ids.add(item_id)
 
-    # Candidates: images persist only when referenced; non-images persist if
-    # their policy allows append or they are referenced.
-    for candidate in candidates:
+    merged_candidates, conflicts = merge_rich_item_candidates(candidates)
+    for conflict_id in [*(conflicting_ids or []), *conflicts]:
+        warning = {"code": "conflicting_rich_item", "id": conflict_id}
+        if warning not in warnings:
+            warnings.append(warning)
+
+    for candidate in merged_candidates:
         cand_id = _candidate_id(candidate)
         if cand_id is None or cand_id in seen_ids:
             continue
-        is_image = _is_image_candidate(candidate)
-        if is_image and cand_id not in referenced_set:
+        if not is_admitted_candidate(candidate, referenced_set):
             continue
         public_candidate = validated_public_item(_normalize_candidate(candidate))
         if public_candidate is None:
@@ -510,6 +518,7 @@ def build_bot_metadata(
         # Keep legacy attachment/widget metadata readable while rollout is
         # disabled, but never persist the internal candidate handoff field.
         metadata.pop("_rich_item_candidates", None)
+        metadata.pop("_rich_item_conflicts", None)
         metadata.pop("_inline_rich_response_v1", None)
         metadata.pop("_presented_rich_image_ids", None)
         return metadata
@@ -548,21 +557,28 @@ def _drop_redundant_agent_fields(metadata: dict[str, Any]) -> None:
             metadata.pop(redundant_key, None)
 
 
-def _pop_rich_item_candidates(metadata: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+def _pop_rich_item_candidates(
+    metadata: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str], bool]:
     """Consume the workflow-internal rich-item handoff fields.
 
     The transient ``_rich_item_candidates`` field is the workflow-internal
     handoff. It is consumed and removed here; it must never appear in the
-    persisted assistant metadata. Returns the candidates and whether the
-    response declared itself inline-rich capable.
+    persisted assistant metadata. Returns the candidates, the ids an earlier
+    merge dropped as conflicting, and whether the response declared itself
+    inline-rich capable.
     """
     raw_candidates = metadata.pop("_rich_item_candidates", None)
+    raw_conflicts = metadata.pop("_rich_item_conflicts", None)
     capable_response = bool(metadata.pop("_inline_rich_response_v1", False))
     metadata.pop("_presented_rich_image_ids", None)
     candidates: list[dict[str, Any]] = []
     if isinstance(raw_candidates, list):
         candidates = [c for c in raw_candidates if isinstance(c, dict)]
-    return candidates, capable_response
+    conflicts: list[str] = []
+    if isinstance(raw_conflicts, list):
+        conflicts = [str(item_id) for item_id in raw_conflicts if item_id]
+    return candidates, conflicts, capable_response
 
 
 def _response_text(response: WorkflowResponse | None) -> str:
@@ -577,7 +593,7 @@ def _attach_rich_items(
     live_widgets: list[dict[str, Any]],
 ) -> None:
     """Materialize ``rich_items`` and its warnings when the response has rich activity."""
-    candidates, capable_response = _pop_rich_item_candidates(metadata)
+    candidates, conflicts, capable_response = _pop_rich_item_candidates(metadata)
 
     widget_items = [_widget_rich_item_from_live_widget(widget) for widget in (live_widgets or [])]
     canvas_item = _canvas_rich_item_from_artifact(metadata.get("canvas_artifact"))
@@ -588,7 +604,10 @@ def _attach_rich_items(
     content = _response_text(response)
     has_markers = bool(parse_inline_rich_references(content))
     has_v1_signal = (
-        bool(candidates) or has_markers or (capable_response and bool(widget_items or canvas_item))
+        bool(candidates)
+        or bool(conflicts)
+        or has_markers
+        or (capable_response and bool(widget_items or canvas_item))
     )
 
     if not has_v1_signal:
@@ -599,6 +618,7 @@ def _attach_rich_items(
         candidates=candidates,
         widget_items=widget_items,
         canvas_item=canvas_item,
+        conflicting_ids=conflicts,
     )
 
     metadata["rich_items_version"] = RICH_ITEMS_VERSION

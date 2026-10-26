@@ -278,6 +278,58 @@ def build_live_widget_candidate_from_tool_result(
     }
 
 
+def build_dedicated_rich_candidate(
+    result: Any,
+    *,
+    tool_call_id: str | None,
+    tool_name: str,
+) -> dict[str, Any] | None:
+    """Return the record a server-owned tool publishes for its own output.
+
+    Only tools whose output this server defines get a dedicated record; a
+    third-party result is never promoted by shape alone.
+    """
+    return build_live_widget_candidate_from_tool_result(result, tool_name=tool_name)
+
+
+def build_tool_result_rich_candidates(
+    *,
+    raw_result: Any,
+    result_text: str,
+    render: dict[str, Any] | None,
+    tool_call_id: str | None,
+    tool_name: str,
+    include_images: bool = True,
+) -> list[dict[str, Any]]:
+    """The one candidate builder for a tool result.
+
+    Shared by the tool-artifact path and the tool-end stream path so the two
+    cannot drift. A result yields its dedicated record or the generic
+    ``tool_render`` view, never both.
+    """
+    candidates: list[dict[str, Any]] = []
+    if include_images:
+        candidates.extend(
+            build_image_candidates_from_tool_content(
+                raw_result,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+            )
+        )
+    dedicated = build_dedicated_rich_candidate(
+        result_text, tool_call_id=tool_call_id, tool_name=tool_name
+    )
+    if dedicated is not None:
+        candidates.append(dedicated)
+        return candidates
+    tool_render = build_tool_render_candidate(
+        render, tool_call_id=tool_call_id, tool_name=tool_name
+    )
+    if tool_render is not None:
+        candidates.append(tool_render)
+    return candidates
+
+
 def _attach_rich_candidates_to_artifact(
     artifact: dict[str, Any],
     *,
@@ -291,25 +343,13 @@ def _attach_rich_candidates_to_artifact(
     ``artifact["_rich_item_candidates"]`` for the graph layer to lift into
     ``context["rich_item_candidates"]``.
     """
-    candidates: list[dict[str, Any]] = []
-    candidates.extend(
-        build_image_candidates_from_tool_content(
-            raw_result,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-        )
-    )
-    live_widget = build_live_widget_candidate_from_tool_result(
-        result_text,
+    candidates = build_tool_result_rich_candidates(
+        raw_result=raw_result,
+        result_text=result_text,
+        render=render,
+        tool_call_id=tool_call_id,
         tool_name=tool_name,
     )
-    if live_widget is not None:
-        candidates.append(live_widget)
-    tool_render = build_tool_render_candidate(
-        render, tool_call_id=tool_call_id, tool_name=tool_name
-    )
-    if tool_render is not None:
-        candidates.append(tool_render)
     if candidates:
         artifact["_rich_item_candidates"] = candidates
 

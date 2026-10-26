@@ -546,3 +546,166 @@ def test_v1_finalization_rejects_selected_image_over_decoded_byte_limit(monkeypa
         warning.get("code") == "invalid_rich_item" and warning.get("id") == "image:document:1"
         for warning in metadata["rich_reference_warnings"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Candidate ownership: grounded and tool-context candidates share one registry
+# ---------------------------------------------------------------------------
+
+
+def _grounded_web_image(item_id: str = "image:web:I1") -> dict:
+    return {
+        "id": item_id,
+        "type": "image",
+        "display_policy": "inline_only",
+        "alt_text": "Selected web image",
+        "payload": {"url": "/web-images/abc", "mime_type": "image/png"},
+    }
+
+
+def _tool_render_candidate(
+    item_id: str = "tool:call-1",
+    *,
+    title: str = "Revenue",
+    display_policy: str = "inline_or_append",
+) -> dict:
+    return {
+        "id": item_id,
+        "type": "tool_render",
+        "source": "tool",
+        "display_policy": display_policy,
+        "title": title,
+        "payload": {"render": {"type": "table", "title": title}},
+    }
+
+
+def _merge_into_response(grounded: list[dict], context_candidates: list[dict], content: str):
+    from app.ai.graph import MultiAgentWorkflow
+    from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id="chat_agent",
+        message=AgentMessage(role=MessageRole.ASSISTANT, content=content),
+        metadata={"_rich_item_candidates": list(grounded), "_inline_rich_response_v1": True},
+    )
+    state = {
+        "context": {
+            "inline_rich_response_v1": True,
+            "rich_item_candidates": list(context_candidates),
+        }
+    }
+    workflow._merge_tool_artifacts(state, response)
+    return response
+
+
+def _finalize(content: str, metadata: dict) -> dict:
+    return build_bot_metadata(
+        WorkflowResponse(
+            message=WorkflowResponseMessage(content=content),
+            metadata=dict(metadata),
+        )
+    )
+
+
+def test_graph_merge_keeps_grounded_image_and_tool_candidate():
+    content = "Look.\n\n<!--rich:image:web:I1-->\n\n<!--rich:tool:call-1-->"
+    response = _merge_into_response([_grounded_web_image()], [_tool_render_candidate()], content)
+
+    ids = [item["id"] for item in response.metadata["_rich_item_candidates"]]
+    assert ids == ["image:web:I1", "tool:call-1"]
+
+    metadata = _finalize(content, response.metadata)
+    assert [item["id"] for item in metadata["rich_items"]] == ["image:web:I1", "tool:call-1"]
+
+
+def test_graph_merge_collapses_replayed_identical_candidate():
+    candidate = _tool_render_candidate()
+    response = _merge_into_response(
+        [dict(candidate)], [dict(candidate)], "<!--rich:tool:call-1-->"
+    )
+
+    assert [item["id"] for item in response.metadata["_rich_item_candidates"]] == ["tool:call-1"]
+
+
+def test_conflicting_candidates_for_one_id_fail_closed():
+    content = "Table:\n\n<!--rich:tool:call-1-->"
+    response = _merge_into_response(
+        [_tool_render_candidate(title="Revenue")],
+        [_tool_render_candidate(title="Costs")],
+        content,
+    )
+
+    metadata = _finalize(content, response.metadata)
+
+    assert metadata["rich_items"] == []
+    assert {"code": "conflicting_rich_item", "id": "tool:call-1"} in metadata[
+        "rich_reference_warnings"
+    ]
+
+
+def test_finalization_drops_conflicting_candidates_supplied_directly():
+    metadata = _finalize(
+        "<!--rich:tool:call-1-->",
+        {
+            "_rich_item_candidates": [
+                _tool_render_candidate(title="Revenue"),
+                _tool_render_candidate(title="Costs"),
+            ]
+        },
+    )
+
+    assert metadata["rich_items"] == []
+    assert {"code": "conflicting_rich_item", "id": "tool:call-1"} in metadata[
+        "rich_reference_warnings"
+    ]
+
+
+def test_unreferenced_inline_only_non_image_candidate_is_not_persisted():
+    metadata = _finalize(
+        "No visual referenced.",
+        {
+            "_rich_item_candidates": [
+                _tool_render_candidate("tool:hidden", display_policy="inline_only"),
+                _tool_render_candidate("tool:append"),
+            ]
+        },
+    )
+
+    assert [item["id"] for item in metadata["rich_items"]] == ["tool:append"]
+
+
+def test_specialist_outcome_provenance_keeps_admitted_tool_descriptors():
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage
+
+    from app.ai.schemas import AgentType
+    from app.ai.workflow.specialists import SpecialistFactory
+
+    shown = _tool_render_candidate("tool:shown", display_policy="inline_only")
+    hidden = _tool_render_candidate("tool:hidden", display_policy="inline_only")
+    tool_execution = SimpleNamespace(
+        artifacts=[{"tool_call_id": "c1", "_rich_item_candidates": [shown, hidden]}],
+        images=[],
+    )
+    factory = SpecialistFactory.__new__(SpecialistFactory)
+
+    outcome = factory._to_outcome(
+        SimpleNamespace(agent_type=AgentType.CHAT, output_policy_ids=("public_content",)),
+        SimpleNamespace(agent_id="chat_agent", extras={}, messages=[], conversation_id="c"),
+        [AIMessage(content="Here.\n\n<!--rich:tool:shown-->")],
+        tool_execution,
+    )
+
+    assert [item["id"] for item in outcome.provenance.rich_items] == ["tool:shown"]
+
+
+def test_referenced_inline_only_non_image_candidate_is_persisted():
+    metadata = _finalize(
+        "<!--rich:tool:shown-->",
+        {"_rich_item_candidates": [_tool_render_candidate("tool:shown", display_policy="inline_only")]},
+    )
+
+    assert [item["id"] for item in metadata["rich_items"]] == ["tool:shown"]

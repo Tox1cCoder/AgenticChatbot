@@ -14,6 +14,7 @@ from qdrant_client import QdrantClient
 
 from ..core.config import settings
 from ..core.response_constants import NO_RESPONSE_GENERATED
+from ..core.rich_response import merge_rich_item_candidates
 from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
@@ -520,8 +521,18 @@ class MultiAgentWorkflow(
             if not response.metadata:
                 response.metadata = {}
             response.metadata["_inline_rich_response_v1"] = True
-            if rich_candidates:
-                response.metadata["_rich_item_candidates"] = list(rich_candidates)
+            # Grounding may already have placed selected web images here;
+            # context candidates join them by id rather than replacing them.
+            merged, conflicts = merge_rich_item_candidates(
+                response.metadata.get("_rich_item_candidates") or (),
+                rich_candidates or (),
+            )
+            if merged:
+                response.metadata["_rich_item_candidates"] = merged
+            else:
+                response.metadata.pop("_rich_item_candidates", None)
+            if conflicts:
+                response.metadata["_rich_item_conflicts"] = conflicts
             presented_image_ids = context.get("_presented_rich_image_ids")
             if isinstance(presented_image_ids, list):
                 response.metadata["_presented_rich_image_ids"] = list(presented_image_ids)

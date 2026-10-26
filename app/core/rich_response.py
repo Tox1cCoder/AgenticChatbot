@@ -865,6 +865,49 @@ def select_append_fallback_items(
     return fallback
 
 
+def merge_rich_item_candidates(
+    *groups: Iterable[Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Merge candidate lists by stable id, keeping first-seen order.
+
+    Identical records for one id collapse to one (a replayed tool call). Two
+    different records for one id are both dropped: neither source can prove it
+    owns the id, and a last-write-wins update would silently publish whichever
+    arrived later. Returns the merged candidates and the conflicting ids.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    conflicts: list[str] = []
+    for group in groups:
+        for candidate in group or ():
+            if not isinstance(candidate, dict):
+                continue
+            item_id = candidate.get("id")
+            if not isinstance(item_id, str) or not item_id:
+                continue
+            if item_id in conflicts:
+                continue
+            existing = merged.get(item_id)
+            if existing is None:
+                merged[item_id] = candidate
+            elif existing != candidate:
+                conflicts.append(item_id)
+    return [item for item_id, item in merged.items() if item_id not in conflicts], conflicts
+
+
+def is_admitted_candidate(candidate: dict[str, Any], referenced_ids: set[str]) -> bool:
+    """Whether a candidate becomes public for an answer with these markers.
+
+    A referenced candidate is admitted. An unreferenced one is admitted only
+    when its policy allows append; images are always ``inline_only``, so this
+    is the selected-only image rule applied to every inline-only record.
+    """
+    if candidate.get("id") in referenced_ids:
+        return True
+    if _is_image_item(candidate):
+        return False
+    return candidate.get("display_policy") == RichDisplayPolicy.inline_or_append.value
+
+
 def provenance_provider(item: Any) -> str:
     """Return an item's provenance provider, or ``"other"`` when absent.
 
@@ -1098,6 +1141,8 @@ __all__ = [
     "ToolRenderPayload",
     "ToolRenderRichItem",
     "build_rich_item_inventory_block",
+    "is_admitted_candidate",
+    "merge_rich_item_candidates",
     "parse_inline_rich_references",
     "remove_inline_rich_reference",
     "replace_inline_rich_references",

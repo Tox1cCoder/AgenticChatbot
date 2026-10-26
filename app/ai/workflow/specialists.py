@@ -67,6 +67,11 @@ from app.ai.workflow.middleware import (
     WorkerToolScopeMiddleware,
     build_specialist_middleware,
 )
+from app.core.rich_response import (
+    is_admitted_candidate,
+    merge_rich_item_candidates,
+    parse_inline_rich_references,
+)
 from app.observability.routing import get_routing_metrics_recorder
 
 PLANNING_AGENT_ID = "planning_agent"
@@ -878,12 +883,13 @@ class SpecialistFactory:
                 metadata["_inline_rich_response_v1"] = True
             if grounding.warnings:
                 metadata["web_grounding_warnings"] = list(grounding.warnings)
+        final_text = _final_text(produced)
         response = AgentResponse(
             agent_type=definition.agent_type,
             agent_id=request.agent_id,
             message=AgentMessage(
                 role=MessageRole.ASSISTANT,
-                content=_final_text(produced) or ("Here is your image." if images else ""),
+                content=final_text or ("Here is your image." if images else ""),
             ),
             metadata=metadata,
             tool_artifacts=artifacts or None,
@@ -900,7 +906,7 @@ class SpecialistFactory:
                 artifacts=tuple(artifacts),
                 images=tuple(images),
                 web_sources=web_sources,
-                rich_items=rich_items,
+                rich_items=_admitted_rich_items(rich_items, artifacts, final_text),
                 private_messages=tuple(produced),
             ),
         )
@@ -1143,6 +1149,28 @@ def _final_text(messages: list[Any]) -> str:
         if text.strip():
             return text
     return ""
+
+
+def _admitted_rich_items(
+    grounded: tuple[dict[str, Any], ...],
+    artifacts: list[dict[str, Any]],
+    final_text: str,
+) -> tuple[dict[str, Any], ...]:
+    """Grounded items plus the tool descriptors this answer admits.
+
+    Recorded on provenance so a continuation can find the descriptors without
+    recovering them from prose.
+    """
+    tool_candidates = [
+        candidate
+        for artifact in artifacts
+        if isinstance(artifact, dict)
+        for candidate in artifact.get("_rich_item_candidates") or ()
+        if isinstance(candidate, dict)
+    ]
+    merged, _conflicts = merge_rich_item_candidates(grounded, tool_candidates)
+    referenced = set(parse_inline_rich_references(final_text))
+    return tuple(item for item in merged if is_admitted_candidate(item, referenced))
 
 
 def _replace_final_text(messages: list[Any], text: str) -> list[Any]:
