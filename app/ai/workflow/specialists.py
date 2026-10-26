@@ -32,6 +32,10 @@ from app.ai.hitl_config import policy_from_context
 from app.ai.image_generation import current_media_delivery_service
 from app.ai.research_budget import get_research_budget
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.ai.source_figure_tools import (
+    COMPOSE_SOURCE_FIGURE_TOOL_NAME,
+    create_compose_source_figure_tool,
+)
 from app.ai.tool_context import rich_response_capable_from_context
 from app.ai.utils import coerce_response_text, extract_inline_images_from_content
 from app.ai.web_research.contracts import ResearchScope
@@ -490,7 +494,14 @@ class SpecialistFactory:
                     produced = [*produced, correction, *repaired_produced]
                     grounding = parser.resolve(_final_text(repaired_produced))
                 produced = _replace_final_text(produced, grounding.text)
-                await build.web_research_session.finish(grounding.selected_image_ids)
+                placed_figures = [
+                    item_id
+                    for item_id in parse_inline_rich_references(grounding.text)
+                    if item_id in build.web_research_session.figure_ids
+                ]
+                await build.web_research_session.finish(
+                    grounding.selected_image_ids, selected_figure_ids=placed_figures
+                )
         except GraphBubbleUp:
             if build.web_research_session is not None:
                 await build.web_research_session.abort()
@@ -1168,16 +1179,30 @@ def _final_text(messages: list[Any]) -> str:
 _ANSWER_VISUAL_AGENT_KEYS = frozenset({"chat", "search"})
 
 
-def with_answer_authoring_tools(
-    tools: list[Any], definition: Any, request: Any
-) -> list[Any]:
-    """Add ``create_answer_visual`` where a public answer may use it.
+_AUTHORING_TOOLS = (
+    (
+        "answer_visuals_enabled",
+        "answer_visuals_v1",
+        CREATE_ANSWER_VISUAL_TOOL_NAME,
+        create_answer_visual_tool,
+    ),
+    (
+        "source_figures_enabled",
+        "source_figures_v1",
+        COMPOSE_SOURCE_FIGURE_TOOL_NAME,
+        create_compose_source_figure_tool,
+    ),
+)
 
-    Bound only behind the rollout gate, the inline rich-response kill switch,
-    and the request's rich and answer-visual capabilities, and never for a
-    private Planning worker, whose markers the parent strips. A live stream can
-    only show a visual its client renders, so one that cannot is never offered
-    the tool.
+
+def with_answer_authoring_tools(tools: list[Any], definition: Any, request: Any) -> list[Any]:
+    """Add ``create_answer_visual`` / ``compose_source_figure`` where allowed.
+
+    Each is bound only behind its rollout gate, the inline rich-response kill
+    switch, and the request's rich capability plus its own, and never for a
+    private Planning worker, whose markers the parent strips and whose images
+    are released at its boundary. A live stream can only show what its client
+    renders, so a client that cannot is never offered the tool.
     """
     if definition.model_config_key not in _ANSWER_VISUAL_AGENT_KEYS:
         return tools
@@ -1185,16 +1210,18 @@ def with_answer_authoring_tools(
         return tools
     context = request.state.get("context")
     if not (
-        getattr(app_settings, "answer_visuals_enabled", False)
-        and getattr(app_settings, "inline_rich_response_enabled", False)
+        getattr(app_settings, "inline_rich_response_enabled", False)
         and rich_response_capable_from_context(context)
         and isinstance(context, dict)
-        and context.get("answer_visuals_v1")
     ):
         return tools
-    if any(getattr(tool, "name", None) == CREATE_ANSWER_VISUAL_TOOL_NAME for tool in tools):
-        return tools
-    return [*tools, create_answer_visual_tool()]
+    bound = {getattr(tool, "name", None) for tool in tools}
+    added = [
+        factory()
+        for gate, capability, name, factory in _AUTHORING_TOOLS
+        if getattr(app_settings, gate, False) and context.get(capability) and name not in bound
+    ]
+    return [*tools, *added] if added else tools
 
 
 def _admitted_rich_items(

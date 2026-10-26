@@ -30,7 +30,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-from .answer_visuals import AnswerVisualPayload
+from .answer_visuals import AnswerVisualPayload, PublicEvidence
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -147,6 +147,11 @@ class ImagePayload(PublicPayload):
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
     caption: str | None = Field(default=None, max_length=500)
+    # Composed source figures (``sourceFiguresV1``); absent on every other image.
+    label: str | None = Field(default=None, min_length=1, max_length=160)
+    caption_evidence: list[PublicEvidence] | None = None
+    fallback_markdown: str | None = Field(default=None, min_length=1)
+    comparison_unavailable: bool | None = None
 
     @model_validator(mode="after")
     def _has_exactly_one_source(self) -> ImagePayload:
@@ -167,6 +172,9 @@ class ImageGroupCell(PublicPayload):
     description: str | None = None
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
+    # Composed source figures only.
+    label: str | None = Field(default=None, min_length=1, max_length=160)
+    alt_text: str | None = Field(default=None, min_length=1, max_length=500)
 
     @model_validator(mode="after")
     def _validate_cell(self) -> ImageGroupCell:
@@ -177,7 +185,19 @@ class ImageGroupCell(PublicPayload):
 
 
 class ImageGroupPayload(PublicPayload):
-    items: list[ImageGroupCell] = Field(min_length=2)
+    items: list[ImageGroupCell] = Field(min_length=1)
+    # Composed source figures only.
+    caption: str | None = Field(default=None, max_length=500)
+    caption_evidence: list[PublicEvidence] | None = None
+    fallback_markdown: str | None = Field(default=None, min_length=1)
+    comparison_unavailable: bool | None = None
+
+    @model_validator(mode="after")
+    def _is_a_comparison(self) -> ImageGroupPayload:
+        # A group of one is only valid as the declared remains of a comparison.
+        if len(self.items) < 2 and not self.comparison_unavailable:
+            raise ValueError("image group requires at least two items")
+        return self
 
 
 class LiveWidgetPayload(PublicPayload):

@@ -117,6 +117,13 @@ class WorkflowExecutionRequest(BaseModel):
             "public chat/search answers may author static visuals."
         ),
     )
+    source_figures_v1: bool = Field(
+        default=False,
+        description=(
+            "Effective source-figure capability from the API boundary: when true, "
+            "public chat/search answers may compose labelled figures."
+        ),
+    )
     hitl_policy: dict[str, Any] | None = Field(
         default=None,
         description=(

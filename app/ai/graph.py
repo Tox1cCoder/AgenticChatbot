@@ -577,6 +577,7 @@ class MultiAgentWorkflow(
             "context": {
                 "inline_rich_response_v1": bool(getattr(request, "inline_rich_response_v1", False)),
                 "answer_visuals_v1": bool(getattr(request, "answer_visuals_v1", False)),
+                "source_figures_v1": bool(getattr(request, "source_figures_v1", False)),
                 "hitl_policy": getattr(request, "hitl_policy", None),
             },
         }

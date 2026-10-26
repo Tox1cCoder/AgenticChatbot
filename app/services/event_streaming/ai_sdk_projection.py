@@ -35,6 +35,7 @@ from app.core.rich_response import (
     sanitize_public_rich_metadata,
     strip_inline_rich_markers,
 )
+from app.core.source_figures import is_source_figure, legacy_source_figure
 
 LEGACY_METADATA_KEYS = frozenset(
     {
@@ -275,12 +276,26 @@ def effective_answer_visuals(*, base: bool, requested: bool) -> bool:
     )
 
 
-def _answer_visual_fallbacks(metadata: dict[str, Any] | None) -> dict[str, str]:
-    """Fallback Markdown for each persisted answer visual, keyed by id."""
+def effective_source_figures(*, base: bool, requested: bool) -> bool:
+    """Whether a client may receive composed figures with labels and captions."""
+    return bool(
+        requested
+        and base
+        and getattr(settings, "inline_rich_response_enabled", False)
+        and getattr(settings, "source_figures_enabled", False)
+    )
+
+
+def _rich_items_of(metadata: dict[str, Any] | None) -> list[dict[str, Any]]:
     rich_items = metadata.get("rich_items") if isinstance(metadata, dict) else None
+    return [item for item in rich_items or () if isinstance(item, dict)]
+
+
+def _fallbacks(items: list[dict[str, Any]], predicate: Any) -> dict[str, str]:
+    """Stored fallback Markdown for each matching item, keyed by id."""
     fallbacks: dict[str, str] = {}
-    for item in rich_items if isinstance(rich_items, list) else ():
-        if not isinstance(item, dict) or item.get("type") != ANSWER_VISUAL_TYPE:
+    for item in items:
+        if not predicate(item):
             continue
         fallback = (item.get("payload") or {}).get("fallback_markdown")
         if isinstance(item.get("id"), str) and isinstance(fallback, str) and fallback:
@@ -288,13 +303,8 @@ def _answer_visual_fallbacks(metadata: dict[str, Any] | None) -> dict[str, str]:
     return fallbacks
 
 
-def _expand_answer_visuals(content: str, fallbacks: dict[str, str]) -> str:
-    """Put each visual's fallback at its marker; drop visual markers with none."""
-    expanded = expand_inline_rich_references(content, fallbacks)
-    for item_id in parse_inline_rich_references(expanded):
-        if item_id.startswith(ANSWER_VISUAL_ID_PREFIX) and item_id not in fallbacks:
-            expanded = remove_inline_rich_reference(expanded, item_id)
-    return expanded
+def _is_answer_visual(item: dict[str, Any]) -> bool:
+    return item.get("type") == ANSWER_VISUAL_TYPE
 
 
 def project_ai_sdk_message_for_capability(
@@ -302,35 +312,55 @@ def project_ai_sdk_message_for_capability(
     *,
     inline_rich_response_v1: bool,
     answer_visuals_v1: bool = False,
+    source_figures_v1: bool = False,
 ) -> dict[str, Any]:
     """Project a persisted assistant message for an AI SDK consumer.
 
-    Each rich feature the client did not advertise is projected on its own.
-    Answer visuals become their derived Markdown at the marker position and
-    leave ``rich_items``. Without ``inline_rich_response_v1`` every remaining
-    marker is stripped from ``content`` and ``rich_items`` /
-    ``rich_items_version`` keys are removed from any metadata field present.
-    A fully capable client receives the message unchanged; the input is never
-    mutated, so the stored message stays canonical.
+    Each rich feature the client did not advertise is projected on its own:
+
+    - Answer visuals become their derived Markdown at the marker position and
+      leave ``rich_items``.
+    - Composed figures put their source-linked text before the marker; a
+      rich client keeps the figure under the same id with an exact legacy
+      image payload, a non-rich client keeps only the text (its media still
+      arrive as file parts).
+
+    Without ``inline_rich_response_v1`` every remaining marker is stripped
+    from ``content`` and ``rich_items`` / ``rich_items_version`` keys are
+    removed from any metadata field present. The input is never mutated, so
+    the stored message stays canonical.
     """
     if not isinstance(message, dict):
         return message
-    visuals_supported = inline_rich_response_v1 and answer_visuals_v1
-    if inline_rich_response_v1 and visuals_supported:
+    rich = bool(inline_rich_response_v1)
+    items = _rich_items_of(find_message_metadata(message))
+    blocks: dict[str, str] = {}
+    if not (rich and answer_visuals_v1):
+        blocks.update(_fallbacks(items, _is_answer_visual))
+    figures = {} if rich and source_figures_v1 else _fallbacks(items, is_source_figure)
+    for item_id, fallback in figures.items():
+        blocks[item_id] = f"{fallback}\n\n<!--rich:{item_id}-->" if rich else fallback
+    content = message.get("content")
+    dangling_visuals = (
+        not answer_visuals_v1
+        and isinstance(content, str)
+        and f"<!--rich:{ANSWER_VISUAL_ID_PREFIX}" in content
+    )
+    if rich and not blocks and not dangling_visuals:
         return message
     projected = dict(message)
-    content = projected.get("content")
-    fallbacks = _answer_visual_fallbacks(find_message_metadata(message))
     if isinstance(content, str) and "<!--rich:" in content:
-        content = _expand_answer_visuals(content, fallbacks)
-        if not inline_rich_response_v1:
+        content = expand_inline_rich_references(content, blocks)
+        if not (rich and answer_visuals_v1):
+            content = _drop_dangling_visual_markers(content, blocks)
+        if not rich:
             content = strip_inline_rich_markers(content)
         projected["content"] = content
     for meta_key in _METADATA_KEYS:
         meta = projected.get(meta_key)
         if not isinstance(meta, dict):
             continue
-        if not inline_rich_response_v1:
+        if not rich:
             projected[meta_key] = {
                 k: v
                 for k, v in meta.items()
@@ -339,12 +369,34 @@ def project_ai_sdk_message_for_capability(
         elif isinstance(meta.get("rich_items"), list):
             projected[meta_key] = {
                 **meta,
-                "rich_items": [
-                    item
-                    for item in meta["rich_items"]
-                    if not (isinstance(item, dict) and item.get("type") == ANSWER_VISUAL_TYPE)
-                ],
+                "rich_items": _project_rich_items(
+                    meta["rich_items"],
+                    answer_visuals_v1=answer_visuals_v1,
+                    source_figures_v1=source_figures_v1,
+                ),
             }
+    return projected
+
+
+def _drop_dangling_visual_markers(content: str, known: dict[str, str]) -> str:
+    """Remove visual markers with no descriptor; nothing else names them."""
+    for item_id in parse_inline_rich_references(content):
+        if item_id.startswith(ANSWER_VISUAL_ID_PREFIX) and item_id not in known:
+            content = remove_inline_rich_reference(content, item_id)
+    return content
+
+
+def _project_rich_items(
+    items: list[Any], *, answer_visuals_v1: bool, source_figures_v1: bool
+) -> list[Any]:
+    projected: list[Any] = []
+    for item in items:
+        if isinstance(item, dict) and _is_answer_visual(item) and not answer_visuals_v1:
+            continue
+        if isinstance(item, dict) and is_source_figure(item) and not source_figures_v1:
+            projected.append(legacy_source_figure(item))
+            continue
+        projected.append(item)
     return projected
 
 

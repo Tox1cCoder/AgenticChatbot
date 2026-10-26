@@ -29,6 +29,7 @@ from app.core.rich_response import (
     replace_inline_rich_references,
     validate_rich_references,
 )
+from app.core.source_figures import degrade_source_figure
 
 FORK_HISTORY_KEY = "fork_history"
 FORK_CUTOFF_ELIGIBLE_KEY = "fork_cutoff_eligible"
@@ -326,9 +327,9 @@ def _available_rich_items(items: list[Any], available: set[MediaReference]) -> l
         cells = [
             cell for cell in _image_cells(item) if _url_references(cell.get("url")) <= available
         ]
-        if cells:
-            item["payload"]["items"] = cells
-            kept.append(item)
+        degraded = degrade_source_figure(item, cells)
+        if degraded is not None:
+            kept.append(degraded)
     return kept
 
 

@@ -42,6 +42,7 @@ from app.core.rich_response import (
     remove_inline_rich_reference,
     validate_rich_references,
 )
+from app.core.source_figures import degrade_source_figure
 from app.factories.message_factory import MessageFactory
 from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole, PlanLifecycle
@@ -4523,10 +4524,11 @@ class MessageService(IMessageService):
                 continue
 
             if item.get("type") == RichItemType.image_group.value:
-                if await self._externalize_group_cells(
+                externalized = await self._externalize_group_cells(
                     item, conversation_id=conversation_id, user_id=user_id
-                ):
-                    kept_items.append(item)
+                )
+                if externalized is not None:
+                    kept_items.append(externalized)
                 else:
                     updated_content = remove_inline_rich_reference(
                         updated_content, str(item.get("id") or "")
@@ -4613,19 +4615,19 @@ class MessageService(IMessageService):
         *,
         conversation_id: UUID,
         user_id: UUID,
-    ) -> bool:
-        """Rewrite an image group's cell URLs in place to owned references.
+    ) -> dict[str, Any] | None:
+        """Rewrite an image group's cell URLs to owned references.
 
-        Cells that cannot be registered are dropped. Returns whether the group
-        item should be kept: True when at least one cell survived, and also when
-        the group carries no usable cell list at all (nothing to externalize, so
-        the item is left exactly as it was). False means every cell failed and
+        Cells that cannot be registered are dropped. Returns the item to keep:
+        the group with its surviving cells -- a source figure that lost a cell
+        also loses its comparison caption -- or the item unchanged when it
+        carries no usable cell list at all. ``None`` means every cell failed and
         the caller must drop the item and remove its marker.
         """
         payload = item.get("payload")
         cells = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(cells, list):
-            return True
+            return item
         kept_cells: list[dict[str, Any]] = []
         for cell in cells:
             if not isinstance(cell, dict):
@@ -4641,10 +4643,7 @@ class MessageService(IMessageService):
                 continue
             cell["url"] = reference_url
             kept_cells.append(cell)
-        if not kept_cells:
-            return False
-        payload["items"] = kept_cells
-        return True
+        return degrade_source_figure(item, kept_cells)
 
     def _record_final_image_selection(self, kept_items: list[dict[str, Any]]) -> None:
         """Count image items surviving finalization. Never raises: telemetry
@@ -4903,6 +4902,7 @@ class MessageService(IMessageService):
                 getattr(message_create_data, "inline_rich_response_v1", False)
             ),
             answer_visuals_v1=bool(getattr(message_create_data, "answer_visuals_v1", False)),
+            source_figures_v1=bool(getattr(message_create_data, "source_figures_v1", False)),
             hitl_policy=hitl_policy,
         )
         return resolved_user_id, sanitized_persona, request

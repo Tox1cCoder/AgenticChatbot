@@ -27,6 +27,7 @@ from .client_runtime_tools import (
     get_client_tool_device_id,
     is_client_tool,
 )
+from .source_figure_tools import COMPOSE_SOURCE_FIGURE_TOOL_NAME
 from .tool_error_policy import (
     ToolErrorKind,
     ToolErrorSummary,
@@ -281,7 +282,7 @@ def build_live_widget_candidate_from_tool_result(
 
 #: Server-owned tools whose output is a validated rich-item descriptor. They
 #: never fall back to a generic ``tool_render`` view, with or without one.
-_DESCRIPTOR_TOOLS = frozenset({CREATE_ANSWER_VISUAL_TOOL_NAME})
+_DESCRIPTOR_TOOLS = frozenset({CREATE_ANSWER_VISUAL_TOOL_NAME, COMPOSE_SOURCE_FIGURE_TOOL_NAME})
 
 
 def build_dedicated_rich_candidate(

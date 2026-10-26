@@ -14,6 +14,12 @@ from .rich_response import (
     ALLOWED_URL_SCHEMES,
     PROTECTED_IMAGE_URL_PREFIXES,
 )
+from .source_figures import (
+    SOURCE_FIGURE_SOURCE,
+    degrade_source_figure,
+    figure_group_as_image,
+    is_source_figure,
+)
 
 _IMAGE_TYPES = frozenset({"image", "image_group"})
 _DIRECT_SOURCES = frozenset({"rag_document", "tool_image", "generated_image"})
@@ -21,10 +27,19 @@ _REMOTE_DISCOVERY_SOURCES = frozenset({"image_search"})
 _BASE64_DATA_PATTERN = re.compile(
     r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?\Z"
 )
-_IMAGE_PAYLOAD_KEYS = frozenset(
-    {"url", "data", "mime_type", "source_url", "description", "width", "height", "caption"}
+#: Fields a composed source figure adds to a single image payload.
+_FIGURE_PAYLOAD_KEYS = frozenset(
+    {"label", "caption_evidence", "fallback_markdown", "comparison_unavailable"}
 )
-_GROUP_CELL_KEYS = frozenset({"url", "mime_type", "source_url", "description", "width", "height"})
+_IMAGE_PAYLOAD_KEYS = (
+    frozenset(
+        {"url", "data", "mime_type", "source_url", "description", "width", "height", "caption"}
+    )
+    | _FIGURE_PAYLOAD_KEYS
+)
+_GROUP_CELL_KEYS = frozenset(
+    {"url", "mime_type", "source_url", "description", "width", "height", "label", "alt_text"}
+)
 _JUNK_IMAGE_URL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"favicon", re.IGNORECASE),
     re.compile(r"sprite", re.IGNORECASE),
@@ -95,6 +110,10 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _intent_rank(candidate: Mapping[str, Any]) -> int | None:
     source = str(candidate.get("source") or "")
+    if source == SOURCE_FIGURE_SOURCE:
+        # Composed from inspected images on purpose; it claims its media before
+        # any standalone candidate for the same reference can.
+        return -1
     if source in _DIRECT_SOURCES:
         return 0
     if source == "image_search":
@@ -307,6 +326,11 @@ def _normalize_candidate(
     if not surviving_items:
         return None
     seen_locators.update(claimed_locators)
+    if is_source_figure(candidate):
+        degraded = degrade_source_figure(candidate, surviving_items)
+        if degraded is not None and len(surviving_items) == 1:
+            degraded = figure_group_as_image(degraded)
+        return degraded
     if len(surviving_items) == 1:
         candidate["type"] = "image"
         candidate["payload"] = surviving_items[0]

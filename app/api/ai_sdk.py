@@ -30,6 +30,7 @@ from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.services.event_streaming.ai_sdk_projection import (
     attach_image_parts_to_message,
     effective_answer_visuals,
+    effective_source_figures,
     ensure_leading_text_part,
     is_v1_rich_items_message,
     project_ai_sdk_message_for_capability,
@@ -82,6 +83,15 @@ class AISDKChatRequest(BaseModel):
             "Render `answer_visual` rich items (steps, bars, comparison tables). Requires "
             "inlineRichResponseV1. Without it the answer carries each visual's Markdown "
             "fallback at the marker position."
+        ),
+    )
+    source_figures_v1: bool = Field(
+        default=False,
+        alias="sourceFiguresV1",
+        description=(
+            "Render composed source figures: labelled image cells and a caption. "
+            "Requires inlineRichResponseV1. Without it a figure reads as source-linked "
+            "text followed by a legacy image or image group."
         ),
     )
 
@@ -457,6 +467,8 @@ def get_conversation_messages_ai_sdk(
     inline_rich_response_v1_snake: Annotated[bool, Query(alias="inline_rich_response_v1")] = False,
     answer_visuals_v1: Annotated[bool, Query(alias="answerVisualsV1")] = False,
     answer_visuals_v1_snake: Annotated[bool, Query(alias="answer_visuals_v1")] = False,
+    source_figures_v1: Annotated[bool, Query(alias="sourceFiguresV1")] = False,
+    source_figures_v1_snake: Annotated[bool, Query(alias="source_figures_v1")] = False,
 ) -> ApiResponse[AISDKMessagesData]:
     """Get conversation messages in Vercel AI SDK UIMessage format."""
     paginated_result = message_service.get_conversation_messages(
@@ -474,6 +486,9 @@ def get_conversation_messages_ai_sdk(
     )
     visuals_capable = effective_answer_visuals(
         base=rich_response_capable, requested=answer_visuals_v1 or answer_visuals_v1_snake
+    )
+    figures_capable = effective_source_figures(
+        base=rich_response_capable, requested=source_figures_v1 or source_figures_v1_snake
     )
 
     messages: list[AISDKUIMessage] = []
@@ -503,6 +518,7 @@ def get_conversation_messages_ai_sdk(
                 message_payload,
                 inline_rich_response_v1=rich_response_capable,
                 answer_visuals_v1=visuals_capable,
+                source_figures_v1=figures_capable,
             )
             message_payload = attach_image_parts_to_message(
                 message_payload,
@@ -602,6 +618,9 @@ async def chat_ui_message_stream(
     answer_visuals_v1 = effective_answer_visuals(
         base=inline_rich_response_v1, requested=payload.answer_visuals_v1
     )
+    source_figures_v1 = effective_source_figures(
+        base=inline_rich_response_v1, requested=payload.source_figures_v1
+    )
     state = StreamState(
         message_id=str(bot_message_id),
         text_id=str(uuid4()),
@@ -611,6 +630,7 @@ async def chat_ui_message_stream(
         ),
         stream_web_answer_v1=bool(payload.stream_web_answer_v1),
         answer_visuals_v1=answer_visuals_v1,
+        source_figures_v1=source_figures_v1,
         operation="chat",
     )
 
@@ -623,6 +643,7 @@ async def chat_ui_message_stream(
             device_id=extra.get("device_id") or extra.get("deviceId"),
             inline_rich_response_v1=inline_rich_response_v1,
             answer_visuals_v1=answer_visuals_v1,
+            source_figures_v1=source_figures_v1,
         )
         return message_service.create_message_stream(
             message_create, current_user_id, bot_message_id=bot_message_id
@@ -667,6 +688,9 @@ async def resume_interrupt_ai_sdk(
         stream_web_answer_v1=resume_request.stream_web_answer_v1,
         answer_visuals_v1=effective_answer_visuals(
             base=inline_rich_response_v1, requested=resume_request.answer_visuals_v1
+        ),
+        source_figures_v1=effective_source_figures(
+            base=inline_rich_response_v1, requested=resume_request.source_figures_v1
         ),
         operation="resume",
     )
@@ -770,6 +794,9 @@ async def continue_generation_ai_sdk(
         stream_web_answer_v1=continue_request.stream_web_answer_v1,
         answer_visuals_v1=effective_answer_visuals(
             base=inline_rich_response_v1, requested=continue_request.answer_visuals_v1
+        ),
+        source_figures_v1=effective_source_figures(
+            base=inline_rich_response_v1, requested=continue_request.source_figures_v1
         ),
         operation="continue",
     )

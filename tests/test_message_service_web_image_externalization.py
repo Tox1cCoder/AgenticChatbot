@@ -237,6 +237,37 @@ async def test_one_failing_cell_keeps_the_group_and_its_marker():
 
 
 @pytest.mark.asyncio
+async def test_a_figure_losing_a_cell_drops_its_comparison_caption():
+    """A before/after conclusion must never stand over a single surviving image."""
+
+    async def _register(**kwargs):
+        if kwargs["upstream_url"].endswith("b.jpg"):
+            raise RuntimeError("upstream rejected")
+        return SimpleNamespace(id=uuid4())
+
+    web_images = AsyncMock()
+    web_images.register.side_effect = _register
+    metadata = _group_metadata()
+    figure = metadata["rich_items"][0]
+    figure["source"] = "source_figure"
+    figure["payload"]["caption"] = "Shadows off removes the contact shadow."
+    figure["payload"]["fallback_markdown"] = "**Figure:** Shadows off removes the contact shadow."
+    for label, cell in zip(("On", "Off"), figure["payload"]["items"], strict=True):
+        cell.update(label=f"Shadows {label}", alt_text=f"Car with shadows {label.lower()}")
+
+    content, externalized = await _service(web_images)._externalize_remote_rich_images(
+        "Body\n\n<!--rich:imagegroup:tool:c1-->\n", metadata, uuid4(), uuid4()
+    )
+
+    [kept] = externalized["rich_items"]
+    assert [cell["label"] for cell in kept["payload"]["items"]] == ["Shadows On"]
+    assert "caption" not in kept["payload"]
+    assert kept["payload"]["comparison_unavailable"] is True
+    assert "contact shadow" not in kept["payload"]["fallback_markdown"]
+    assert "<!--rich:imagegroup:tool:c1-->" in content
+
+
+@pytest.mark.asyncio
 async def test_group_losing_every_cell_drops_the_item_and_marker():
     web_images = AsyncMock()
     web_images.register.side_effect = RuntimeError("upstream rejected")

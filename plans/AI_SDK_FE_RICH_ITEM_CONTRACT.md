@@ -68,6 +68,7 @@ nothing about another.
 | Flag | Item family | Without the flag |
 |---|---|---|
 | `answerVisualsV1` (`answer_visuals_v1`) | `answer_visual` | The visual's `fallback_markdown` replaces its marker, as its own paragraph; the descriptor is omitted from `rich_items`. |
+| `sourceFiguresV1` (`source_figures_v1`) | composed figures (`image` / `image_group` with `source: "source_figure"`) | The figure's source-linked `fallback_markdown` is inserted before its marker, and the item keeps its id with an exact legacy payload (no `label`, `alt_text` per cell, group `caption`, `caption_evidence`, `fallback_markdown`, `comparison_unavailable`). A non-rich client gets the text only and the media as `file` parts. |
 
 Stored messages are canonical and never change with a client's flags; the
 projection is computed per request. During a live stream a client without
@@ -170,6 +171,45 @@ type RichImageGroupItem = RichItemBase & {
 
 A persisted group can contain one cell when registration of other cells failed.
 Render that as a single-image layout.
+
+### Composed source figures
+
+With `sourceFiguresV1`, an image or image group whose `source` is
+`"source_figure"` (id prefix `figure:`) carries extra fields. The model composed
+it from web images it inspected; the server resolved each cell's protected media
+and its own source.
+
+```ts
+type FigureEvidence = { title?: string; url: string; label: string };
+
+// image_group payload additions
+type FigureGroupPayload = {
+  items: Array<RichImageGroupItem["payload"]["items"][number] & {
+    label?: string;    // <= 160 chars, show above or below the cell
+    alt_text?: string; // <= 500 chars, use as the cell's alt attribute
+  }>;                  // 1-4 cells
+  caption?: string;    // explains what to notice; <= 500 chars
+  caption_evidence?: FigureEvidence[];
+  fallback_markdown?: string;
+  comparison_unavailable?: boolean;
+};
+
+// image payload additions (a single-image figure)
+type FigureImagePayload = RichImageItem["payload"] & {
+  label?: string;
+  caption_evidence?: FigureEvidence[];
+  fallback_markdown?: string;
+  comparison_unavailable?: boolean;
+};
+```
+
+- Show each cell's label and its own `source_url` link; keep `alt_text` out of
+  the visible caption.
+- Show one caption for the whole figure, with `caption_evidence` links.
+- Stack cells on narrow screens; keep source aspect ratios.
+- `comparison_unavailable: true` means a cell was lost after composition: there
+  is no caption, render the surviving cells with their labels and a visible
+  "comparison unavailable" note. A group of one is valid only in this state.
 
 ### Widget, canvas, and tool result
 

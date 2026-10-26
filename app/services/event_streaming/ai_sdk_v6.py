@@ -215,6 +215,7 @@ class AISDKV6StreamState:
         inline_rich_response_v1: bool = False,
         stream_web_answer_v1: bool = False,
         answer_visuals_v1: bool = False,
+        source_figures_v1: bool = False,
         operation: str = "unknown",
     ) -> None:
         self.message_id = message_id
@@ -248,6 +249,9 @@ class AISDKV6StreamState:
         self.inline_rich_response_v1 = bool(inline_rich_response_v1)
         # Effective: already requires the base contract and its rollout gate.
         self.answer_visuals_v1 = bool(answer_visuals_v1 and inline_rich_response_v1)
+        # A figure needs no stream filter: without the flag a rich client still
+        # renders its marker, as a legacy image, once the terminal registry lands.
+        self.source_figures_v1 = bool(source_figures_v1 and inline_rich_response_v1)
         # A client without visuals never sees their markers; when one is
         # withheld, the terminal answer replaces the draft with the fallback.
         self.visual_marker_filter = None if self.answer_visuals_v1 else VisualMarkerStreamFilter()
@@ -408,6 +412,7 @@ class AISDKV6StreamAdapter:
             message,
             inline_rich_response_v1=self._state.inline_rich_response_v1,
             answer_visuals_v1=self._state.answer_visuals_v1,
+            source_figures_v1=self._state.source_figures_v1,
         )
         return str(projected.get("content") or "")
 
@@ -983,6 +988,7 @@ class AISDKV6StreamAdapter:
                 original_message,
                 inline_rich_response_v1=state.inline_rich_response_v1,
                 answer_visuals_v1=state.answer_visuals_v1,
+                source_figures_v1=state.source_figures_v1,
             )
             message = attach_image_parts_to_message(
                 message,

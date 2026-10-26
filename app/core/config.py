@@ -1893,6 +1893,15 @@ class Settings(BaseSettings):
             "rich-capable. Keep off until a client renders answer visuals."
         ),
     )
+    source_figures_enabled: bool = Field(
+        default=False,
+        description=(
+            "Rollout gate for compose_source_figure (labelled single images and "
+            "comparisons built from inspected web images). Binds the tool for public "
+            "chat/search answers only for a rich-capable client that sent "
+            "sourceFiguresV1. Keep off until a client renders labelled figures."
+        ),
+    )
     web_research_enabled: bool = Field(
         default=True,
         description="Short-lived rollout switch for canonical web research.",
