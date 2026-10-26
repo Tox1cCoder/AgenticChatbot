@@ -703,9 +703,8 @@ def test_specialist_outcome_provenance_keeps_admitted_tool_descriptors():
 
 
 def test_referenced_inline_only_non_image_candidate_is_persisted():
-    metadata = _finalize(
-        "<!--rich:tool:shown-->",
-        {"_rich_item_candidates": [_tool_render_candidate("tool:shown", display_policy="inline_only")]},
-    )
+    shown = _tool_render_candidate("tool:shown", display_policy="inline_only")
+
+    metadata = _finalize("<!--rich:tool:shown-->", {"_rich_item_candidates": [shown]})
 
     assert [item["id"] for item in metadata["rich_items"]] == ["tool:shown"]

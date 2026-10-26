@@ -32,6 +32,7 @@ from app.ai.workflow.contracts import (
     WorkflowError,
 )
 from app.ai.workflow.errors import workflow_error
+from app.core.rich_response import parse_inline_rich_references
 from app.observability.routing import get_routing_metrics_recorder
 
 logger = logging.getLogger(__name__)
@@ -186,7 +187,9 @@ class WebEvidencePolicy:
             for record in outcome.provenance.web_sources
             if isinstance(record, dict) and record.get("url")
         }
-        cited = set(_MARKDOWN_LINK_PATTERN.findall(outcome.response.message.content or ""))
+        content = outcome.response.message.content or ""
+        cited = set(_MARKDOWN_LINK_PATTERN.findall(content))
+        cited |= _visual_citation_urls(outcome.provenance.rich_items, content)
         if known.intersection(cited):
             return
         raise OutputValidationError(
@@ -194,6 +197,20 @@ class WebEvidencePolicy:
             "web answer cites no source admitted for this turn",
             retriable=True,
         )
+
+
+def _visual_citation_urls(items: Any, content: str) -> set[str]:
+    """Source URLs cited inside answer visuals the answer actually places."""
+    referenced = set(parse_inline_rich_references(content))
+    return {
+        str(source.get("url"))
+        for item in items or ()
+        if isinstance(item, dict)
+        and item.get("type") == "answer_visual"
+        and item.get("id") in referenced
+        for source in ((item.get("payload") or {}).get("evidence") or ())
+        if isinstance(source, dict) and source.get("url")
+    }
 
 
 class ToolMessagePairingPolicy:

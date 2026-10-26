@@ -27,6 +27,7 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from app.ai.agents.canvas_agent import _build_previous_artifact_message, finalize_canvas_response
+from app.ai.answer_visual_tools import CREATE_ANSWER_VISUAL_TOOL_NAME, create_answer_visual_tool
 from app.ai.hitl_config import policy_from_context
 from app.ai.image_generation import current_media_delivery_service
 from app.ai.research_budget import get_research_budget
@@ -67,6 +68,7 @@ from app.ai.workflow.middleware import (
     WorkerToolScopeMiddleware,
     build_specialist_middleware,
 )
+from app.core.config import settings as app_settings
 from app.core.rich_response import (
     is_admitted_candidate,
     merge_rich_item_candidates,
@@ -620,7 +622,9 @@ class SpecialistFactory:
         request: SpecialistRequest,
     ) -> SpecialistBuild:
         system_prompt = await _resolve(definition.system_prompt_factory, request)
-        tools = await _resolve(definition.tool_factory, request) or []
+        tools = with_answer_authoring_tools(
+            await _resolve(definition.tool_factory, request) or [], definition, request
+        )
         web_research_enabled = getattr(self._settings, "web_research_enabled", True)
         if not web_research_enabled:
             tools = [
@@ -737,7 +741,9 @@ class SpecialistFactory:
             """
             if accountant.state.forced_synthesis or request.extras.get("disable_tools"):
                 return []
-            live_tools = await _resolve(definition.tool_factory, request) or []
+            live_tools = with_answer_authoring_tools(
+                await _resolve(definition.tool_factory, request) or [], definition, request
+            )
             if not web_research_enabled:
                 live_tools = [
                     tool
@@ -866,12 +872,18 @@ class SpecialistFactory:
             metadata["execution_budget"] = accountant.state.model_dump(mode="json")
         web_sources: tuple[dict[str, Any], ...] = ()
         rich_items: tuple[dict[str, Any], ...] = ()
+        final_text = _final_text(produced)
+        admitted_items = _admitted_rich_items(
+            grounding.rich_items if grounding is not None else (), artifacts, final_text
+        )
         if web_research_session is not None:
+            cited = [
+                *(grounding.source_ids if grounding is not None else ()),
+                *_visual_source_ids(admitted_items),
+            ]
             web_sources = tuple(
                 source.model_dump(mode="json")
-                for source in web_research_session.published_sources(
-                    grounding.source_ids if grounding is not None else ()
-                )
+                for source in web_research_session.published_sources(tuple(dict.fromkeys(cited)))
             )
             if web_sources:
                 metadata["web_sources"] = list(web_sources)
@@ -883,7 +895,6 @@ class SpecialistFactory:
                 metadata["_inline_rich_response_v1"] = True
             if grounding.warnings:
                 metadata["web_grounding_warnings"] = list(grounding.warnings)
-        final_text = _final_text(produced)
         response = AgentResponse(
             agent_type=definition.agent_type,
             agent_id=request.agent_id,
@@ -906,7 +917,7 @@ class SpecialistFactory:
                 artifacts=tuple(artifacts),
                 images=tuple(images),
                 web_sources=web_sources,
-                rich_items=_admitted_rich_items(rich_items, artifacts, final_text),
+                rich_items=admitted_items,
                 private_messages=tuple(produced),
             ),
         )
@@ -1151,6 +1162,36 @@ def _final_text(messages: list[Any]) -> str:
     return ""
 
 
+#: Public answering specialists that may author static visuals. RAG renders its
+#: answer from structured claims, custom agents follow their own allowlists, and
+#: canvas output is a standalone artifact.
+_ANSWER_VISUAL_AGENT_KEYS = frozenset({"chat", "search"})
+
+
+def with_answer_authoring_tools(
+    tools: list[Any], definition: Any, request: Any
+) -> list[Any]:
+    """Add ``create_answer_visual`` where a public answer may use it.
+
+    Bound only behind the rollout gate, the inline rich-response kill switch,
+    and the request's rich capability, and never for a private Planning worker,
+    whose markers the parent strips.
+    """
+    if definition.model_config_key not in _ANSWER_VISUAL_AGENT_KEYS:
+        return tools
+    if request.extras.get("worker"):
+        return tools
+    if not (
+        getattr(app_settings, "answer_visuals_enabled", False)
+        and getattr(app_settings, "inline_rich_response_enabled", False)
+        and rich_response_capable_from_context(request.state.get("context"))
+    ):
+        return tools
+    if any(getattr(tool, "name", None) == CREATE_ANSWER_VISUAL_TOOL_NAME for tool in tools):
+        return tools
+    return [*tools, create_answer_visual_tool()]
+
+
 def _admitted_rich_items(
     grounded: tuple[dict[str, Any], ...],
     artifacts: list[dict[str, Any]],
@@ -1171,6 +1212,19 @@ def _admitted_rich_items(
     merged, _conflicts = merge_rich_item_candidates(grounded, tool_candidates)
     referenced = set(parse_inline_rich_references(final_text))
     return tuple(item for item in merged if is_admitted_candidate(item, referenced))
+
+
+def _visual_source_ids(items: tuple[dict[str, Any], ...]) -> list[str]:
+    """Turn-local source IDs cited inside admitted visuals.
+
+    A source a reader can only reach through a visual's citation is still a
+    source the answer rests on, so it is published like one cited in prose.
+    """
+    return [
+        str(source_id)
+        for item in items
+        for source_id in ((item.get("_internal") or {}).get("web_source_ids") or ())
+    ]
 
 
 def _replace_final_text(messages: list[Any], text: str) -> list[Any]:

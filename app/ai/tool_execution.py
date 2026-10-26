@@ -19,6 +19,7 @@ from ..core.rich_response import (
     RichItemType,
     sanitize_public_image_fields,
 )
+from .answer_visual_tools import CREATE_ANSWER_VISUAL_TOOL_NAME, split_rich_item_result
 from .client_runtime_tools import (
     CLIENT_TOOL_PREFIX,
     get_active_client_runtime_session,
@@ -278,17 +279,24 @@ def build_live_widget_candidate_from_tool_result(
     }
 
 
+#: Server-owned tools whose output is a validated rich-item descriptor. They
+#: never fall back to a generic ``tool_render`` view, with or without one.
+_DESCRIPTOR_TOOLS = frozenset({CREATE_ANSWER_VISUAL_TOOL_NAME})
+
+
 def build_dedicated_rich_candidate(
     result: Any,
     *,
-    tool_call_id: str | None,
     tool_name: str,
+    descriptor: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return the record a server-owned tool publishes for its own output.
 
     Only tools whose output this server defines get a dedicated record; a
     third-party result is never promoted by shape alone.
     """
+    if tool_name in _DESCRIPTOR_TOOLS:
+        return descriptor
     return build_live_widget_candidate_from_tool_result(result, tool_name=tool_name)
 
 
@@ -300,12 +308,14 @@ def build_tool_result_rich_candidates(
     tool_call_id: str | None,
     tool_name: str,
     include_images: bool = True,
+    descriptor: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The one candidate builder for a tool result.
 
     Shared by the tool-artifact path and the tool-end stream path so the two
     cannot drift. A result yields its dedicated record or the generic
-    ``tool_render`` view, never both.
+    ``tool_render`` view, never both. ``descriptor`` is the validated record a
+    descriptor tool split out of its result before the result became model text.
     """
     candidates: list[dict[str, Any]] = []
     if include_images:
@@ -317,10 +327,11 @@ def build_tool_result_rich_candidates(
             )
         )
     dedicated = build_dedicated_rich_candidate(
-        result_text, tool_call_id=tool_call_id, tool_name=tool_name
+        result_text, tool_name=tool_name, descriptor=descriptor
     )
     if dedicated is not None:
         candidates.append(dedicated)
+    if dedicated is not None or tool_name in _DESCRIPTOR_TOOLS:
         return candidates
     tool_render = build_tool_render_candidate(
         render, tool_call_id=tool_call_id, tool_name=tool_name
@@ -338,6 +349,7 @@ def _attach_rich_candidates_to_artifact(
     render: dict[str, Any] | None,
     tool_call_id: str | None,
     tool_name: str,
+    descriptor: dict[str, Any] | None = None,
 ) -> None:
     """Compute rich-item candidates for a tool result and attach them as
     ``artifact["_rich_item_candidates"]`` for the graph layer to lift into
@@ -349,6 +361,7 @@ def _attach_rich_candidates_to_artifact(
         render=render,
         tool_call_id=tool_call_id,
         tool_name=tool_name,
+        descriptor=descriptor,
     )
     if candidates:
         artifact["_rich_item_candidates"] = candidates
@@ -2020,6 +2033,11 @@ class _ToolCallResults:
             if canonical_tool_name == "brave_image_search"
             else result
         )
+        descriptor = None
+        if canonical_tool_name in _DESCRIPTOR_TOOLS:
+            # The descriptor belongs to the artifact, not to the model's context.
+            public_result, descriptor = split_rich_item_result(public_result)
+            result = public_result
         structured_error = _structured_tool_error(public_result)
         normalized_result = normalize_tool_result_for_rendering(
             public_result,
@@ -2053,6 +2071,7 @@ class _ToolCallResults:
             render=normalized_result.render,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
+            descriptor=descriptor,
         )
         self.artifacts.append(artifact)
         if capture_images:

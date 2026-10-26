@@ -6,6 +6,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from . import answer_visuals
 from .config import settings
 from .rich_response import (
     RICH_ITEMS_VERSION,
@@ -248,6 +249,30 @@ def _canvas_rich_item_from_artifact(artifact: Any) -> dict[str, Any] | None:
     }
 
 
+class _AnswerVisualBudget:
+    """Per-answer count and byte ceilings for static answer visuals.
+
+    Limits are read at call time so one answer is judged by one setting.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.total_bytes = 0
+
+    def admit(self, item: dict[str, Any]) -> bool:
+        if item.get("type") != RichItemType.answer_visual.value:
+            return True
+        size = len(json.dumps(item, ensure_ascii=False).encode())
+        if (
+            self.count >= answer_visuals.ANSWER_VISUAL_MAX_PER_ANSWER
+            or self.total_bytes + size > answer_visuals.ANSWER_VISUAL_MAX_TOTAL_BYTES
+        ):
+            return False
+        self.count += 1
+        self.total_bytes += size
+        return True
+
+
 def _finalize_rich_items(
     *,
     content: str,
@@ -312,6 +337,7 @@ def _finalize_rich_items(
         if warning not in warnings:
             warnings.append(warning)
 
+    visual_budget = _AnswerVisualBudget()
     for candidate in merged_candidates:
         cand_id = _candidate_id(candidate)
         if cand_id is None or cand_id in seen_ids:
@@ -320,6 +346,9 @@ def _finalize_rich_items(
             continue
         public_candidate = validated_public_item(_normalize_candidate(candidate))
         if public_candidate is None:
+            continue
+        if not visual_budget.admit(public_candidate):
+            warnings.append({"code": "answer_visual_limit", "id": cand_id})
             continue
         rich_items.append(public_candidate)
         seen_ids.add(cand_id)

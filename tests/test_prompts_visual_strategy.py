@@ -114,6 +114,22 @@ def test_widget_tool_description_carries_the_full_library_contract():
     assert "readable message" in doc
 
 
+def test_block_prefers_the_smallest_useful_format():
+    """Interactive widgets were the only authored visual, so a two-row
+    comparison became a micro-app or nothing."""
+    block = prompts.VISUAL_STRATEGY_SNIPPET.lower()
+
+    assert "smallest format" in block
+    assert "create_answer_visual" in block
+    assert block.index("markdown table") < block.index("create_answer_visual")
+
+
+def test_block_keeps_conclusions_readable_without_the_visual():
+    block = prompts.VISUAL_STRATEGY_SNIPPET.lower()
+
+    assert "every conclusion in prose" in block
+
+
 def test_block_has_no_hardcoded_visual_topic_list():
     block = prompts.VISUAL_STRATEGY_SNIPPET.lower()
     for word in TAXONOMY_WORDS:

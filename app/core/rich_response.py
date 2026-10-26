@@ -30,6 +30,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from .answer_visuals import AnswerVisualPayload
+
 # ---------------------------------------------------------------------------
 # Public constants
 # ---------------------------------------------------------------------------
@@ -82,6 +84,7 @@ class RichItemType(str, Enum):
     canvas_artifact = "canvas_artifact"
     citation = "citation"
     resource_link = "resource_link"
+    answer_visual = "answer_visual"
 
 
 class RichDisplayPolicy(str, Enum):
@@ -284,6 +287,17 @@ class ResourceLinkRichItem(RichItemBase):
     payload: ResourceLinkPayload
 
 
+class AnswerVisualRichItem(RichItemBase):
+    """A bounded static visual created by ``create_answer_visual``.
+
+    Public only where the answer places its marker, so it is ``inline_only``.
+    """
+
+    type: Literal[RichItemType.answer_visual]
+    display_policy: Literal[RichDisplayPolicy.inline_only] = RichDisplayPolicy.inline_only
+    payload: AnswerVisualPayload
+
+
 RichItem = Annotated[
     ImageRichItem
     | ImageGroupRichItem
@@ -291,7 +305,8 @@ RichItem = Annotated[
     | ToolRenderRichItem
     | CanvasRichItem
     | CitationRichItem
-    | ResourceLinkRichItem,
+    | ResourceLinkRichItem
+    | AnswerVisualRichItem,
     Field(discriminator="type"),
 ]
 
@@ -1118,6 +1133,7 @@ def build_rich_item_inventory_block(
 __all__ = [
     "ALLOWED_IMAGE_MIME_TYPES",
     "ALLOWED_URL_SCHEMES",
+    "AnswerVisualRichItem",
     "CanvasPayload",
     "CanvasRichItem",
     "GENERIC_IMAGE_ALT_TEXT",
