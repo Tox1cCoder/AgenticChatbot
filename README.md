@@ -7,6 +7,76 @@ A production-grade, multi-agent chatbot platform built on **FastAPI**, **LangGra
 
 A Streamlit **demo UI** ([`demo.py`](demo.py)) and a ready-to-import **Postman collection** ([`Chatbot API.postman_collection.json`](Chatbot%20API.postman_collection.json)) are provided out of the box.
 
+## Run everything with Docker Compose
+
+With Docker Desktop running in Linux-container mode (Docker Compose 2.24 or
+newer), run this from the repository root:
+
+```bash
+docker compose up -d --build
+```
+
+This builds the application image and starts PostgreSQL, Redis, Qdrant, the API,
+MinerU document parsing, Celery parse/index/summary workers, the Celery Beat
+scheduler, the local client sidecar, and the Streamlit demo. Migrations run
+automatically before the workers start. The first build downloads Python,
+CPU PyTorch, and document-processing dependencies and can take several minutes.
+
+- **Demo UI:** <http://localhost:8501>
+- **API documentation:** <http://localhost:8000/docs>
+- **Sidecar documentation:** <http://localhost:8100/docs>
+
+No environment file is needed to start the services. Before using the chatbot,
+copy `.env.example` to `.env` and set `GEMINI_API_KEY`; the default embedding
+configuration requires it, including when opening conversations. Other LLM
+providers can be configured through the application. Existing `.env` provider settings are loaded;
+Compose supplies its own internal database, Redis, Qdrant, and MinerU addresses
+and storage paths. Optional `.env.client` settings are loaded by the sidecar;
+container networking, profile paths, and enabled trust checks take precedence.
+Keep `ENVIRONMENT=development` for this local stack; production deployment
+requires its own credentials and configuration.
+
+The sidecar runs as an unprivileged Linux user. Its shell, MCP servers, skills,
+and workspace operate **inside the container**. Its persistent workspace is
+`/home/chatbot/workspace`, and skill uploads install under
+`/home/chatbot/profile/skills`. It does not run commands in the Windows host.
+Node.js/npm are included for MCP servers started with `npx`. The demo shares
+the sidecar's launch token through a read-only profile mount; sidecar trust
+checks remain enabled.
+
+Document parsing uses the CPU pipeline, with no NVIDIA GPU setup required.
+MinerU downloads its model weights on the first document parse; allow extra
+time and an internet connection for that initial download. Model caches persist
+between container restarts. `COMPOSE_MINERU_TIMEOUT` defaults to 900 seconds;
+increase it in `.env` for large documents or a slow first download.
+
+```bash
+docker compose ps                   # service and health status
+docker compose logs -f api          # API logs (use another service name as needed)
+docker compose logs -f worker-parse # document parser logs
+docker compose down                # stop services; keep stored data
+docker compose up -d                # start again using the existing image
+docker compose up -d --build        # rebuild after changing source/dependencies
+```
+
+Databases, uploaded files, staged documents, the sidecar profile, and model
+caches use Docker named volumes. `docker compose down -v` **deletes this stack's
+stored data**. The new stack starts with its own databases; it does not import
+an existing native database or reuse the older Redis-only stack's volume.
+Existing independently managed Redis and Qdrant containers can keep running,
+because the full stack does not publish their ports or the PostgreSQL port.
+
+If ports 8000, 8100, or 8501 are already in use, set `COMPOSE_API_PORT`,
+`COMPOSE_SIDECAR_PORT`, or `COMPOSE_DEMO_PORT` in `.env`. Published ports bind
+only to `127.0.0.1`. `COMPOSE_POSTGRES_PASSWORD` and `REDIS_PASSWORD` customize
+the local database passwords; use URL-safe letters, digits, hyphens, and
+underscores because these values also appear in internal connection URLs.
+Set passwords before the first start: changing the PostgreSQL variable later
+does not change a password already stored in its data volume.
+
+The native Python setup below remains available. Use
+`docker compose -f docker-compose.redis.yml up -d redis` for its Redis-only helper.
+
 ---
 
 ## Table of Contents

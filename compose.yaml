@@ -1,0 +1,223 @@
+name: sample-chatbot
+
+x-runtime: &runtime
+  build: .
+  image: sample-chatbot:local
+  init: true
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  environment: &server-environment
+    DATABASE_URL: postgresql://chatbot:${COMPOSE_POSTGRES_PASSWORD:-chatbot-dev}@postgres:5432/chatbot
+    REDIS_URL: redis://:${REDIS_PASSWORD:-sample-chatbot-dev}@redis:6379/0
+    CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-sample-chatbot-dev}@redis:6379/0
+    CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-sample-chatbot-dev}@redis:6379/0
+    QDRANT_URL: http://qdrant:6333
+    API_HOST: 0.0.0.0
+    API_PORT: "8000"
+    TEMP_STORAGE_PATH: /app/app/temp
+    DOCUMENT_IMAGES_STORAGE_PATH: /app/app/storage/document_images
+    CHAT_IMAGES_STORAGE_PATH: /app/app/storage/chat_images
+    PARSE_ARTIFACTS_STORAGE_PATH: /app/app/storage/parse_artifacts
+    MINERU_API_URL: http://mineru:8765
+    MINERU_BACKEND: pipeline
+    MINERU_DEVICE_MODE: cpu
+    MINERU_TIMEOUT: ${COMPOSE_MINERU_TIMEOUT:-900}
+    HF_HOME: /home/chatbot/.cache/huggingface
+  volumes: &server-volumes
+    - uploads:/app/app/storage
+    - staging:/app/app/temp
+    - models:/home/chatbot/.cache
+  stop_grace_period: 60s
+
+x-worker: &worker
+  <<: *runtime
+  depends_on:
+    api:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping --destination=\"$$CELERY_HEALTH_NODE\" --timeout=5 | grep -q pong"]
+    interval: 30s
+    timeout: 15s
+    retries: 5
+    start_period: 60s
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chatbot
+      POSTGRES_USER: chatbot
+      POSTGRES_PASSWORD: ${COMPOSE_POSTGRES_PASSWORD:-chatbot-dev}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot -d chatbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-sample-chatbot-dev}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --appendfsync everysec --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      # The upstream image has bash but no curl/wget.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333; printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3; head -1 <&3 | grep -q 200'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    <<: *runtime
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:${COMPOSE_API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+
+  mineru:
+    <<: *runtime
+    command: ["mineru-api", "--host", "0.0.0.0", "--port", "8765"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/openapi.json', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  worker-parse:
+    <<: *worker
+    hostname: worker-parse
+    environment:
+      <<: *server-environment
+      CELERY_HEALTH_NODE: parse@worker-parse
+    command: ["sh", "-c", "exec celery -A app.workers.celery_app worker --loglevel=info --queues=parse --pool=prefork --concurrency=$${CELERY_PARSE_CONCURRENCY:-2} --hostname=parse@worker-parse --max-tasks-per-child=$${CELERY_WORKER_MAX_TASKS_PER_CHILD:-10} --time-limit=$$(($$MINERU_TIMEOUT + 60)) --soft-time-limit=$$(($$MINERU_TIMEOUT + 30))"]
+    depends_on:
+      api:
+        condition: service_healthy
+      mineru:
+        condition: service_healthy
+
+  worker-index:
+    <<: *worker
+    hostname: worker-index
+    environment:
+      <<: *server-environment
+      CELERY_HEALTH_NODE: index@worker-index
+    command: ["sh", "-c", "exec celery -A app.workers.celery_app worker --loglevel=info --queues=index --pool=prefork --concurrency=$${CELERY_INDEX_CONCURRENCY:-2} --hostname=index@worker-index --max-tasks-per-child=$${CELERY_WORKER_MAX_TASKS_PER_CHILD:-10} --time-limit=$${CELERY_INDEX_TIME_LIMIT:-600} --soft-time-limit=$$(($${CELERY_INDEX_TIME_LIMIT:-600} - 30))"]
+
+  worker-summary:
+    <<: *worker
+    hostname: worker-summary
+    environment:
+      <<: *server-environment
+      CELERY_HEALTH_NODE: summary@worker-summary
+    command: ["sh", "-c", "exec celery -A app.workers.celery_app worker --loglevel=info --queues=summary,celery --pool=prefork --concurrency=$${CELERY_WORKER_CONCURRENCY:-2} --hostname=summary@worker-summary --max-tasks-per-child=$${CELERY_WORKER_MAX_TASKS_PER_CHILD:-10} --time-limit=$$(($${CONVERSATION_SUMMARY_TIMEOUT_SECONDS:-30} + 30)) --soft-time-limit=$$(($${CONVERSATION_SUMMARY_TIMEOUT_SECONDS:-30} + 15))"]
+
+  beat:
+    <<: *runtime
+    command: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=info", "--schedule=/home/chatbot/beat/celerybeat-schedule"]
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - beat-state:/home/chatbot/beat
+
+  sidecar:
+    <<: *runtime
+    # Publish the demo here too: both processes use this network namespace so
+    # sidecar requests retain a loopback Host and the trust checks stay enabled.
+    ports:
+      - "127.0.0.1:${COMPOSE_SIDECAR_PORT:-8100}:${COMPOSE_SIDECAR_PORT:-8100}"
+      - "127.0.0.1:${COMPOSE_DEMO_PORT:-8501}:${COMPOSE_DEMO_PORT:-8501}"
+    env_file:
+      - path: .env.client
+        required: false
+    environment: &client-environment
+      CLIENT_ENV_FILE: /dev/null
+      CLIENT_SERVER_API_BASE_URL: http://api:8000
+      CLIENT_BACKEND_HOST: 0.0.0.0
+      CLIENT_BACKEND_PORT: ${COMPOSE_SIDECAR_PORT:-8100}
+      CLIENT_ALLOW_NON_LOOPBACK_BACKEND: "true"
+      CLIENT_TRUST_CHECKS_ENABLED: "true"
+      CLIENT_ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000,http://[::1]:3000,http://localhost:${COMPOSE_DEMO_PORT:-8501},http://127.0.0.1:${COMPOSE_DEMO_PORT:-8501}
+      CLIENT_PROFILE_ROOT: /home/chatbot/profile
+      CLIENT_SKILLS_ROOT: /home/chatbot/profile/skills
+      CLIENT_WORKSPACE_ROOTS: /home/chatbot/workspace
+      CLIENT_SANDBOX_MODE: "off"
+      CLIENT_MCP_CONFIG_PATH: ""
+      CLIENT_LOG_TO_FILE: "false"
+    command: ["uvicorn", "client_backend.main:app", "--host", "0.0.0.0", "--port", "${COMPOSE_SIDECAR_PORT:-8100}"]
+    volumes:
+      - client-profile:/home/chatbot/profile
+      - client-workspace:/home/chatbot/workspace
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; from client_backend.core.launch_token import read_launch_token; token = read_launch_token(); assert token; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:' + os.environ['CLIENT_BACKEND_PORT'] + '/auth/users', headers={'X-Kani-Client': token}), timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  demo:
+    <<: *runtime
+    network_mode: service:sidecar
+    env_file: []
+    environment:
+      <<: *client-environment
+      CHATBOT_API_BASE_URL: http://127.0.0.1:${COMPOSE_SIDECAR_PORT:-8100}
+      CHATBOT_WIDGET_WS_BASE_URL: ws://127.0.0.1:${COMPOSE_API_PORT:-8000}
+      STREAMLIT_SERVER_PORT: ${COMPOSE_DEMO_PORT:-8501}
+    command: ["streamlit", "run", "demo.py", "--server.address=0.0.0.0", "--server.port=${COMPOSE_DEMO_PORT:-8501}", "--server.headless=true", "--browser.gatherUsageStats=false"]
+    volumes:
+      - client-profile:/home/chatbot/profile:ro
+    depends_on:
+      sidecar:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['STREAMLIT_SERVER_PORT'] + '/_stcore/health', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+volumes:
+  postgres-data:
+  redis-data:
+  qdrant-data:
+  uploads:
+  staging:
+  models:
+  client-profile:
+  client-workspace:
+  beat-state:
