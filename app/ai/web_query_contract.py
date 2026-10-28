@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field
 
 Freshness = Literal["timeless", "recent", "as_of"]
+SearchTopic = Literal["general", "news"]
 
 #: Four-digit years only, on word boundaries. A bare ``5090`` inside a product
 #: name is not a year, so the range is anchored to plausible calendar years.
@@ -67,8 +68,8 @@ class WebSearchRequest(BaseModel):
         min_length=3,
         max_length=500,
         description=(
-            "The concrete fact or answer this search must produce. Used to rank "
-            "evidence, so state the goal, not the topic."
+            "The concrete fact or answer this search must produce. State the "
+            "evidence needed so you can assess whether the results answer it."
         ),
     )
     freshness: Freshness = Field(
@@ -76,6 +77,13 @@ class WebSearchRequest(BaseModel):
         description=(
             "'recent' for current/latest information, 'as_of' with an explicit "
             "end_date for a historical cutoff, 'timeless' otherwise."
+        ),
+    )
+    topic: SearchTopic = Field(
+        default="general",
+        description=(
+            "Source category, independent of freshness. Use general for facts, "
+            "results pages and documentation; news for news reporting."
         ),
     )
     start_date: date | None = Field(
@@ -113,6 +121,7 @@ class NormalizedWebSearch(BaseModel):
     locale: str | None
     include_domains: tuple[str, ...]
     max_results: int
+    topic: SearchTopic = "general"
 
 
 def normalize_web_search(
@@ -155,6 +164,7 @@ def normalize_web_search(
         query=query,
         objective=objective,
         freshness=request.freshness,
+        topic=request.topic,
         start_date=start_date,
         end_date=end_date,
         locale=_normalize_locale(request.locale),
@@ -175,7 +185,7 @@ def tavily_search_args(value: NormalizedWebSearch) -> dict[str, Any]:
         "max_results": value.max_results,
         "search_depth": "advanced",
         "include_raw_content": False,
-        "topic": "news" if value.freshness == "recent" else "general",
+        "topic": value.topic,
     }
     if value.start_date:
         args["start_date"] = value.start_date.isoformat()

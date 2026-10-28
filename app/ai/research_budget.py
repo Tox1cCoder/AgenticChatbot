@@ -48,6 +48,7 @@ import threading
 import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 from ..core.config import settings
@@ -391,6 +392,24 @@ def research_budget_from_state(payload: Any) -> ResearchBudget:
             raise ResearchAccountingUnreadable("a searched entry has a malformed shape")
         # Back to a tuple: `find_reuse` and `reserve_search` compare scopes by
         # equality, and a list would never match a caller's tuple.
+        # Canonical web scopes historically contained date objects and nested
+        # domain tuples. Normalize their JSON forms and add the category that
+        # the old freshness policy implicitly selected. Leave other callers'
+        # scopes alone.
+        if (
+            len(scope) in (6, 7)
+            and scope[0] in ("none", "timeless", "recent", "as_of")
+            and scope[4] in ("none", "figure", "comparison", "gallery")
+            and isinstance(scope[3], (str, list, tuple))
+        ):
+            scope = list(scope)
+            for index in (1, 2):
+                if isinstance(scope[index], date):
+                    scope[index] = scope[index].isoformat()
+            if isinstance(scope[3], (list, tuple)):
+                scope[3] = ",".join(str(domain) for domain in scope[3])
+            if len(scope) == 6:
+                scope.append("news" if scope[0] == "recent" else "general")
         prior_searches.append((frozenset(str(token) for token in tokens), tuple(scope)))
 
     prior_images: list[frozenset[str]] = []

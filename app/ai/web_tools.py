@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 WEB_SEARCH_DESCRIPTION = (
     "Search the web for source evidence. State a concrete query and objective. "
     "Use freshness='recent' for current information and freshness='as_of' with "
-    "end_date for a historical cutoff; never guess the current year. Results "
+    "end_date for a historical cutoff. Use the runtime year for current event seasons. "
+    "Use topic='general' for results pages, facts and documentation, and topic='news' "
+    "for news reporting; freshness does not select a category. Results "
     "have stable S# IDs: cite supported claims with [[source:S#]].\n\n"
     "Set visual_intent on the same call whenever the answer would show the subject "
     "rather than only describe it, and provide image_query naming the exact part, screen, "
@@ -33,9 +35,11 @@ WEB_SEARCH_DESCRIPTION = (
     "Each result lists only the sources that search newly admitted, with "
     "new_source_count and total_source_count. An empty list with a non-zero "
     "total means this search added nothing to evidence you already hold, not "
-    "that the web is empty. If failures reports source_quota_exhausted, this "
-    "turn's source budget is full: answer from the sources you already have "
-    "instead of searching again."
+    "that the web is empty. If results do not answer the objective, open a promising "
+    "page or make a targeted search for the missing evidence. max_results controls "
+    "this search, not the turn's total evidence capacity. If failures reports "
+    "source_quota_exhausted, the turn's total text-source capacity is full: use "
+    "web_open on promising sources or answer the supported portion with limitations."
 )
 
 WEB_OPEN_DESCRIPTION = (
@@ -81,6 +85,7 @@ def create_web_search_tool(*, tool_scope: str | None = None) -> StructuredTool:
         query: str,
         objective: str,
         freshness: str = "timeless",
+        topic: str = "general",
         start_date: Any = None,
         end_date: Any = None,
         locale: str | None = None,
@@ -101,6 +106,8 @@ def create_web_search_tool(*, tool_scope: str | None = None) -> StructuredTool:
             objective=objective,
             mode=session.mode,
             freshness=freshness,
+            topic=topic,
+            max_results=max_results,
             start_date=start_date,
             end_date=end_date,
             locale=locale,
@@ -156,9 +163,7 @@ def _project(bundle: Any, *, searches_used: int) -> str:
     """Expose public source evidence; candidate metadata remains session-private."""
 
     operation_ids = set(bundle.operation_source_ids)
-    public_sources = [
-        source for source in bundle.sources if source.source_id in operation_ids
-    ]
+    public_sources = [source for source in bundle.sources if source.source_id in operation_ids]
     payload = {
         "status": bundle.status,
         "mode": bundle.mode,

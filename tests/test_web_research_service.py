@@ -339,6 +339,8 @@ async def test_an_exhausted_text_quota_is_named_not_reported_as_an_empty_result(
     session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
 
     first = await session.search(_text_request("current T1 League of Legends roster"))
+    for index in range(13):
+        await session.search(_text_request(f"distinct subject {index}"))
     second = await session.search(_text_request("T1 2026 starting lineup announcement"))
 
     assert len(first.operation_source_ids) == 5
@@ -347,7 +349,8 @@ async def test_an_exhausted_text_quota_is_named_not_reported_as_an_empty_result(
     assert second.operation_source_ids == ()
     # The wasted provider round trip is the other half of the cost: a search
     # that cannot admit anything must not spend one.
-    assert text.calls == 1
+    assert len(session.source_registry.records) == 64
+    assert text.calls == 13
 
 
 @pytest.mark.asyncio
@@ -380,7 +383,8 @@ async def test_a_saturated_text_quota_still_lets_an_image_search_run() -> None:
     )
     session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
 
-    await session.search(_text_request("current T1 League of Legends roster"))
+    for index in range(13):
+        await session.search(_text_request(f"distinct subject {index}"))
     visual = await session.search(
         ResearchRequest(
             query="T1 official team photograph",
@@ -392,5 +396,5 @@ async def test_a_saturated_text_quota_still_lets_an_image_search_run() -> None:
     )
 
     assert "source_quota_exhausted" in [failure.code for failure in visual.failures]
-    assert visual.operation_source_ids == ("S6",), "the image page still gets admitted"
-    assert text.calls == 2, "the text provider still runs; images share the operation"
+    assert visual.operation_source_ids == ("S65",), "the image page still gets admitted"
+    assert text.calls == 13, "a saturated text store must not make another text-provider call"

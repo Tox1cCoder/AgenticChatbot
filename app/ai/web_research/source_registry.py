@@ -73,7 +73,9 @@ class SourceRegistry:
     def records(self) -> tuple[SourceRecord, ...]:
         return tuple(self._by_url.values())
 
-    def admit(self, candidates: Sequence[ProviderSource]) -> tuple[SourceRecord, ...]:
+    def admit(
+        self, candidates: Sequence[ProviderSource], *, max_new_sources: int | None = None
+    ) -> tuple[SourceRecord, ...]:
         """Admit unknown candidates and return only what this call created.
 
         The delta, not the whole registry: a caller that needs every record
@@ -88,7 +90,9 @@ class SourceRegistry:
             if url is None or url in self._by_url:
                 continue
             if len(self._by_url) >= self._max_sources:
-                continue
+                break
+            if max_new_sources is not None and len(admitted) >= max(0, max_new_sources):
+                break
             record = SourceRecord(
                 source_id=f"S{len(self._by_url) + 1}",
                 url=url,

@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
-from app.ai.web_query_contract import Freshness
+from app.ai.web_query_contract import Freshness, SearchTopic
 
 ResearchMode = Literal["none", "quick", "agentic"]
 VisualIntent = Literal["none", "figure", "comparison", "gallery"]
@@ -21,7 +21,7 @@ _DELIVERY_PATTERN = (
 )
 
 
-#: Text sources one turn may accumulate, by research depth.
+#: Text results requested per search, by research depth.
 _TEXT_SOURCE_LIMITS: dict[str, int] = {"none": 0, "quick": 5, "agentic": 8}
 #: Images the answer model may be shown, by the visual evidence it asked for.
 _IMAGE_LIMITS: dict[str, int] = {"none": 0, "figure": 4, "comparison": 4, "gallery": 6}
@@ -36,10 +36,10 @@ def image_capacity(mode: ResearchMode, visual_intent: VisualIntent) -> int:
 
 
 def source_capacity(mode: ResearchMode, visual_intent: VisualIntent) -> int:
-    """Text sources one mode may accumulate, plus that intent's image share.
+    """Per-search text ceiling plus that intent's image share.
 
     Only ``ResearchLimits.for_mode`` still calls this, and always with
-    ``visual_intent="none"`` -- so in practice it returns the text budget. The
+    ``visual_intent="none"`` -- so in practice it returns the search ceiling. The
     session owns registry capacity now: a text quota, a candidate-catalog
     quota, and headroom for page opens, none of which this function can see.
     """
@@ -63,6 +63,8 @@ class ResearchRequest(FrozenModel):
     objective: str = Field(min_length=3, max_length=500)
     mode: ResearchMode = "quick"
     freshness: Freshness = "timeless"
+    topic: SearchTopic = "general"
+    max_results: int = Field(default=5, ge=1)
     start_date: date | None = None
     end_date: date | None = None
     locale: str | None = Field(default=None, max_length=32)

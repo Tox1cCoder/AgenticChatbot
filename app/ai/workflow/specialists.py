@@ -696,7 +696,7 @@ class SpecialistFactory:
                         parsed_sources.append(SourceRecord.model_validate(record))
                     except Exception:
                         logger.warning("Ignored invalid carried web source")
-                web_research_session.source_registry.import_records(parsed_sources)
+                web_research_session.import_sources(parsed_sources)
 
         scope = SpecialistToolScope(
             agent=definition.agent,

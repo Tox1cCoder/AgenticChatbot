@@ -263,7 +263,7 @@ def test_locale_is_stripped_and_lowercased():
     assert normalized.locale == "en-gb"
 
 
-def test_tavily_args_map_a_recent_search_to_the_news_topic():
+def test_tavily_args_keep_current_general_searches_out_of_the_news_only_category():
     normalized = _normalize(
         WebSearchRequest(
             query="LCK roster changes",
@@ -278,7 +278,7 @@ def test_tavily_args_map_a_recent_search_to_the_news_topic():
         "max_results": 4,
         "search_depth": "advanced",
         "include_raw_content": False,
-        "topic": "news",
+        "topic": "general",
         "end_date": "2026-09-04",
     }
 

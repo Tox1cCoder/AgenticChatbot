@@ -213,7 +213,7 @@ class WebResearchSession:
         # Two explicit quotas, never one shared pool: text results used to be
         # admitted first and return their full budget, which discarded every
         # image page before the model saw one.
-        self._text_source_capacity = self.limits.max_sources
+        self._text_source_capacity = self.limits.max_total_text_sources
         self._image_catalog_capacity = self.service.max_candidate_catalog
         # Opens get headroom of their own. They are not counted against the
         # text quota, and without a reserve a saturated catalog silently
@@ -226,7 +226,7 @@ class WebResearchSession:
                 + self.limits.max_page_opens
             )
         )
-        self._admitted_text_sources = 0
+        self._text_source_ids: set[str] = set()
         self._admitted_image_sources = 0
         self._image_only_source_ids: set[str] = set()
         self._omitted_source_urls: set[str] = set()
@@ -269,6 +269,16 @@ class WebResearchSession:
                 )
         return bundle
 
+    def import_sources(self, records: Sequence[SourceRecord]) -> dict[str, str]:
+        """Restore carried citation records without resetting turn capacity.
+
+        Carried records lack an image/text admission tag, so conservatively
+        account for each as text evidence; never evict a previously citable ID.
+        """
+        mapping = self.source_registry.import_records(records)
+        self._text_source_ids.update(mapping.values())
+        return mapping
+
     async def _search(self, request: ResearchRequest) -> WebEvidenceBundle:
         # Both image fields are optional in the model-facing tool schema. A
         # partially specified visual request should still reach image search.
@@ -286,22 +296,23 @@ class WebResearchSession:
                 query=request.query,
                 objective=request.objective,
                 freshness=request.freshness,
+                topic=request.topic,
                 start_date=request.start_date,
                 end_date=request.end_date,
                 locale=request.locale,
                 include_domains=list(request.include_domains),
-                max_results=self.limits.max_sources,
+                max_results=request.max_results,
             ),
             now=self.service.now(),
             configured_max_results=self.limits.max_sources,
         )
-        # The text quota is per turn, not per search. Once it is full every
-        # later search returns results the registry silently drops, and an
-        # empty delta reported as ``status=success, failures=[]`` is
-        # indistinguishable from a provider that genuinely found nothing -- so
-        # the model rewords, searches again, and finally answers with no
-        # citation because it believes it has no evidence. Name it instead.
-        text_room = max(0, self._text_source_capacity - self._admitted_text_sources)
+        # Per-search result counts must not consume the entire turn's citation
+        # store. Keep room for targeted follow-ups, but name genuine exhaustion.
+        text_room = max(0, self._text_source_capacity - len(self._text_source_ids))
+        if text_room:
+            normalized = normalized.model_copy(
+                update={"max_results": min(normalized.max_results, text_room)}
+            )
         quota_failures: tuple[ResearchFailure, ...] = ()
         if text_room == 0:
             quota_failures = (
@@ -324,11 +335,12 @@ class WebResearchSession:
 
         search_scope = (
             normalized.freshness,
-            normalized.start_date,
-            normalized.end_date,
-            normalized.include_domains,
+            normalized.start_date.isoformat() if normalized.start_date else None,
+            normalized.end_date.isoformat() if normalized.end_date else None,
+            ",".join(normalized.include_domains),
             request.visual_intent,
             request.image_query or "",
+            normalized.topic,
         )
         refusal = self.budget.reserve_search(normalized.query, scope=search_scope)
         if refusal is not None:
@@ -345,12 +357,18 @@ class WebResearchSession:
                 ),
             )
 
-        text_task = asyncio.create_task(
-            self._call_chain(
-                self.resolver.text,
-                operation="search",
-                invoke=lambda provider: provider.search(normalized, query_index=operation_index),
+        text_task = (
+            asyncio.create_task(
+                self._call_chain(
+                    self.resolver.text,
+                    operation="search",
+                    invoke=lambda provider: provider.search(
+                        normalized, query_index=operation_index
+                    ),
+                )
             )
+            if text_room
+            else None
         )
         wants_images = request.visual_intent != "none"
         image_task = (
@@ -365,7 +383,7 @@ class WebResearchSession:
             else None
         )
         try:
-            text_result = await text_task
+            text_result = await text_task if text_task is not None else ((), (), ())
             image_result = await image_task if image_task is not None else ((), (), ())
         except BaseException:
             # Cancelled, or failed, while awaiting the text half: the image half
@@ -404,15 +422,33 @@ class WebResearchSession:
         self._admitted_image_sources += len(image_admitted)
         self._image_only_source_ids.update(record.source_id for record in image_admitted)
 
-        text_admitted = self.source_registry.admit(tuple(text_records)[:text_room])
-        self._admitted_text_sources += len(text_admitted)
+        # Count valid unique pages, rather than payload positions. Already
+        # admitted image/open pages can become text evidence without a new S#.
+        text_candidates: list[ProviderSource] = []
+        text_urls: set[str] = set()
+        for candidate in text_records:
+            url = canonicalize_public_url(candidate.url)
+            record = self.source_registry.resolve(url) if url else None
+            if not url or url in text_urls:
+                continue
+            if record is not None and record.source_id in self._text_source_ids:
+                continue
+            if len(text_candidates) >= min(normalized.max_results, text_room):
+                continue
+            text_urls.add(url)
+            text_candidates.append(candidate)
+        text_admitted = self.source_registry.admit(text_candidates, max_new_sources=text_room)
+        for candidate in text_candidates:
+            record = self.source_registry.resolve(candidate.url)
+            if record is not None:
+                self._text_source_ids.add(record.source_id)
         for candidate in text_records:
             record = self.source_registry.resolve(candidate.url)
             if record is None:
                 # By distinct page: a provider that keeps returning the same
                 # page past the quota lost one source, not one per search.
                 self._omitted_source_urls.add(candidate.url)
-            else:
+            elif record.source_id in self._text_source_ids:
                 # A page both a text search and an image cohort returned is a
                 # text source: the image cohort merely got there first.
                 self._image_only_source_ids.discard(record.source_id)
@@ -807,9 +843,7 @@ class WebResearchSession:
 
         keep = set(keys)
         evicted = [
-            (key, prepared)
-            for key, prepared in self._prepared_by_key.items()
-            if key not in keep
+            (key, prepared) for key, prepared in self._prepared_by_key.items() if key not in keep
         ]
         for key, prepared in evicted:
             del self._prepared_by_key[key]
@@ -845,9 +879,7 @@ class WebResearchSession:
 
         return self.published_sources()
 
-    def published_sources(
-        self, cited_source_ids: Sequence[str] = ()
-    ) -> tuple[SourceRecord, ...]:
+    def published_sources(self, cited_source_ids: Sequence[str] = ()) -> tuple[SourceRecord, ...]:
         """Sources worth showing a reader.
 
         Text pages, opened pages, image pages backing an active image, and any
@@ -858,7 +890,7 @@ class WebResearchSession:
         whose candidate never entered the vision window, and publishing them
         buries the handful of sources the answer actually rests on. But the
         model is *offered* all of them in its evidence message, so it can cite
-        one -- and grounding renders that citation as a numbered link. Dropping
+        one -- and grounding renders that citation as a source link. Dropping
         the cited page would leave the reader a ``[1]`` pointing at nothing.
         """
 

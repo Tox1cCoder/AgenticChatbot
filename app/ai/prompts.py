@@ -145,15 +145,17 @@ def build_rich_response_guidance(
 WEB_RESEARCH_SNIPPET = """
 
 Search effort:
-- Match the number of searches to the question, not to how thorough you want the answer to sound. One fact is one search. A comparison is one search per side. Only a genuinely multi-part or contested question needs more than that.
+- Match search effort to the evidence needed. One focused search may answer a fact, but a full result list is not proof that the question has been answered. Continue when a specific requested fact is still missing.
 - A thorough answer and a large number of searches are different things. Depth comes from explaining what you found, not from gathering more of it.
 - Do not search for something you reliably know and that does not change. Search when the answer moves over time, when you are actually uncertain, or when the user is owed a citable source.
 - Every search result carries `searches_used`, the running count for this turn. Read it. The more this turn has already spent, the higher the bar for the next one.
 - Before searching again, name the specific question your gathered sources do not answer. If you cannot name one, stop searching and write the answer.
-- A follow-up search must ask something genuinely different. Rewording a text query this turn already ran returns the same sources and is refused. If an earlier search gathered text only and a visual would help, you may reuse the subject once with `visual_intent` and a concrete `image_query` to gather images.
-- Prefer `web_open` on a source you already found over another `web_search`. Reading the right page usually answers more than a fourth query.
+- A follow-up may target the same unanswered question with a more specific query, date, source domain or source category. Do not repeat unchanged queries; exact and near-duplicate calls are refused. If an earlier search gathered text only and a visual would help, you may reuse the subject once with `visual_intent` and a concrete `image_query` to gather images.
+- Use `web_open` when a promising page's snippet is incomplete. When results are off-topic, stale or the wrong evidence type, search for the missing evidence rather than repeatedly opening unsuitable pages. Prefer authoritative sources where available.
+- Choose `topic='general'` for facts, results pages and documentation, including current information; use `topic='news'` for news reporting. Freshness and source category are independent.
+- Check that evidence supports the requested fact: a preview, prediction, ranking or scheduled fixture does not establish a completed result. For a current event season, include the year from the runtime date context. Keep live states, completed results and future schedules distinct.
 - Corroborate across sources when a claim is contested, consequential, or rests on one thin source -- not as a routine second pass over every fact.
-- Nothing limits how many times you may search. The judgement is yours, which is exactly why it has to be made deliberately rather than by reflex."""
+- Stop when the requested answer has adequate support or a real execution or source-capacity limit is reported. Answer the supported portion and state specific remaining gaps; do not invent facts or imply an exhausted search proves no information exists."""
 
 
 CHAT_SYSTEM_PROMPT = (
@@ -300,11 +302,11 @@ Web work:
 - Express the user's goal as a concrete objective.
 - Use freshness="recent" for current/latest requests and freshness="as_of"
   with an explicit date for historical cutoffs.
-- Search first. Open only the few URLs whose snippets cannot answer the question.
+- Search first. Open promising URLs whose snippets are incomplete; refine the search when the pages do not address the requested facts.
 - Every web_open call must include the exact question to extract.
 - Stop when independent sources support the answer; do not repeat an unchanged query.
 
-The current date is given to you in the runtime time context above, and the server anchors every search against it. Never look the date up before searching, and never write a year into a query from memory — state the freshness intent and let the server supply the year.
+The current date is given to you in the runtime time context above, and the server anchors temporal bounds against it. Never look the date up before searching. When a season or event year matters, include the year from that runtime context, rather than from memory; the server repairs stale years for recent searches but does not add a missing event year.
 - For site structure or URL discovery, discover and use a site mapping tool.
 - For bounded site or documentation research across multiple pages, discover and use a crawl tool with narrow depth and limit.
 
@@ -549,7 +551,7 @@ YOUR TASK:
 3. If they are INCOMPLETE: you may call additional tools to fill gaps (read each tool's description to choose appropriately)
 4. AVOID repeating the exact same tool call with identical arguments
 5. If a result is only tool discovery output, use the discovered tool instead of stopping at the search results
-6. If a search result's snippet does not carry the fact you need, open that URL with the exact question rather than searching again
+6. Open a promising source with the exact question when its snippet is incomplete. Refine the search when the results are off-topic, stale or the wrong evidence type.
 7. Stop when independent sources support the answer; do not repeat an unchanged query.
 
 CITATION FORMAT:
