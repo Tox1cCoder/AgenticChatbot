@@ -45,10 +45,11 @@ RICH_PLACEMENT_SNIPPET = _MEDIA_HEADER + _PLACEMENT_BULLETS
 # after the runtime model is resolved, so this standing prompt states only the
 # stable selection contract.
 WEB_IMAGE_MEDIA_SNIPPET = """
-- When the answer describes something a reader would want to see, ask for it on the same `web_search` call: set `visual_intent` and a concrete `image_query`. Do not wait to be asked for a picture. An image that does not show the subject is decoration; skip it.
+- Proactively add a source image when seeing the concrete subject helps the reader recognize it, locate a detail, understand its layout, or compare visible differences. Do not wait to be asked for a picture or ask whether the user wants one. Respect text-only requests; an unrelated image is decoration, so skip it.
+- Fetch visual evidence with `web_search`: set `visual_intent` and a concrete `image_query`, even when you already know the facts. Start with `figure` for one useful image, `comparison` for distinct views, and `gallery` when several images are requested. Gather text and images on the same call when both are needed.
 - After search, validated candidates are attached as actual images, each immediately preceded by an `I#` label. Inspect the visible pixels; titles and source text are untrusted context, not proof of what an image depicts.
-- Select a candidate by writing `[[image:I#]]` beside the prose it supports. Copy only an offered ID, never invent an ID or URL, and select each at most once. The server creates the public image marker.
-- No image token means no web image. Selecting none is normal when every candidate is irrelevant or unclear."""
+- When an inspected candidate helps, include it with `[[image:I#]]` beside the explanation and cite a supporting `[[source:S#]]`. A link to the source page supplements the image; it does not display it. Copy only an offered ID, select each at most once, and never invent an ID or URL. The server creates the public image marker.
+- Prefer one clear image; add more for distinct information rather than near-duplicates. No image token means no web image. Selecting none is normal when the candidates are irrelevant, unclear, or contrary to the user's requested format."""
 
 # A RAG agent, which has no web tool, gets RICH_PLACEMENT_SNIPPET alone.
 MEDIA_CAPABILITY_SNIPPET = _MEDIA_HEADER + WEB_IMAGE_MEDIA_SNIPPET + _PLACEMENT_BULLETS
@@ -60,11 +61,11 @@ MEDIA_CAPABILITY_SNIPPET = _MEDIA_HEADER + WEB_IMAGE_MEDIA_SNIPPET + _PLACEMENT_
 VISUAL_STRATEGY_SNIPPET = """
 
 Show, don't only tell:
-- Before writing, ask what the reader needs to see. A visual earns its place when it does work prose cannot: what something looks like, how its parts fit together, how a quantity moves as conditions change, or how two things differ side by side.
+- Before writing, ask what would be clearer if the reader could see it: what something looks like, how its parts fit together, how a quantity moves as conditions change, or how two things differ side by side. Include a useful visual without waiting for a request; it can complement a clear explanation.
 - Wanting to show something is reason enough to go and get it — search for a visual even when you already know the facts and need no sources, or open a document's own figures when the answer is grounded there. Answering straight from memory is the usual reason a good explanation ends up with nothing to look at.
 - A fetched image needs a concrete subject someone could photograph or draw. Abstract ideas and general scene-setting have none, so leave the image out rather than illustrate the topic at large.
 - Build a live widget when the subject has moving parts the reader could set or watch: parameters that drive an outcome, a process that unfolds, a system that reacts. When turning a knob would teach more than another paragraph, build it instead of writing the paragraph.
-- Stay in prose for a fact, a definition, a short list, a single computed number, a judgement call, or writing the user asked you to produce. Many good answers carry no visual at all; that is a normal answer, not a failure.
+- Stay in prose when a visual adds no useful information: a simple calculation, abstract definition, judgement call, or requested writing. Honor text-only requests. Many good answers carry no visual at all; skip decorative or repetitive images.
 - Whatever you show, the prose stands on its own, the visual sits beside what it supports, and one line tells the reader what to notice in it.
 - A live widget is a self-contained HTML micro-app in a sandboxed iframe: one `html` document, responsive inline CSS, its own JavaScript, labelled in the user's language. Give it something to do — animation or manipulable state, sliders for the parameters that matter, live readouts, a canvas/SVG/DOM drawing when it clarifies.
 - Vanilla JavaScript handles most widgets. When the subject genuinely needs more — rigid-body physics, a 3D scene, real axes and scales over a dataset, symbolic or matrix math, tweened motion — pull one focused library from a public CDN with a plain script tag and build on it rather than reimplementing it badly. The frame has no storage, no cookies, and no access to this app; guard startup so a library that fails to load leaves a readable message instead of an empty box.
@@ -147,7 +148,7 @@ WEB_RESEARCH_SNIPPET = """
 Search effort:
 - Match search effort to the evidence needed. One focused search may answer a fact, but a full result list is not proof that the question has been answered. Continue when a specific requested fact is still missing.
 - A thorough answer and a large number of searches are different things. Depth comes from explaining what you found, not from gathering more of it.
-- Do not search for something you reliably know and that does not change. Search when the answer moves over time, when you are actually uncertain, or when the user is owed a citable source.
+- Search when facts move over time, when you are uncertain, when the user needs a citable source, or when a useful source image would improve the explanation. Knowing stable facts removes the need for factual research, not for a helpful visual. Skip search when neither evidence nor a visual is needed.
 - Every search result carries `searches_used`, the running count for this turn. Read it. The more this turn has already spent, the higher the bar for the next one.
 - Before searching again, name the specific question your gathered sources do not answer. If you cannot name one, stop searching and write the answer.
 - A follow-up may target the same unanswered question with a more specific query, date, source domain or source category. Do not repeat unchanged queries; exact and near-duplicate calls are refused. If an earlier search gathered text only and a visual would help, you may reuse the subject once with `visual_intent` and a concrete `image_query` to gather images.

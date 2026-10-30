@@ -47,9 +47,13 @@ def inject_latest_web_evidence(
     lines.extend(_source_line(source) for source in sources)
     if image_blocks:
         lines.append(
-            "Inspect each labeled image. Select only relevant visible evidence with "
-            "[[image:I#]]; selecting none is valid. Every answer that selects an image "
-            "must also cite at least one supporting source with [[source:S#]]."
+            "Inspect each labeled image. When a candidate makes the answer clearer, "
+            "include it with [[image:I#]] beside the explanation, even if the user did "
+            "not ask for images. Prefer one clear image; add more for distinct useful "
+            "views. A source-page link alone does not display an image. Select none "
+            "if the candidates do not help or the user requested text only. Every "
+            "answer that selects an image must also cite at least one supporting "
+            "source with [[source:S#]]."
         )
         target = session.latest_image_query or session.latest_image_objective
         if target:
