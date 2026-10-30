@@ -915,12 +915,7 @@ class WebResearchSession:
     def latest_image_objective(self) -> str | None:
         return self._latest_image_objective
 
-    def model_evidence_blocks(self, *, supports_vision: bool) -> list[dict[str, Any]]:
-        if not supports_vision:
-            if self.prepared_images:
-                self.reason_codes.add("answer_model_not_vision_capable")
-            return []
-
+    def model_evidence_blocks(self) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         for candidate_id, prepared in self.prepared_images.items():
             record = prepared.record

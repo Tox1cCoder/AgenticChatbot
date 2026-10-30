@@ -26,8 +26,6 @@ def _source_line(source: Any) -> str:
 def inject_latest_web_evidence(
     messages: list[Any],
     session: Any,
-    *,
-    supports_vision: bool,
 ) -> list[Any]:
     """Replace the prior evidence message so retries cannot duplicate it."""
 
@@ -37,7 +35,7 @@ def inject_latest_web_evidence(
         if not bool((getattr(message, "additional_kwargs", None) or {}).get(_EVIDENCE_MARKER))
     ]
     sources = session.source_registry.records
-    image_blocks = session.model_evidence_blocks(supports_vision=supports_vision)
+    image_blocks = session.model_evidence_blocks()
     if not sources and not image_blocks:
         return retained
 

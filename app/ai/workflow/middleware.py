@@ -405,24 +405,12 @@ class RequestBudgetMiddleware(AgentMiddleware):
 class WebEvidenceMiddleware(AgentMiddleware):
     """Attach the latest validated web evidence for the resolved model attempt."""
 
-    def __init__(
-        self,
-        *,
-        session: Any,
-        runtime_config_provider: Callable[[], ResolvedRuntimeModelConfig | None],
-    ) -> None:
+    def __init__(self, *, session: Any) -> None:
         super().__init__()
         self._session = session
-        self._runtime_config_provider = runtime_config_provider
 
     async def awrap_model_call(self, request: Any, handler: Any) -> Any:
-        config = self._runtime_config_provider()
-        supports_vision = bool(
-            config is not None and config.capabilities.get("supports_vision", False)
-        )
-        messages = inject_latest_web_evidence(
-            list(request.messages), self._session, supports_vision=supports_vision
-        )
+        messages = inject_latest_web_evidence(list(request.messages), self._session)
         return await handler(request.override(messages=messages))
 
 
@@ -794,12 +782,7 @@ def build_specialist_middleware(
     ]
 
     if web_research_session is not None:
-        stack.append(
-            WebEvidenceMiddleware(
-                session=web_research_session,
-                runtime_config_provider=lambda: runtime_model.runtime_config,
-            )
-        )
+        stack.append(WebEvidenceMiddleware(session=web_research_session))
 
     if preflight is not None:
         stack.append(

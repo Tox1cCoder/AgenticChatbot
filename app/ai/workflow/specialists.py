@@ -876,6 +876,9 @@ class SpecialistFactory:
             if rich_items:
                 metadata["_rich_item_candidates"] = list(rich_items)
                 metadata["_inline_rich_response_v1"] = True
+                # Web grounding selects from the specialist's private image
+                # evidence, independently of the earlier tool inventory.
+                metadata["_presented_rich_image_ids"] = [item["id"] for item in rich_items]
             if grounding.warnings:
                 metadata["web_grounding_warnings"] = list(grounding.warnings)
         response = AgentResponse(

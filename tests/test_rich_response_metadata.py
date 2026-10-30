@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+from app.ai.graph import MultiAgentWorkflow
+from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.core.config import settings
 from app.core.response_constants import build_bot_metadata
 from app.core.rich_image_selection import (
@@ -19,6 +21,70 @@ from app.schemas.workflow import WorkflowResponse, WorkflowResponseMessage
 @pytest.fixture(autouse=True)
 def _enable_inline_rich_response_for_contract_tests(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_grounded_image_survives_context_tool_candidates_and_replay(replay):
+    image = {
+        "id": "image:web:selected",
+        "type": "image",
+        "display_policy": "inline_only",
+        "alt_text": "Selected image",
+        "payload": {"url": "https://img.test/selected.png", "mime_type": "image/png"},
+    }
+    tool = {
+        "id": "tool:call-1",
+        "type": "tool_render",
+        "display_policy": "inline_or_append",
+        "payload": {"render": {"version": 1, "type": "json", "data": {"value": 1}}},
+    }
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id="chat_agent",
+        message=AgentMessage(
+            role=MessageRole.ASSISTANT, content="See this. <!--rich:image:web:selected-->"
+        ),
+        metadata={"_rich_item_candidates": [image]},
+    )
+    state = {"context": {"inline_rich_response_v1": True, "rich_item_candidates": [tool]}}
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    workflow._merge_tool_artifacts(state, response)
+    if replay:
+        workflow._merge_tool_artifacts(state, response)
+    metadata = build_bot_metadata(response)
+
+    assert [item["id"] for item in metadata["rich_items"]] == [image["id"], tool["id"]]
+    assert metadata["rich_reference_warnings"] == []
+
+
+def test_conflicting_candidate_ids_are_not_rebound_to_other_images():
+    image = {
+        "id": "image:web:selected",
+        "type": "image",
+        "display_policy": "inline_only",
+        "alt_text": "Selected image",
+        "payload": {"url": "https://img.test/selected.png", "mime_type": "image/png"},
+    }
+    conflicting = {**image, "payload": {**image["payload"], "url": "https://img.test/other.png"}}
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id="chat_agent",
+        message=AgentMessage(
+            role=MessageRole.ASSISTANT, content="See this. <!--rich:image:web:selected-->"
+        ),
+        metadata={"_rich_item_candidates": [image]},
+    )
+
+    MultiAgentWorkflow.__new__(MultiAgentWorkflow)._merge_tool_artifacts(
+        {"context": {"inline_rich_response_v1": True, "rich_item_candidates": [conflicting]}},
+        response,
+    )
+    metadata = build_bot_metadata(response)
+
+    assert len(metadata["rich_items"]) == 1
+    assert metadata["rich_items"][0]["payload"]["url"] == "https://img.test/selected.png"
+    assert metadata["rich_reference_warnings"] == []
 
 
 def test_build_bot_metadata_persists_only_inline_selected_images():

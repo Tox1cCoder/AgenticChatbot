@@ -29,13 +29,12 @@ class _Session:
     latest_image_query = "full T1 League of Legends team photo"
     latest_image_objective = "identify the complete current roster"
 
-    def __init__(self, *, records=()) -> None:
+    def __init__(self, *, records=(), images=True) -> None:
         self.source_registry = SimpleNamespace(records=records)
-        self.capability_calls: list[bool] = []
+        self.images = images
 
-    def model_evidence_blocks(self, *, supports_vision: bool):
-        self.capability_calls.append(supports_vision)
-        if not supports_vision:
+    def model_evidence_blocks(self):
+        if not self.images:
             return []
         return [
             {
@@ -105,9 +104,7 @@ async def test_candidate_pixels_are_injected_before_budget_preflight() -> None:
     config = _config(supports_vision=True)
     preflight_messages: list[list] = []
     provider_messages: list[list] = []
-    evidence = WebEvidenceMiddleware(
-        session=session, runtime_config_provider=lambda: config
-    )
+    evidence = WebEvidenceMiddleware(session=session)
 
     async def preflight(request, _runtime_config):
         preflight_messages.append(request.messages)
@@ -134,16 +131,16 @@ async def test_candidate_pixels_are_injected_before_budget_preflight() -> None:
 def test_evidence_replacement_is_idempotent() -> None:
     session = _Session()
     once = inject_latest_web_evidence(
-        [HumanMessage(content="question")], session, supports_vision=True
+        [HumanMessage(content="question")], session
     )
-    twice = inject_latest_web_evidence(once, session, supports_vision=True)
+    twice = inject_latest_web_evidence(once, session)
 
     assert len(twice) == 2
     assert _image_urls(twice) == ["data:image/png;base64,Ymx1ZQ=="]
 
 
 @pytest.mark.asyncio
-async def test_text_fallback_receives_no_candidate_ids_or_pixels() -> None:
+async def test_fallback_keeps_candidate_pixels_despite_cached_capability() -> None:
     fallback = RuntimeFallbackConfig(
         provider="fallback",
         model="text-model",
@@ -165,9 +162,7 @@ async def test_text_fallback_receives_no_candidate_ids_or_pixels() -> None:
         model_request=None,
     )
     session = _Session()
-    evidence = WebEvidenceMiddleware(
-        session=session, runtime_config_provider=lambda: runtime.runtime_config
-    )
+    evidence = WebEvidenceMiddleware(session=session)
     attempts: list[tuple[str, list]] = []
 
     async def provider(request):
@@ -182,9 +177,9 @@ async def test_text_fallback_receives_no_candidate_ids_or_pixels() -> None:
     await runtime.awrap_model_call(_request(), after_runtime)
 
     fallback_messages = attempts[1][1]
-    assert _image_urls(fallback_messages) == []
-    assert "candidate I" not in _content_text(fallback_messages)
-    assert session.capability_calls == [True, False]
+    assert _image_urls(fallback_messages) == ["data:image/png;base64,Ymx1ZQ=="]
+    assert "Image candidate I2" in _content_text(fallback_messages)
+    assert len(fallback_messages) == 2
 
 
 def test_evidence_middleware_is_between_runtime_and_preflight() -> None:
@@ -226,7 +221,7 @@ def test_search_snippets_are_not_repeated_but_an_opened_page_survives() -> None:
     )
 
     text = _content_text(
-        inject_latest_web_evidence([HumanMessage(content="q")], session, supports_vision=False)
+        inject_latest_web_evidence([HumanMessage(content="q")], session)
     )
 
     assert "S1: Page S1 | https://example.test/s1" in text
@@ -239,7 +234,7 @@ def test_the_literal_image_target_reaches_the_model_with_the_pixels() -> None:
     session = _Session(records=(_source("S1", status="search_result", snippet="x"),))
 
     text = _content_text(
-        inject_latest_web_evidence([HumanMessage(content="q")], session, supports_vision=True)
+        inject_latest_web_evidence([HumanMessage(content="q")], session)
     )
 
     assert "IMAGE TARGET: full T1 League of Legends team photo" in text
@@ -252,17 +247,17 @@ def test_a_candidate_label_carries_only_server_known_facts() -> None:
     session = _Session()
 
     text = _content_text(
-        inject_latest_web_evidence([HumanMessage(content="q")], session, supports_vision=True)
+        inject_latest_web_evidence([HumanMessage(content="q")], session)
     )
 
     assert "Image candidate I2; source S1; 1920x1080; domain www.t1.gg." in text
 
 
 def test_no_image_target_line_without_image_blocks() -> None:
-    session = _Session(records=(_source("S1", status="search_result", snippet="x"),))
+    session = _Session(records=(_source("S1", status="search_result", snippet="x"),), images=False)
 
     text = _content_text(
-        inject_latest_web_evidence([HumanMessage(content="q")], session, supports_vision=False)
+        inject_latest_web_evidence([HumanMessage(content="q")], session)
     )
 
     assert "IMAGE TARGET" not in text

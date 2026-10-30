@@ -521,10 +521,35 @@ class MultiAgentWorkflow(
                 response.metadata = {}
             response.metadata["_inline_rich_response_v1"] = True
             if rich_candidates:
-                response.metadata["_rich_item_candidates"] = list(rich_candidates)
+                # Grounded selections already belong to the response. Context
+                # candidates add tool output; they must not replace those
+                # selections or rebind an inspected ID to different content.
+                existing = response.metadata.get("_rich_item_candidates")
+                existing = existing if isinstance(existing, list) else []
+                merged: dict[str, dict[str, Any]] = {}
+                for candidate in [*existing, *rich_candidates]:
+                    if not isinstance(candidate, dict):
+                        continue
+                    candidate_id = candidate.get("id")
+                    if not isinstance(candidate_id, str) or not candidate_id:
+                        continue
+                    if candidate_id in merged:
+                        if merged[candidate_id] != candidate:
+                            logger.warning(
+                                "Ignored conflicting rich-item candidate %s", candidate_id
+                            )
+                        continue
+                    merged[candidate_id] = candidate
+                response.metadata["_rich_item_candidates"] = list(merged.values())
             presented_image_ids = context.get("_presented_rich_image_ids")
             if isinstance(presented_image_ids, list):
-                response.metadata["_presented_rich_image_ids"] = list(presented_image_ids)
+                grounded_image_ids = response.metadata.get("_presented_rich_image_ids")
+                grounded_image_ids = (
+                    grounded_image_ids if isinstance(grounded_image_ids, list) else []
+                )
+                response.metadata["_presented_rich_image_ids"] = list(
+                    dict.fromkeys([*grounded_image_ids, *presented_image_ids])
+                )
 
     def _attach_final_agent_metadata(
         self,

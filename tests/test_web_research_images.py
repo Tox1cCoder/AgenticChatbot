@@ -129,7 +129,7 @@ async def test_validated_bytes_become_candidates_and_duplicate_digests_collapse(
     session, bundle, _service = await _session((b"same", b"same", b"different"))
 
     assert [image.candidate_id for image in bundle.images] == ["I1", "I2"]
-    assert session.model_evidence_blocks(supports_vision=True)[1]["image_url"]["url"].startswith(
+    assert session.model_evidence_blocks()[1]["image_url"]["url"].startswith(
         "data:image/png;base64,"
     )
 
@@ -189,11 +189,14 @@ async def test_finish_preserves_authored_order_and_releases_unselected() -> None
 
 
 @pytest.mark.asyncio
-async def test_text_only_model_gets_no_candidate_ids_or_pixels() -> None:
+async def test_all_prepared_candidates_supply_labels_and_pixels() -> None:
     session, _bundle, _service = await _session((b"one", b"two"))
 
-    assert session.model_evidence_blocks(supports_vision=False) == []
-    assert "answer_model_not_vision_capable" in session.reason_codes
+    blocks = session.model_evidence_blocks()
+
+    assert [block["type"] for block in blocks] == ["text", "image_url", "text", "image_url"]
+    assert blocks[0]["text"].startswith("Image candidate I1")
+    assert blocks[2]["text"].startswith("Image candidate I2")
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,14 @@ def test_persistence_surface_has_reasoning_effort() -> None:
     assert "reasoning_effort" in inspect.signature(AgentModelConfigRepository.upsert).parameters
 
 
+def test_custom_openai_model_does_not_require_a_vision_name_match() -> None:
+    service, _ = _service()
+
+    capabilities = service._build_capabilities("openai", "custom-chat-model", {})
+
+    assert capabilities["supports_vision"] is True
+
+
 def test_explicit_null_survives_patch_serialization() -> None:
     patch = AgentModelConfigPatch(reasoning_effort=None)
     assert patch.model_dump(exclude_unset=True) == {"reasoning_effort": None}
