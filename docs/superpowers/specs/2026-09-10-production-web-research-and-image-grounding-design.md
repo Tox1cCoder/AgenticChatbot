@@ -186,7 +186,7 @@ Metadata-only selection is insufficient. Every candidate offered for model selec
 
 The model may select only IDs from the offered set by emitting `[[image:<candidate-id>]]`. Streaming and finalization reject any other ID, translate valid candidate tokens to the corresponding server-owned rich-item markers, and ensure the selected public registry contains those items. The server, not the model, creates final rich-item IDs and records. Selection is derived once from the canonical grounding result; middleware does not keep a second selection parser. Ordered deduplication preserves the model-authored token order.
 
-Image selection is enabled only when the configured answer model and provider adapter accept image inputs. If they do not, the service returns text and source evidence without offering metadata-only image selection. It records a stable `answer_model_not_vision_capable` reason so the UI and operators can distinguish capability limits from provider failure.
+Updated 2026-10-29 at the user's request: remove model-name capability checks. Prepared image labels and pixels are sent to the selected answer model on every attempt, including fallback; cached capability flags do not suppress web evidence. Providers reject unsupported inputs through the existing error handling. Never offer metadata-only image selection.
 
 ### Balanced cardinality policy
 

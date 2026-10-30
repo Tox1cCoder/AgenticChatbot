@@ -1,12 +1,16 @@
 # Rich answer visuals: revised backend and frontend implementation plan
 
-> For implementation: use `superpowers:executing-plans` to work through the checked tasks in dependency order. This document updates the reviewed design; it does not authorize or record application implementation.
+> For implementation: use `superpowers:executing-plans` to work through the outstanding tasks in dependency order. This document records the reviewed design and subsequent verification; future implementation tasks do not themselves authorize application changes.
 
 Date: 2026-10-26
 
-Scope: the server backend and contract for the separate frontend, as selected by the user. Streamlit is inspected as an existing consumer of that contract. The separate frontend source and a running production conversation were not available in this review.
+Scope: the server backend and contract for the separate frontend, as selected by the user. Streamlit is inspected as an existing consumer of that contract. The separate frontend source remains unavailable. The supplied LangSmith conversation and its user's stored model settings have now been inspected; see the final verification section.
 
-Status: revised after the codebase review on 2026-10-26. All seven review findings are addressed below. No application behavior has been changed.
+Status: revised after the codebase review on 2026-10-26. All seven original review findings are addressed in the proposed design. Subsequent local candidate-preservation repairs are recorded below; the proposed new visual types remain unimplemented.
+
+Rechecked: 2026-10-29 against the current codebase after the report that even explicit image requests produce links. Task 0 has trace, stored-catalog, and runtime-resolution evidence that `supports_vision=False` suppressed retrieved images before the answer-model call. The user subsequently requested removal of the allowlist. Both vision name checks and the web-evidence capability gate have now been removed; live delivery verification remains outstanding.
+
+Subsequent repair: the user authorized code fixes after the trace investigation, then requested removal of the model-specific capability patch. That patch and its helper/tests have been removed. Only the model-independent candidate merge and presentation-allowlist repairs remain. The proposed new visual types and external frontend acceptance work remain future work.
 
 **Goal:** support compact static visuals and labelled source figures without losing selected images, duplicating tool renders, or weakening readable fallback answers.
 
@@ -24,6 +28,8 @@ Status: revised after the codebase review on 2026-10-26. All seven review findin
 - First delivery covers public answering specialists; private Planning workers retain their existing image-release policy.
 
 ## Recommendation
+
+First restore and verify the existing single-image answering path. The new static types and figure-composition tool are not prerequisites for displaying a retrieved image. A link-only answer can originate before rendering, and adding frontend components alone cannot repair a missing retrieval request, missing model selection, or overwritten image descriptor. Treat that repair as an independently verifiable deliverable before expanding the visual contract.
 
 Extend the existing inline rich-response system with lightweight static answer visuals and model-authored figure composition. Keep Markdown for ordinary prose and tables, HTML widgets for interactions, and canvas for standalone deliverables.
 
@@ -85,7 +91,7 @@ Keep those checks and add quality cases based on the supplied examples. Passing 
 
 | Review finding | Current code behavior | Required change |
 | --- | --- | --- |
-| Selected images can be overwritten | `app/ai/graph.py:_merge_tool_artifacts` replaces `_rich_item_candidates` with context candidates, including when grounding already supplied selected web images. | Merge candidate sources by stable ID, preserving selected images and authored order. |
+| Selected images could be overwritten | At the original reviewed revision, `app/ai/graph.py:_merge_tool_artifacts` replaced `_rich_item_candidates` with context candidates. The current working tree merges by stable ID and preserves grounded descriptors/order. | Retain the existing local repair and regressions; shared candidate construction remains outstanding. |
 | Figure markers do not select their constituent images | `GroundingParser` selects through `[[image:I#]]`; `WebResearchSession.finish()` releases the other references, and `_retain_active()` releases evicted candidates. | Resolve referenced figures to their image dependencies and retain pending dependencies across searches and supported suspension. |
 | New labels fail a separate selector contract | `app/core/rich_image_selection.py:_GROUP_CELL_KEYS` rejects unknown cell fields; single-cell conversion replaces the whole group payload. | Update schema and selector together, with explicit label/caption preservation and degradation. |
 | Stream and persistence construct candidates separately | `app/ai/tool_execution.py:_attach_rich_candidates_to_artifact` and `app/services/ai_service.py:_build_tool_end_rich_items` have separate construction paths. | Use one validated candidate builder and suppress a generic render when a dedicated visual owns the output. |
@@ -217,13 +223,41 @@ The separate frontend code must implement and visually verify these components; 
 
 ## Implementation tasks and delivery order
 
-Each task starts with the named regression cases, runs them to demonstrate the current gap, implements the smallest change, and reruns those checks. Commit coherent tested changes during implementation. The checkboxes below describe future work; none is marked complete by this document revision.
+Each outstanding task starts with the named regression cases, runs them to demonstrate the current gap, implements the smallest change, and reruns those checks. Commit coherent tested changes during implementation. Tasks that combine completed local repairs with outstanding work remain unchecked; the completed portions are identified explicitly below.
+
+### Task 0: Diagnose and verify existing image answers before extending the contract
+
+**Priority:** the supplied trace lost image evidence before the answering model because the persisted catalog marked its model as non-vision. The allowlist and web-evidence gate are now removed locally. Verify a new live answer before extending the visual contract; deterministic regressions establish image delivery to the model, not successful provider/frontend rendering.
+
+**Inspect/extend:** `app/ai/web_tools.py`, `app/ai/web_research/service.py`, `app/ai/web_research/model_context.py`, `app/ai/web_research/grounding.py`, `app/ai/workflow/middleware.py`, `app/ai/workflow/specialists.py`, `app/ai/graph.py`, and the actual frontend consuming the AI SDK response.
+
+The following current behaviors matter to this symptom:
+
+| Stage | Verified current behavior | Consequence for this report |
+| --- | --- | --- |
+| Retrieval request | `ProductWebSearchInput.visual_intent` defaults to `none`; `_search()` enables retrieval when an intent or `image_query` is supplied. Existing prompts already encourage image retrieval. | A natural-language request for images does not itself set tool arguments. Check the actual model call; a prompt-only test does not prove retrieval happened. |
+| Provider wiring | `SpecialistFactory._build()` constructs the image provider only when the agent's provider tools contain `brave_image_search`. `_call_chain()` with no providers returns empty results and no failures. | A visual search with working text retrieval and no image provider can report `success`, zero images, and no failures. This is reproducible locally and currently hides a configuration failure. |
+| Model inspection | `WebEvidenceMiddleware` now injects prepared candidate labels and pixels without reading runtime capability metadata. The capability argument and private suppression reason have been removed. | Old cached false flags no longer hide web images. Verify pixels reach every model attempt, including fallback; actual provider rejection uses the existing error handling. |
+| Model selection | `GroundingParser` selects only valid `[[image:I#]]` tokens. A source-only answer selects nothing; an image token without an admitted source citation is removed with `image_without_source`. The specialist's corrective call checks missing source citations, not missing requested images. | A cited links-only answer can pass current finalization without satisfying the user's image request. Relevant inspected candidates need explicit selection; do not publish arbitrary candidates automatically. |
+| Candidate merge | The current local `_merge_tool_artifacts()` merges grounded/context candidates by stable ID and unions grounded selections with the presentation allowlist. | Existing regressions cover selected web images alongside tool candidates. Preserve these repairs; they cannot restore images that never reached the model. |
+| Planning workers | `invoke_worker()` calls `finish(())` and clears worker images at the private-output boundary. | A Planning answer assembled from worker text/evidence does not inherit worker web images. This limitation applies to ordinary retrieved images as well as the proposed source figures. Do not claim image-request support for this route without a parent inspection/selection design. |
+| Client delivery | Rich-capable clients receive final image descriptors in `data-assistant-message.data.message.metadata.rich_items`, not transient image upserts or compatibility file parts. Non-rich clients receive selected image file parts. Protected image URLs require authenticated loading. | Check terminal registry replacement, file-part handling for compatibility clients, and authenticated media responses. Checking `onData` alone is insufficient. The separate frontend remains unavailable in this workspace. |
+
+- [ ] Capture one failing explicit-image conversation end to end: selected public specialist or Planning route; effective capabilities; `web_search` arguments; provider availability; retrieval/fetch failures; candidate count; presented candidate IDs and effective vision capability; authored selection tokens; grounding warnings; candidates before/after merge; terminal/history image descriptors; and media load outcome. Use IDs/counts and reason codes, without logging credentials, binary data, or upstream asset URLs.
+- [ ] Add regressions to existing `tests/test_web_research_tool_session.py`, `tests/test_web_research_images.py`, `tests/test_selected_image_reaches_the_model.py`, and `tests/test_rich_response_prompt_inventory.py` for the gaps above. In particular, make absent image-provider wiring distinguishable from a successful search with no matching images, and cover the selected-image-plus-tool merge through final metadata, rather than only the isolated grounding path.
+- [ ] Add an explicit-image answer-quality case that verifies a supported public specialist requests visual evidence and selects a relevant inspected candidate when one is available. A canned model that already emits the desired token verifies plumbing only; record a live model/provider result separately when available. Cover unrelated candidates and unavailable media without forcing irrelevant image publication.
+- [ ] Require a truthful, specific limitation when an explicit image request cannot be fulfilled. Links may supplement that explanation, but must not count as successful image delivery. Distinguish no retrieval attempt, absent provider, failed fetch, non-vision answering model, no relevant candidate, and unsupported route/client in diagnostics.
+- [ ] Verify one selected image through generation, terminal delivery, protected loading, and history reload in the actual frontend. Check both rich capability and compatibility file-part behavior. Record the frontend revision; do not mark this passed from backend tests alone.
+
+**Exit criterion:** an explicit image request on a supported public answering route displays a relevant image in the answer and after reload, or gives an accurate limitation when delivery is unavailable. Complete the existing candidate-preservation repair in Task 1 as part of this deliverable. Tasks 2-5 then add new presentation capabilities; they must not be used as evidence that the original image-answer problem is fixed.
 
 ### Task 1: Preserve candidate ownership and eliminate duplicate construction
 
 **Modify:** `app/ai/graph.py`, `app/ai/tool_execution.py`, `app/services/ai_service.py`, `app/core/response_constants.py`, and `app/ai/workflow/specialists.py`.
 
 **Interface:** one internal dedicated-candidate builder shared by tool-artifact and tool-end handling; one stable ID-based merge of grounded and tool-context candidates. Both return existing public rich-item dictionaries validated by `rich_response.py`.
+
+**Current partial implementation:** the stable merge and grounded-selection allowlist repair already exist in the working tree, with metadata and full specialist regressions. The shared builder, non-image `inline_only` admission, and duplicate-render work below remain outstanding.
 
 - [ ] Add regressions to `tests/test_rich_response_metadata.py`, `tests/test_tool_execution_rendering.py`, and `tests/test_rich_response_streaming.py`: grounded image plus tool candidate both survive; replay produces one item; conflicting IDs fail closed; an unreferenced `inline_only` item is absent; one dedicated output does not also append a generic render.
 - [ ] Replace metadata overwrite with the shared merge and make final registry admission respect `inline_only` for non-image candidates as well as images. Exercise this with the existing non-image schema before adding the new type in Task 2.
@@ -329,3 +363,100 @@ These verify existing prompt, schema, metadata, streaming, and image-context beh
 Two read-only probes also reproduced the integration gaps: merging a tool candidate removed an existing selected web-image candidate, and adding `label` fields changed the image selector's output from one accepted group to zero. Tasks 1 and 4 turn those observations into permanent regressions during implementation.
 
 This revision changes only this plan. Application tests were not rerun for the documentation edit; document consistency, referenced existing paths, and coverage of the seven review findings are checked separately.
+
+### Follow-up verification: 2026-10-29
+
+The eight-file baseline command above was rerun against the current workspace: **132 passed in 16.00 seconds**. Pytest reported one cache-write permission warning; the tests passed. An additional run with cache disabled passed **45 tests in 8.36 seconds**:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests/test_rich_response_prompt_inventory.py tests/test_web_tool_binding.py tests/test_web_research_tool_session.py tests/test_ai_sdk_assistant_ui_compat.py -q -p no:cacheprovider
+```
+
+Read-only probes using the existing image-session test doubles confirmed:
+
+- A source-only answer selects zero images with no grounding warning. An image token without a source is removed with `image_without_source`. Both image and source tokens together select the image.
+- A valid selected web-image descriptor followed by a valid context `tool_render` candidate becomes only the tool candidate after `_merge_tool_artifacts()`. Finalization persists zero images and reports `unknown_rich_item` for the selected image marker.
+- A visual search with a working text provider and an empty image-provider resolver returns `status="success"`, zero images, and no failures.
+
+The proposed `answer_visual`/`compose_source_figure` implementation and new capability flags are still absent from `app/` and `tests/`. The original tasks remain future work. No application behavior was modified in this recheck. No deployed conversation, live provider/model response, or separate frontend was verified, so the precise cause of the reported production answer remains unconfirmed.
+
+### Supplied LangSmith trace: missing image context
+
+The subsequent authenticated investigation read all **82 runs** in [trace 01a186c1-85c3-77a2-8060-73a7e6541d82](https://smith.langchain.com/o/3bfbc373-21c2-400e-a6e1-84e32a625bbd/a/sample-chatbot/projects/p/587399a5-ae7d-485a-917c-71dd84ccd380?trace_id=01a186c1-85c3-77a2-8060-73a7e6541d82&run_id=01a186c1-85c3-77a2-8060-73a7e6541d82), starting at **2026-10-29 08:23:12 UTC / 15:23:12 Asia/Bangkok**. This supplies the live evidence that was unavailable during the earlier recheck above.
+
+**Observation:** image retrieval returned prepared candidates, but the traced answering calls contained no candidate labels or pixels. Capability classification is a hypothesis for that boundary failure; the effective runtime capability object was not captured in the inspected trace. The earlier claim that this established the production root cause was too strong. This trace does not demonstrate the separate candidate-overwrite defect or a frontend image-loading failure.
+
+| Boundary | Trace evidence |
+| --- | --- |
+| Routing and negotiation | The user asked `có ảnh k`; the router selected the public `search_agent`. Planning was disabled and `inline_rich_response_v1` was true. |
+| Initial visual search | Run `01a186c1-9964-76a3-a2e2-d4ce219ae80f` requested `visual_intent="gallery"` and a concrete image query. Its result reported six image candidates and no failures. |
+| Follow-up visual search | Run `01a186c1-ce77-7350-b30e-6bbbb7ff8dc9` requested official product images with `include_domains=["apple.com"]`. Its result again reported six image candidates and no failures. Brave provider calls are present. |
+| Answer-model input | All four answering calls used `gpt-6.1-sol`. The three calls after retrieval contain text-only WEB EVIDENCE, zero `Image candidate` labels, zero `image_url`/`input_image` blocks, and zero image data URLs. The final call is `01a186c1-dd16-7330-843a-7f67b16f0a11`. |
+| Model output | The final model answer already asks the user to click Apple links. It contains source tokens and no `[[image:I#]]` tokens. The loss therefore occurs before rich-item rendering or candidate merging. |
+
+The trace records code revision `c45c8905`, which matches the inspected workspace HEAD. That revision contains the same capability checks:
+
+- `ProviderService._normalize_openai_model()` in `app/services/provider_service.py:655` recognizes vision by the tokens `gpt-4o`, `gpt-4.1`, `gpt-5`, `o1`, `o3`, and `o4`. `gpt-6.1-sol` matches none and is classified as `supports_vision=False`.
+- `ModelConfigService._build_capabilities()` in `app/services/model_config_service.py:504` trusts that catalog field; its no-catalog OpenAI fallback repeats the same incomplete token check.
+- `WebEvidenceMiddleware` in `app/ai/workflow/middleware.py:420` passes the resolved capability to `model_evidence_blocks()`. At `app/ai/web_research/service.py:918`, false returns no candidate labels or pixels and records the private reason `answer_model_not_vision_capable`.
+
+The resolved capability object itself is not present in the fetched trace fields. Local reproduction shows that the catalog normalizer and no-catalog fallback classify `gpt-6.1-sol` as non-vision, while the `gpt-5` control is vision-enabled. With the existing image-session fixture, false yields two retrieved candidates but zero labels/pixels; true yields both labels and both images. These observations do not establish which metadata or configuration the live request actually resolved.
+
+**Investigation target for Task 0:** capture the effective runtime capability configuration and the evidence entering/leaving the model boundary before selecting a capability repair. Distinguish stored catalog metadata from fallback inference. Do not override a model's declared capabilities based only on its name. The model-specific override previously attempted here was withdrawn at the user's request.
+
+The existing `tests/test_selected_image_reaches_the_model.py:161` injects `capabilities={"supports_vision": True}` and therefore does not exercise the faulty classifier. Rerunning that file with `tests/test_web_research_images.py` passed **9 tests in 14.04 seconds**, confirming the coverage gap rather than a repair. No application code, provider configuration, or stored catalog was changed during this investigation; no successful post-repair live answer is claimed.
+
+### Retained repair scope after capability rollback: 2026-10-29
+
+The user requested removal of the hardcoded model-capability fix and its helpers. Provider catalog and runtime capability service code have been restored to their pre-patch behavior. The model-specific helper and its tests were deleted, and the specialist regression again uses a generic vision-capable model fixture. No replacement model-name rule or capability bypass was added.
+
+- [x] Remove the model-specific vision override, shared helper, cache-read override, and their associated regression cases.
+- [x] Restore the original provider catalog and runtime capability service behavior.
+- [x] Merge grounded and context candidates by stable ID in `MultiAgentWorkflow._merge_tool_artifacts()`. Preserve grounded descriptor/order; reject a conflicting later binding by retaining the original descriptor, and deduplicate replay. Verify the final public registry retains selected images alongside tool renders.
+- [x] Run focused regressions, provider/model configuration checks, rich-response/streaming checks, and lint; record the results. Do not claim a successful live-provider/frontend answer from deterministic tests.
+
+Code review identified one additional loss boundary: a tool-only prompt inventory records an empty `_presented_rich_image_ids` list before a later web search. Forwarding that list unchanged causes `finalize_article_content()` to strip a valid newly grounded image marker. The specialist now carries its authoritative grounded selection IDs; the graph unions those with inventory-presented IDs. The full specialist regression covers this placement/persistence path and also verifies that an uninspected context image remains excluded.
+
+The earlier **255-test** result applied to the implementation before the capability rollback. It does not verify the current revision. No stored provider configuration or database catalog was modified by the removed patch. A new live-provider conversation and actual frontend rendering/reload remain unverified.
+
+Post-removal verification: **242 passed in 9.89 seconds** across the same remaining test files, with the deleted model-specific test file excluded. Ruff passed for the four retained changed Python files, and `git diff --check` passed. The two capability services have no diff against the pre-patch revision; both deleted files are absent, and no application/test references to the removed helper remain.
+
+### Authenticated recheck: stored capability and runtime resolution, 2026-10-29
+
+This recheck independently fetched all **82 runs** of the supplied trace through LangSmith. Both visual searches returned `image_candidate_count=6` with no failures. Each of the three subsequent `ChatOpenAI` calls had text-only web evidence, no candidate labels, and no image blocks. The final model output contained source tokens but no image-selection tokens. The public route was `search_agent`, Planning was disabled, and `inline_rich_response_v1` was true. The failure is already visible at the model-input boundary; this trace provides no evidence of a frontend loading failure.
+
+Read-only database queries for the traced user supplied the configuration evidence missing from the earlier investigation:
+
+| Configuration boundary | Observed value |
+| --- | --- |
+| Persisted `search` agent configuration | Provider `openai`, model `gpt-6.1-sol`, `allow_custom_model=False`; updated **2026-10-15 08:45:47 Asia/Bangkok**. |
+| Persisted OpenAI catalog entry | `gpt-6.1-sol` has `supports_vision=False`; provider row updated **2026-10-28 13:46:20 Asia/Bangkok**, before the failing trace at **2026-10-29 15:23:12 Asia/Bangkok**. |
+| Current `ModelConfigService.resolve_runtime_config(user, "search")` | Provider `openai`, model `gpt-6.1-sol`, source `persisted`, `supports_vision=False`, no provider fallback. Resolution used database-enforced read-only sessions and made no model call. |
+
+The concrete blocker is the resolved capability gate: `WebEvidenceMiddleware` passes that false flag to `WebResearchSession.model_evidence_blocks()`, which returns no labels or pixels even when prepared candidates exist. The local provider catalog normalizer classifies this model as non-vision using its model-name allowlist; runtime resolution trusts the stored field. The no-catalog fallback repeats that allowlist, so changing only the fallback would leave the observed stored-catalog path blocked.
+
+A controlled probe using the existing image-session fixtures reproduced the boundary: two prepared candidates plus `supports_vision=False` produced zero labels/pixels and `answer_model_not_vision_capable`; enabling the flag supplied two labels and two image blocks. This establishes the backend suppression mechanism. It does not independently verify the external model's actual vision support or recover the historical in-memory capability object, which the trace did not record. The stored records predate the trace and current resolution matches its observed behavior.
+
+**Task 0 decision after user feedback:** remove the model-name vision allowlist and the web-evidence capability gate rather than introduce another classifier or model-specific helper. Prepared candidate labels and pixels go to the selected model; the provider handles whether those inputs are accepted. Verify a new explicit-image conversation through model inspection/selection, terminal metadata, protected loading, and history reload before claiming image delivery is repaired.
+
+Fresh focused verification against the current working tree passed **90 tests in 7.71 seconds**:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests/test_selected_image_reaches_the_model.py tests/test_web_research_images.py tests/test_rich_response_metadata.py tests/test_rich_response_streaming.py tests/test_provider_reasoning_metadata.py tests/test_provider_model_context_metadata.py tests/test_model_config_reasoning.py -q -p no:cacheprovider
+```
+
+The existing specialist fixture explicitly supplies vision capability, so these passing plumbing tests do not establish that live runtime classification is correct. `answer_visual`, `compose_source_figure`, and the proposed capability extensions remain absent. This recheck changed only the review document; existing application edits, stored configuration, and provider catalog were left unchanged. No successful post-repair live image answer or external frontend check is claimed.
+
+### Allowlist removal requested by the user: 2026-10-29
+
+Removed the two OpenAI vision model-name checks. New catalog entries and no-catalog runtime configurations permit image input without matching model-name tokens. Removed the web-evidence capability gate, its runtime-config callback, and the capability arguments from evidence injection/building. Existing cached catalog flags cannot suppress web candidates, including on fallback. No replacement helper, model registry, or database rewrite was added. Other catalog consumers retain their existing metadata behavior.
+
+The specialist regression now runs with absent, false, and true vision metadata and verifies candidate pixels, grounding repair, and selected-image persistence in every case. Before the change, the absent/false cases failed because only the evidence-text block reached the model; the unknown-model catalog and runtime checks failed too. After removal, all five checks passed. Focused image, middleware, catalog, metadata, and streaming verification then passed **152 tests in 9.33 seconds**; Ruff passed for all changed Python files. Live provider and frontend verification remain outstanding.
+
+Additional runtime override, RAG, catalog staleness, research-session, continuation, output-policy, and documentation checks passed **103 tests in 21.53 seconds** with exit code zero. That run emitted a native PyArrow access-violation diagnostic during import before continuing to the passing result. Independent code review found no important issues and separately passed 42 relevant tests. `git diff --check` passed.
+
+### Proactive image guidance: 2026-10-29
+
+The user reports that image injection now works and requests more proactive image use. Updated the shared answering prompts, `web_search` description/`visual_intent` field guidance, and injected evidence instructions: fetch a useful concrete reference image without waiting for an explicit request, inspect it, and select its token beside the explanation with a source citation. An image may complement good prose; it need not show something prose cannot explain. Prefer one clear image, add distinct views for comparisons, honor text-only requests, and omit irrelevant or unclear candidates. No classifier, topic rules, or automatic image publication was added.
+
+A live decision probe using the configured `gpt-6.1-sol` model and the chat system prompt requested `comparison` images for connector identification and a `figure` for a building-layout explanation, without either question asking for images. It made no tool call for a simple calculation or an explicit text-only description: **4/4 expected decisions**. These probes inspected tool-call arguments only; they did not execute searches or verify image relevance, selection, or frontend delivery.

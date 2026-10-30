@@ -10,6 +10,18 @@ gets published. Candidate metadata is private. A web image is published only
 when the model selects its `I#` token; no token means no image. Web-answer text
 is buffered until a citation resolves to a source admitted in that turn.
 
+Prepared image labels and pixels are sent on every answer-model attempt,
+including fallback. Model-name rules and cached `supports_vision` flags do not
+filter web evidence. A provider that rejects image inputs uses the existing
+provider error handling.
+
+Chat and search proactively request visual evidence when seeing the subject
+helps with recognition, layout, or visible differences, even when the factual
+answer is already known. Prefer one useful image and select it inline after
+inspecting its pixels; a source-page link alone does not display an image.
+Text-only requests, irrelevant candidates, and answers without a useful visual
+remain text-only.
+
 ## Image discovery
 
 Brave image search forwards the model's locale as `country` and `search_lang`,
