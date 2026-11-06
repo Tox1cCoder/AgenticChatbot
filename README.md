@@ -1203,12 +1203,20 @@ The bridge lets a trusted local device execute privileged tools without opening 
 **Client side** — [`client_backend/services/runtime_bridge.py`](client_backend/services/runtime_bridge.py):
 
 - authenticates against the server
-- opens and maintains the runtime WebSocket with exponential reconnect
+- opens and maintains the runtime WebSocket with a configured reconnect delay
 - services tool dispatches through `LocalMCPManager` and the local skills registry
 - enforces per-tool timeouts and permission scopes
 - periodically syncs tool + skill catalogs back to the server
 
 Configured by `CLIENT_HEARTBEAT_INTERVAL_SECONDS`, `CLIENT_TOOL_CALL_TIMEOUT_SECONDS`, `CLIENT_RECONNECT_*`.
+
+If a runtime session expires after sleep or disappears from the runtime store,
+the server closes its WebSocket with code `1012` instead of acknowledging a
+heartbeat it could not renew. The sidecar also reconnects when heartbeat sends
+fail or an acknowledgment does not arrive within one heartbeat interval. It
+registers a fresh session and republishes both tool and skill catalogs before
+reporting connected, using the existing login credentials. Reconnect limits
+count consecutive failed connections; healthy sessions reset that count.
 
 **Device identity** — each installation has a random identifier generated on
 first run and persisted as `device_identity.json` in the profile directory
