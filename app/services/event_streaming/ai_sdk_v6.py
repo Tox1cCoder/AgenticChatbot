@@ -923,6 +923,14 @@ class AISDKV6StreamAdapter:
         message = data.get("message")
         saved: str | None = None
         if isinstance(message, dict):
+            # The paused partial is projected exactly as a completed message
+            # is, so a client without a feature never reconciles to its markers.
+            message = project_ai_sdk_message_for_capability(
+                message,
+                inline_rich_response_v1=state.inline_rich_response_v1,
+                answer_visuals_v1=state.answer_visuals_v1,
+                source_figures_v1=state.source_figures_v1,
+            )
             saved = self._authoritative_content(message)
         elif isinstance(message, str):
             saved = message.strip()

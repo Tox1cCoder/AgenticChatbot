@@ -223,6 +223,54 @@ async def test_capable_stream_passes_the_visual_marker_through():
     assert _VISUAL_ID in ids
 
 
+async def _interrupt_frames(*, visuals: bool, deltas: list[str]):
+    from app.services.event_streaming.ai_sdk_v6 import AISDKV6StreamAdapter, AISDKV6StreamState
+
+    async def source():
+        for index, delta in enumerate(deltas, start=1):
+            yield make_event("message_delta", sequence=index, data={"text": delta})
+        yield make_event(
+            "interrupt",
+            sequence=len(deltas) + 1,
+            data={"thread_id": "t-1", "next": [], "message": _message(_CONTENT)},
+        )
+
+    state = AISDKV6StreamState(
+        "m-1", "t-1", "r-1", inline_rich_response_v1=True, answer_visuals_v1=visuals
+    )
+    adapter = AISDKV6StreamAdapter(source, state, heartbeat_interval_seconds=60)
+    body = "".join([frame async for frame in adapter.iter_sse()])
+    return [
+        json.loads(line[6:])
+        for line in body.splitlines()
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_approval_pause_message_is_projected_for_the_client():
+    """The paused partial reaches the client like a completed one would."""
+    frames = await _interrupt_frames(visuals=False, deltas=["Try this.\n\n"])
+
+    [interrupt] = [f for f in frames if f["type"] == "data-interrupt"]
+    message = interrupt["data"]["message"]
+    assert "<!--rich:visual:" not in message["content"]
+    assert _fallback() in message["content"]
+    assert _VISUAL_ID not in [item["id"] for item in message["metadata"]["rich_items"]]
+    reconciled = [f for f in frames if f["type"] == "data-answer-reconcile"]
+    assert all("<!--rich:visual:" not in f["data"]["content"] for f in reconciled)
+
+
+@pytest.mark.asyncio
+async def test_an_approval_pause_keeps_the_visual_for_a_capable_client():
+    frames = await _interrupt_frames(visuals=True, deltas=["Try this.\n\n"])
+
+    [interrupt] = [f for f in frames if f["type"] == "data-interrupt"]
+    message = interrupt["data"]["message"]
+    assert "<!--rich:visual:steps1-->" in message["content"]
+    assert _VISUAL_ID in [item["id"] for item in message["metadata"]["rich_items"]]
+
+
 @pytest.mark.asyncio
 async def test_unsupported_stream_without_visual_markers_does_not_reconcile():
     frames = await _frames(
