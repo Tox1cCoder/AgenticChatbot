@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
@@ -14,6 +15,7 @@ from app.ai.web_research.contracts import (
 )
 from app.ai.web_research.providers import ProviderFailure, ProviderResolver
 from app.ai.web_research.service import ProviderHealthRegistry, WebResearchService
+from tests.test_web_image_capacity_and_resolution import RecordingImageService
 
 SCOPE = ResearchScope(conversation_id="c", user_id="u", logical_turn_id="t")
 REQUEST = ResearchRequest(query="release notes", objective="find current release", mode="quick")
@@ -154,11 +156,13 @@ async def test_valid_image_sources_are_admitted_before_text_sources() -> None:
     )
     service = WebResearchService(
         resolver=ProviderResolver(text=(text,), images=(ImageProvider(),)),
+        image_service=RecordingImageService(),
         now=lambda: datetime(2026, 9, 15, tzinfo=UTC),
     )
     request = REQUEST.model_copy(update={"visual_intent": "figure", "image_query": "a"})
 
-    bundle = await service.new_session(SCOPE, ResearchBudget(), mode="quick").search(request)
+    scope = SCOPE.model_copy(update={"conversation_id": str(uuid4()), "user_id": str(uuid4())})
+    bundle = await service.new_session(scope, ResearchBudget(), mode="quick").search(request)
 
     # Image pages first, each class against its own quota. Text used to be
     # admitted first and return its full budget, which left the image cohort
@@ -379,9 +383,11 @@ async def test_a_saturated_text_quota_still_lets_an_image_search_run() -> None:
 
     service = WebResearchService(
         resolver=ProviderResolver(text=(text,), images=(OneImage(),)),
+        image_service=RecordingImageService(),
         now=lambda: datetime(2026, 9, 22, tzinfo=UTC),
     )
-    session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
+    scope = SCOPE.model_copy(update={"conversation_id": str(uuid4()), "user_id": str(uuid4())})
+    session = service.new_session(scope, ResearchBudget(), mode="quick")
 
     for index in range(13):
         await session.search(_text_request(f"distinct subject {index}"))

@@ -282,8 +282,8 @@ async def test_a_full_text_search_does_not_starve_image_candidates() -> None:
     urls = {str(source.url) for source in bundle.sources}
 
     assert all(f"https://news{index}.test/article" in urls for index in range(1, 6))
-    assert all(f"https://gallery{index}.test/page" in urls for index in range(1, 7))
-    assert len(session.source_registry.records) == 5 + 6
+    assert all(f"https://gallery{index}.test/page" in urls for index in range(1, 5))
+    assert len(session.source_registry.records) == 5 + 4
     assert [image.candidate_id for image in bundle.images] == ["I1", "I2", "I3", "I4"]
 
 
@@ -300,7 +300,7 @@ async def test_a_larger_photo_outranks_small_cards_that_arrived_first() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_worse_later_cohort_does_not_displace_the_stronger_photo() -> None:
+async def test_latest_results_lead_but_older_images_fill_spare_window_slots() -> None:
     session, intent = _scripted_session(
         _cards_and_photo(),
         (
@@ -318,8 +318,82 @@ async def test_a_worse_later_cohort_does_not_displace_the_stronger_photo() -> No
     bundle = await _search(session, intent, query="a different subject", domains=("gallery.test",))
 
     assert photo_id in session.prepared_images
-    assert (bundle.images[0].width, bundle.images[0].height) == (1200, 675)
-    assert all(image.width != 100 for image in bundle.images)
+    assert [image.width for image in bundle.images[:2]] == [100, 100]
+    assert len(bundle.images) == 4
+
+
+@pytest.mark.asyncio
+async def test_targeted_images_enter_a_window_full_of_larger_older_images() -> None:
+    session, intent = _scripted_session(
+        tuple(_candidate(f"doric-{n}", width=1600, height=900) for n in range(4)),
+        tuple(_candidate(f"ionic-{n}", width=640, height=480) for n in range(4)),
+    )
+    await _search(session, intent, query="Doric capital photographs")
+    session.model_evidence_blocks()
+
+    bundle = await _search(session, intent, query="Ionic capitals with volutes")
+
+    assert len(bundle.images) == 4
+    assert all(image.title.startswith("ionic-") for image in bundle.images)
+
+
+@pytest.mark.asyncio
+async def test_uninspected_results_do_not_exhaust_followup_source_capacity() -> None:
+    cohorts = [
+        tuple(_candidate(f"{subject}-{n}", width=800, height=600) for n in range(8))
+        for subject in ("doric", "ionic", "corinthian", "composite")
+    ]
+    session, intent = _scripted_session(*cohorts)
+    for subject in ("doric", "ionic", "corinthian", "composite"):
+        bundle = await _search(session, intent, query=f"{subject} capital photographs")
+        assert all(image.title.startswith(subject) for image in bundle.images)
+        assert bundle.failures == ()
+        session.model_evidence_blocks()
+
+    assert len(session.source_registry.records) == 1 + 4 * 4
+
+
+@pytest.mark.asyncio
+async def test_revisited_inspected_photo_reuses_its_reference_and_budget() -> None:
+    ionic = _candidate("ionic", width=500, height=345)
+    images = RecordingImageService()
+    session, intent = _scripted_session(
+        (ionic,),
+        tuple(_candidate(f"doric-{n}", width=1600, height=900) for n in range(4)),
+        (ionic,),
+        image_service=images,
+    )
+    await _search(session, intent, query="Ionic capital photograph")
+    session.model_evidence_blocks()
+    reference = session.prepared_images["I1"].reference_id
+    await _search(session, intent, query="Doric capitals comparison")
+    session.model_evidence_blocks()
+    held_bytes = session._model_image_bytes
+
+    bundle = await _search(session, intent, query="Greek volutes", domains=("gallery.test",))
+
+    assert bundle.images[0].candidate_id == "I1"
+    assert session.prepared_images["I1"].reference_id == reference
+    assert images.fetched.count(ionic.image_url) == 1
+    assert session._model_image_bytes == held_bytes
+    assert held_bytes == sum(len(image.preview) for image in session._held_images().values())
+
+
+@pytest.mark.asyncio
+async def test_an_inspected_image_can_still_be_selected_after_a_later_search() -> None:
+    session, intent = _scripted_session(
+        (_candidate("ionic", width=500, height=345),),
+        tuple(_candidate(f"doric-{n}", width=1600, height=900) for n in range(4)),
+    )
+    await _search(session, intent, query="Ionic capital photograph")
+    session.model_evidence_blocks()
+    source_id = session.prepared_images["I1"].record.source_id
+    await _search(session, intent, query="Doric capitals comparison")
+
+    resolution = GroundingParser(session).resolve(f"Ionic [[image:I1]] [[source:{source_id}]]")
+
+    assert resolution.selected_image_ids == ("I1",)
+    assert resolution.warnings == ()
 
 
 @pytest.mark.asyncio
@@ -624,15 +698,15 @@ async def test_a_candidate_that_cannot_be_fetched_is_not_retried_every_search() 
 
 
 @pytest.mark.asyncio
-async def test_only_pooled_candidates_take_image_source_capacity() -> None:
-    """A page whose candidate can never be catalogued must not become a citable S#."""
+async def test_only_prepared_candidates_take_image_source_capacity() -> None:
+    """Unused raw results leave citation capacity for targeted follow-ups."""
 
     _session, bundle = await _run(text_count=5, image_count=12)
     image_pages = [
         source for source in bundle.sources if "gallery" in str(source.url)
     ]
 
-    assert len(image_pages) == 8, "only max_candidate_pool candidates reach the catalog"
+    assert len(image_pages) == 4, "only usable images consume image-source quota"
 
 
 @pytest.mark.asyncio
@@ -663,7 +737,14 @@ async def test_a_deliberate_open_still_fits_once_the_catalog_is_full() -> None:
 
     service = WebResearchService(
         resolver=ProviderResolver(
-            text=(SaturatingText(5),), images=(UnrelatedImages(8),), openers=(Opener(),)
+            text=(SaturatingText(5),),
+            images=(
+                ScriptedImages(
+                    tuple(_candidate(f"first-{n}", width=800, height=600) for n in range(4)),
+                    tuple(_candidate(f"second-{n}", width=800, height=600) for n in range(4)),
+                ),
+            ),
+            openers=(Opener(),),
         ),
         image_service=RecordingImageService(),
         max_candidate_catalog=8,
@@ -679,6 +760,7 @@ async def test_a_deliberate_open_still_fits_once_the_catalog_is_full() -> None:
             image_query="the subject",
         )
     )
+    await _search(session, "figure", query="another detail", domains=("gallery.test",))
     assert len(session.source_registry.records) == 5 + 8
 
     bundle = await session.open(["https://fresh-page.test/article"], "What does it say?")

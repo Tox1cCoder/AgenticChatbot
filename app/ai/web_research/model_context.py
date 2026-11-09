@@ -58,8 +58,8 @@ def inject_latest_web_evidence(
         target = session.latest_image_query or session.latest_image_objective
         if target:
             # The one place in the system that judges visual form. Candidate
-            # ordering is quality-only by design and cannot tell a photo from
-            # an infographic; this line is what asks the model to.
+            # ordering cannot tell a photo from an infographic; this line is
+            # what asks the model to.
             lines.append(
                 f"IMAGE TARGET: {target}. Match the requested visual form literally: a photo "
                 "must be a photo, a close-up must show the named detail, and a settings "

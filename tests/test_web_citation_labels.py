@@ -28,6 +28,7 @@ def _grounded_answer():
             )
         ),
         prepared_images={},
+        known_image=lambda _identifier: None,
     )
     return GroundingParser(session).resolve(
         "Claim [[source:S12]][[source:S45]]. Again [[source:S12]]."

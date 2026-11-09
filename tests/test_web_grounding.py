@@ -35,6 +35,7 @@ def _session():
             resolve=resolve_source,
         ),
         prepared_images=images,
+        known_image=images.get,
     )
 
 

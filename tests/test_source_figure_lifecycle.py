@@ -230,6 +230,63 @@ async def test_a_later_search_cannot_release_a_figure_dependency():
 
 
 @pytest.mark.asyncio
+async def test_inspected_images_from_separate_searches_can_be_composed_together():
+    session, service = await _session([_urls("ionic", 1, 500), _urls("doric", 4, 1280)])
+    session.model_evidence_blocks()
+    ionic_ref = _ref(session, "I1")
+
+    await _search(session, "find Doric capitals")
+    session.model_evidence_blocks()
+    result = await _compose(session, _cells("I1", "I2"))
+
+    assert result["output"]["status"] == "ok"
+    assert ionic_ref not in service.released
+    assert "I1" not in session.prepared_images
+    reminders = " ".join(block.get("text", "") for block in session.model_evidence_blocks())
+    assert "Previously inspected image I1" in reminders
+
+    figure = _figure(result)
+    await session.finish((), selected_figure_ids=(figure["id"],))
+    assert ionic_ref not in service.released
+    assert set(service.released) == {_ref(session, key) for key in ("I3", "I4", "I5")}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close", ["finish", "abort", "suspend"])
+async def test_unused_inspected_images_are_released_once_at_closeout(close):
+    session, service = await _session([_urls("ionic", 1, 500), _urls("doric", 4, 1280)])
+    session.model_evidence_blocks()
+    ionic_ref = _ref(session, "I1")
+    await _search(session, "find Doric capitals")
+
+    assert ionic_ref not in service.released
+    if close == "finish":
+        await session.finish(())
+    else:
+        await getattr(session, close)()
+
+    assert ionic_ref in service.released
+    assert len(service.released) == len(set(service.released)) == 5
+
+
+@pytest.mark.asyncio
+async def test_retained_images_still_count_against_the_model_byte_budget():
+    session, service = await _session([_urls("ionic", 1, 500), _urls("doric", 4, 1280)])
+    session.model_evidence_blocks()
+    ionic = session.known_image("I1")
+    session.service.max_model_bytes = len(ionic.preview) + len(_urls("doric", 1, 1280)[0][0]) * 3
+
+    await _search(session, "find Doric capitals")
+
+    assert session._model_image_bytes <= session.service.max_model_bytes
+    assert session._model_image_bytes == sum(
+        len(image.preview) for image in session._held_images().values()
+    )
+    assert len(session._held_images()) == 4
+    assert ionic.reference_id not in service.released
+
+
+@pytest.mark.asyncio
 async def test_a_figure_selected_by_its_marker_alone_keeps_its_media():
     session, service = await _session([_urls("a", 3, 640)])
     session.model_evidence_blocks()

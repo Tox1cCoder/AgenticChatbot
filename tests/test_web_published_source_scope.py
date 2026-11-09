@@ -154,7 +154,7 @@ def _urls(records) -> set[str]:
 
 
 @pytest.mark.asyncio
-async def test_gallery_pages_stay_in_the_registry_but_out_of_the_published_list() -> None:
+async def test_unused_raw_image_pages_do_not_enter_the_registry() -> None:
     session = _session(
         tuple(
             _candidate(
@@ -168,7 +168,7 @@ async def test_gallery_pages_stay_in_the_registry_but_out_of_the_published_list(
     await _search(session, "a concrete subject")
     published = _urls(session.answer_sources)
 
-    assert len(session.source_registry.records) > len(session.answer_sources)
+    assert len(session.source_registry.records) == len(session.answer_sources) == 6
     assert {"https://news1.test/a", "https://news2.test/b"} <= published
     backing = {
         str(session.source_registry.resolve(prepared.record.source_id).url)
@@ -231,10 +231,12 @@ async def test_an_opened_image_page_stays_published_even_with_no_active_image() 
             )
             for index in range(1, 9)
         ),
+        (_candidate("official", width=1920, confidence="high", host="t1.gg"),),
         text=("https://news1.test/a",),
     )
 
     await _search(session, "a concrete subject")
+    await _search(session, "the official subject", domains=("t1.gg",))
     inactive = next(
         record
         for record in session.source_registry.records
@@ -278,10 +280,15 @@ async def test_a_cited_image_page_is_published_even_with_no_active_image() -> No
             )
             for index in range(1, 9)
         ),
+        tuple(
+            _candidate(f"official-{n}", width=1920, confidence="high", host="t1.gg")
+            for n in range(2)
+        ),
         text=("https://news1.test/a",),
     )
 
     await _search(session, "a concrete subject")
+    await _search(session, "the official subject", domains=("t1.gg",))
     inactive = next(
         record
         for record in session.source_registry.records

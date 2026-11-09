@@ -80,7 +80,7 @@ class GroundingParser:
                 domain = (urlsplit(str(source.url)).hostname or "source").removeprefix("www.")
                 return f"([{domain}]({source.url}))"
 
-            prepared = self._session.prepared_images.get(identifier)
+            prepared = self._session.known_image(identifier)
             if prepared is None:
                 warn("unknown_image_id", identifier)
                 return ""

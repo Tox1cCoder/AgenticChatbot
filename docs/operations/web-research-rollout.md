@@ -48,23 +48,24 @@ Three bounds, deliberately distinct:
 | Bound | Setting | Default | What it limits |
 |---|---|---|---|
 | Per-cohort candidate cap | `web_research_max_candidate_pool` | 8 | Candidates taken from one image search |
-| Session catalog | `web_research_max_candidate_catalog` | 24 | Candidates retained across all image searches |
+| Session catalog | `web_research_max_candidate_catalog` | 24 | Prepared candidates plus the latest search cohort |
 | Active vision window | derived from `visual_intent` | 4 (6 for `gallery`) | Images whose pixels reach the answer model |
 
-Text sources and image pages hold **separate** quotas: a turn admits up to 5
-text sources (8 agentic) plus up to `web_research_max_candidate_catalog` image
-pages. Image pages are admitted first. They shared one budget until 2026-09-16,
-and because text results were admitted first and a search returns its full
-quota, every image was discarded before the model saw it.
+Text sources and image pages hold **separate** quotas: up to 64 text sources
+per turn (5 per search, 8 agentic), plus up to
+`web_research_max_candidate_catalog` image pages. Image pages are admitted only
+for successfully prepared images, before text admission. Unused raw image
+results do not consume citation capacity needed by follow-up searches.
 
-The catalog is ranked on every image search and the active window recomputed
-over the whole of it, so a later, better search can displace an image from a
-window that was already full — and a worse later cohort cannot displace a
-stronger earlier one. Retained candidates keep the `I#` the model was already
-shown; a replacement gets a fresh ID, and a retired ID is never rebound to
-different bytes. Evicted pending references are released only after their
-replacements are prepared, so a failed fetch costs the improvement rather than
-the image the model already had.
+The latest image-search cohort leads the active window, with quality ranking
+within that cohort. Older usable images fill spare slots or replace failed
+fetches. Previously inspected images remain selectable and composable across
+searches with their original `I#`, source and protected media reference. The
+evidence message includes text reminders for retained images outside the
+window; only active images send pixels again. Retained previews still count
+against the model-byte limit, and downloads remain cumulative. Finish releases
+all unused media; abort releases all media; an approval pause keeps only
+composed-figure dependencies. Uninspected old catalog leftovers are dropped.
 
 `omitted_image_count` counts candidates the session will **never** offer the
 model: beyond the per-cohort cap, past catalog capacity, source page
@@ -79,10 +80,9 @@ held in the catalog but outside the current window is *not* omitted.
 | `bundle.operation_source_ids` | The tool result | Only what *that* operation newly contributed |
 | `session.answer_sources` | The reader | Text pages, opened pages, and image pages backing an active image |
 
-The published list is smaller than the registry on purpose. The registry holds
-the whole candidate catalog's pages; most are gallery hosts whose candidate
-never entered the vision window, and publishing them buries the few sources the
-answer actually rests on. They stay resolvable for citations regardless.
+The registry preserves image pages after their images leave the active window,
+so their previously offered source IDs still resolve. The published list also
+includes any page explicitly cited in the answer.
 
 Tool-result snippets are bounded by source status: 1,200 characters for a
 search result, 3,000 for a page the model deliberately opened. The worst case
@@ -113,9 +113,9 @@ answered citing nothing, which `WebEvidencePolicy` rejects as
 `missing_web_citation`. If you see that failure together with a long run of
 `web_search` calls, check the quota signal first.
 
-## Ordering is quality-only
+## Ordering within a search cohort
 
-Candidate ordering uses resolution adequacy (640px longest edge), provider
+Within a cohort, candidate ordering uses resolution adequacy (640px longest edge), provider
 confidence, requested-domain provenance, pixel area, then provider rank.
 Adequacy leads and provenance sits below it, so a small logo from the named
 site cannot displace a large photo from elsewhere.

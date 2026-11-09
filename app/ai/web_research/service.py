@@ -232,16 +232,19 @@ class WebResearchSession:
         self._image_only_source_ids: set[str] = set()
         self._omitted_source_urls: set[str] = set()
         self._operation_index = 0
-        #: Every candidate this session has seen, best-effort ranked on demand.
+        #: Prepared images plus the latest provider cohort, ranked on demand.
         #: Insertion-ordered on purpose: equal priority tuples fall back to the
         #: order the providers returned them in.
         self._candidate_catalog: dict[tuple[str, str], ProviderImageCandidate] = {}
+        self._latest_candidate_keys: set[tuple[str, str]] = set()
         self._preferred_candidate_keys: set[tuple[str, str]] = set()
         #: Catalog keys that were attempted and did not yield a usable image.
         #: Session-scoped, not per-search: a candidate that cannot be fetched
         #: will not become fetchable, and retrying it every search spends a
         #: provider round trip and counts the same loss twice.
         self._unusable_candidate_keys: set[tuple[str, str]] = set()
+        # Inspected media remain selectable after leaving the active window.
+        # Their bytes still count against the existing session limits.
         self._prepared_by_key: dict[tuple[str, str], PreparedImage] = {}
         self._next_candidate_index = 1
         self._latest_image_query: str | None = None
@@ -259,11 +262,6 @@ class WebResearchSession:
         #: Candidates whose pixels reached a vision-capable answer attempt. The
         #: server can verify presentation, not understanding.
         self._presented_candidate_ids: set[str] = set()
-        #: Whether the most recent answer attempt could see images; ``None``
-        #: before any attempt was shown evidence.
-        #: Media a composed figure depends on, kept outside the vision window
-        #: so a later search can evict a preview without releasing the image.
-        self._pinned_images: dict[str, PreparedImage] = {}
         self._figure_dependencies: dict[str, tuple[str, ...]] = {}
 
     async def search(self, request: ResearchRequest) -> WebEvidenceBundle:
@@ -408,29 +406,11 @@ class WebResearchSession:
         image_records, image_failures, image_providers = image_result
         self.budget.record_search(normalized.query, "canonical_web_evidence", scope=search_scope)
 
-        # Image pages first, each class against its own quota. A text search
-        # that returns its full budget can no longer spend the capacity the
-        # image cohort needs, and vice versa.
-        # Only the candidates the catalog can actually take. A page whose
-        # candidate will never be catalogued must not consume image-source
-        # quota or become a citable S# no picture will ever back.
-        pooled_images = tuple(image_records)[: self.service.max_candidate_pool]
-        image_sources = tuple(
-            ProviderSource(
-                provider=image.provider,
-                url=image.source_url,
-                title=image.title,
-                snippet=image.description,
-                rank=image.rank,
-                query_index=operation_index,
-                published_at=image.published_at,
-            )
-            for image in pooled_images
-        )
-        image_room = max(0, self._image_catalog_capacity - self._admitted_image_sources)
-        image_admitted = self.source_registry.admit(image_sources[:image_room])
-        self._admitted_image_sources += len(image_admitted)
-        self._image_only_source_ids.update(record.source_id for record in image_admitted)
+        previous_source_ids = {record.source_id for record in self.source_registry.records}
+        capacity_failures = self._merge_candidates(request, image_records)
+        # Admit image pages only when their images are usable. Raw provider
+        # results outside the vision window must not exhaust follow-up quota.
+        image_fetch_failures = await self._prepare_images()
 
         # Count valid unique pages, rather than payload positions. Already
         # admitted image/open pages can become text evidence without a new S#.
@@ -447,7 +427,7 @@ class WebResearchSession:
                 continue
             text_urls.add(url)
             text_candidates.append(candidate)
-        text_admitted = self.source_registry.admit(text_candidates, max_new_sources=text_room)
+        self.source_registry.admit(text_candidates, max_new_sources=text_room)
         for candidate in text_candidates:
             record = self.source_registry.resolve(candidate.url)
             if record is not None:
@@ -463,12 +443,12 @@ class WebResearchSession:
                 # text source: the image cohort merely got there first.
                 self._image_only_source_ids.discard(record.source_id)
 
-        capacity_failures = self._merge_candidates(request, image_records)
-        image_fetch_failures = await self._prepare_images()
         return self._bundle(
             operation_index,
             operation_source_ids=tuple(
-                record.source_id for record in (*image_admitted, *text_admitted)
+                record.source_id
+                for record in self.source_registry.records
+                if record.source_id not in previous_source_ids
             ),
             visual_intent=request.visual_intent,
             failures=(
@@ -578,6 +558,15 @@ class WebResearchSession:
             return ()
         self._latest_image_query = request.image_query
         self._latest_image_objective = request.objective
+        self._latest_candidate_keys.clear()
+        # Keep inspected/prepared candidates, not unexamined leftovers from
+        # unrelated searches. Stable S# and I# references are never recycled.
+        self._candidate_catalog = {
+            key: candidate
+            for key, candidate in self._candidate_catalog.items()
+            if key in self._prepared_by_key
+        }
+        self._preferred_candidate_keys.intersection_update(self._candidate_catalog)
         allowed = tuple(
             dict.fromkeys(host for host in map(bare_host, request.include_domains) if host)
         )
@@ -586,16 +575,20 @@ class WebResearchSession:
         self._omitted_image_count += len(image_records) - len(pooled)
         entered = 0
         for candidate in pooled:
-            source = self.source_registry.resolve(candidate.source_url)
-            if source is None:
+            source_url = canonicalize_public_url(candidate.source_url)
+            if source_url is None or (
+                self.source_registry.resolve(source_url) is None
+                and self._admitted_image_sources >= self._image_catalog_capacity
+            ):
                 self._omitted_image_count += 1
                 continue
-            key = (str(source.url), candidate.image_url)
+            key = (source_url, candidate.image_url)
             if key not in self._candidate_catalog:
                 if len(self._candidate_catalog) >= self._image_catalog_capacity:
                     self._omitted_image_count += 1
                     continue
                 self._candidate_catalog[key] = candidate
+            self._latest_candidate_keys.add(key)
             entered += 1
             host = candidate.source_domain or urlsplit(candidate.source_url).hostname or ""
             if allowed and any(host_matches(host, entry) for entry in allowed):
@@ -616,22 +609,24 @@ class WebResearchSession:
         )
 
     def _ranked_catalog(self) -> list[tuple[tuple[str, str], ProviderImageCandidate]]:
-        """The whole catalog, best first. Equal tuples keep insertion order."""
+        """Latest search first, quality-ranked within each cohort."""
 
         return sorted(
             self._candidate_catalog.items(),
-            key=lambda item: _image_candidate_priority(
-                item[1], preferred=item[0] in self._preferred_candidate_keys
+            key=lambda item: (
+                item[0] not in self._latest_candidate_keys,
+                *_image_candidate_priority(
+                    item[1], preferred=item[0] in self._preferred_candidate_keys
+                ),
             ),
         )
 
     async def _prepare_images(self) -> tuple[ResearchFailure, ...]:
-        """Recompute the active vision window over the whole catalog.
+        """Show the latest cohort, falling back to usable older candidates.
 
         Already-prepared candidates are retained without refetching and newly
-        active ones are fetched; only once the replacements exist are evicted
-        references released, so a failed fetch costs the improvement rather
-        than the image the model already had.
+        active ones are fetched. Previously inspected images remain held for
+        composition, while unused, uninspected replacements can be released.
         """
 
         if self.service.image_service is None:
@@ -754,7 +749,7 @@ class WebResearchSession:
             outcomes, key=lambda outcome: outcome[0]
         ):
             source = self.source_registry.resolve(candidate.source_url)
-            if failure_code is not None or fetched is None or source is None:
+            if failure_code is not None or fetched is None:
                 self._omitted_image_count += 1
                 failures.append(
                     ResearchFailure(
@@ -783,6 +778,38 @@ class WebResearchSession:
             ):
                 self._omitted_image_count += 1
                 continue
+
+            if source is None:
+                admitted = self.source_registry.admit(
+                    (
+                        ProviderSource(
+                            provider=candidate.provider,
+                            url=candidate.source_url,
+                            title=candidate.title,
+                            snippet=candidate.description,
+                            rank=candidate.rank,
+                            query_index=self._operation_index,
+                            published_at=candidate.published_at,
+                        ),
+                    ),
+                    max_new_sources=max(
+                        0, self._image_catalog_capacity - self._admitted_image_sources
+                    ),
+                )
+                self._admitted_image_sources += len(admitted)
+                self._image_only_source_ids.update(record.source_id for record in admitted)
+                source = self.source_registry.resolve(candidate.source_url)
+                if source is None:
+                    self._omitted_image_count += 1
+                    failures.append(
+                        ResearchFailure(
+                            operation="image_search",
+                            provider=candidate.provider,
+                            code="image_source_capacity",
+                            retryable=False,
+                        )
+                    )
+                    continue
 
             persisted = await self.service.image_service.register(
                 conversation_id=UUID(self.scope.conversation_id),
@@ -849,11 +876,13 @@ class WebResearchSession:
         return failures, rejected
 
     async def _retain_active(self, keys: Sequence[tuple[str, str]]) -> None:
-        """Make ``keys`` the active window and release everything else."""
+        """Rotate the vision window; retain inspected media until closeout."""
 
         keep = set(keys)
         evicted = [
-            (key, prepared) for key, prepared in self._prepared_by_key.items() if key not in keep
+            (key, prepared)
+            for key, prepared in self._prepared_by_key.items()
+            if key not in keep and prepared.record.candidate_id not in self._presented_candidate_ids
         ]
         for key, prepared in evicted:
             del self._prepared_by_key[key]
@@ -865,12 +894,7 @@ class WebResearchSession:
             self._prepared_by_key[key].record.candidate_id: self._prepared_by_key[key]
             for key in keys
         }
-        # A figure's dependency leaves the window but keeps its reference.
-        released = [
-            prepared.reference_id
-            for _key, prepared in evicted
-            if prepared.record.candidate_id not in self._pinned_images
-        ]
+        released = [prepared.reference_id for _key, prepared in evicted]
         if released and self.service.image_service is not None:
             try:
                 await self.service.image_service.release_references(
@@ -901,13 +925,9 @@ class WebResearchSession:
         Text pages, opened pages, image pages backing an active image, and any
         page the answer actually cited.
 
-        The registry keeps every image-cohort page so grounding can resolve any
-        ``S#`` the model was offered. Most of those pages are gallery hosts
-        whose candidate never entered the vision window, and publishing them
-        buries the handful of sources the answer actually rests on. But the
-        model is *offered* all of them in its evidence message, so it can cite
-        one -- and grounding renders that citation as a source link. Dropping
-        the cited page would leave the reader a ``[1]`` pointing at nothing.
+        The registry preserves previously offered image pages after their
+        images leave the vision window. Explicitly cited pages remain published
+        so references to retained images cannot produce dangling citations.
         """
 
         active = {prepared.record.source_id for prepared in self.prepared_images.values()}
@@ -961,13 +981,27 @@ class WebResearchSession:
                     },
                 )
             )
+        for candidate_id, prepared in self._held_images().items():
+            if candidate_id not in self.prepared_images:
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Previously inspected image {candidate_id}; "
+                            f"source {prepared.record.source_id}; "
+                            f"title {(prepared.record.title or '')[:200]!r}. "
+                            "Still available for selection or composition with current images "
+                            "if its previously inspected content supports the answer."
+                        ),
+                    }
+                )
         return blocks
 
     # -- composed figures ----------------------------------------------------
 
     def known_image(self, candidate_id: str) -> PreparedImage | None:
-        """A candidate in the vision window, or one a figure pinned after it left."""
-        return self.prepared_images.get(candidate_id) or self._pinned_images.get(candidate_id)
+        """An active candidate or retained, previously inspected image."""
+        return self._held_images().get(candidate_id)
 
     def figure_images(self, candidate_ids: Sequence[str]) -> list[PreparedImage]:
         """Resolve the candidates a figure may be composed from.
@@ -995,10 +1029,6 @@ class WebResearchSession:
 
     def pin_figure(self, figure_id: str, candidate_ids: Sequence[str]) -> None:
         """Keep a figure's media past later searches until the turn finishes."""
-        for candidate_id in candidate_ids:
-            prepared = self.known_image(candidate_id)
-            if prepared is not None:
-                self._pinned_images[candidate_id] = prepared
         self._figure_dependencies[figure_id] = tuple(candidate_ids)
 
     @property
@@ -1006,7 +1036,9 @@ class WebResearchSession:
         return frozenset(self._figure_dependencies)
 
     def _held_images(self) -> dict[str, PreparedImage]:
-        return {**self._pinned_images, **self.prepared_images}
+        return {
+            prepared.record.candidate_id: prepared for prepared in self._prepared_by_key.values()
+        }
 
     async def finish(
         self,
