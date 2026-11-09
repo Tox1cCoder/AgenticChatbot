@@ -62,6 +62,21 @@ class MessageCreate(BaseModel):
             "endpoints and `data-rich-items` transient events."
         ),
     )
+    answer_visuals_v1: bool = Field(
+        default=False,
+        description=(
+            "Effective answer-visual capability (base rich contract, client flag, and "
+            "rollout gate). Lets a public answer author static visuals; otherwise the "
+            "turn has no create_answer_visual tool."
+        ),
+    )
+    source_figures_v1: bool = Field(
+        default=False,
+        description=(
+            "Effective source-figure capability (base rich contract, client flag, and "
+            "rollout gate). Lets a public web answer compose labelled figures."
+        ),
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -190,6 +205,20 @@ class InterruptResumeRequest(BaseModel):
             "for the resumed response (marker-bearing content + `data-rich-items`)."
         ),
     )
+    answer_visuals_v1: bool = Field(
+        default=False,
+        description=(
+            "AI SDK presentation of this response only: render `answer_visual` rich "
+            "items instead of their Markdown fallback. Requires inlineRichResponseV1."
+        ),
+    )
+    source_figures_v1: bool = Field(
+        default=False,
+        description=(
+            "AI SDK presentation of this response only: receive composed figures with "
+            "labels and captions instead of legacy images. Requires inlineRichResponseV1."
+        ),
+    )
     stream_web_answer_v1: bool = Field(
         default=False,
         description=(
@@ -277,6 +306,8 @@ class ContinueGenerationRequest(BaseModel):
     inline_rich_response_v1: bool = False
     # AI SDK presentation of this response only; see InterruptResumeRequest.
     stream_web_answer_v1: bool = False
+    answer_visuals_v1: bool = False
+    source_figures_v1: bool = False
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 

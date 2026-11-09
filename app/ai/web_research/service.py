@@ -7,7 +7,7 @@ import base64
 import hashlib
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -27,6 +27,7 @@ from app.core.rich_response import (
     ImageRichItem,
     RichItemType,
 )
+from app.core.source_figures import SourceFigureError
 from app.services.web_image_service import downscale_for_model
 
 from .contracts import (
@@ -255,6 +256,15 @@ class WebResearchSession:
         self._opened_urls: set[str] = set()
         self._visual_intent = "none"
         self._operation_lock = asyncio.Lock()
+        #: Candidates whose pixels reached a vision-capable answer attempt. The
+        #: server can verify presentation, not understanding.
+        self._presented_candidate_ids: set[str] = set()
+        #: Whether the most recent answer attempt could see images; ``None``
+        #: before any attempt was shown evidence.
+        #: Media a composed figure depends on, kept outside the vision window
+        #: so a later search can evict a preview without releasing the image.
+        self._pinned_images: dict[str, PreparedImage] = {}
+        self._figure_dependencies: dict[str, tuple[str, ...]] = {}
 
     async def search(self, request: ResearchRequest) -> WebEvidenceBundle:
         async with self._operation_lock:
@@ -855,10 +865,16 @@ class WebResearchSession:
             self._prepared_by_key[key].record.candidate_id: self._prepared_by_key[key]
             for key in keys
         }
-        if evicted and self.service.image_service is not None:
+        # A figure's dependency leaves the window but keeps its reference.
+        released = [
+            prepared.reference_id
+            for _key, prepared in evicted
+            if prepared.record.candidate_id not in self._pinned_images
+        ]
+        if released and self.service.image_service is not None:
             try:
                 await self.service.image_service.release_references(
-                    [prepared.reference_id for _key, prepared in evicted],
+                    released,
                     user_id=UUID(self.scope.user_id),
                     conversation_id=UUID(self.scope.conversation_id),
                 )
@@ -916,6 +932,9 @@ class WebResearchSession:
         return self._latest_image_objective
 
     def model_evidence_blocks(self) -> list[dict[str, Any]]:
+        # Offering the pixels is what makes a candidate composable; a textual
+        # ``I#`` label alone is not inspection.
+        self._presented_candidate_ids.update(self.prepared_images)
         blocks: list[dict[str, Any]] = []
         for candidate_id, prepared in self.prepared_images.items():
             record = prepared.record
@@ -944,20 +963,85 @@ class WebResearchSession:
             )
         return blocks
 
-    async def finish(self, selected_candidate_ids: Sequence[str]) -> ResearchCloseout:
+    # -- composed figures ----------------------------------------------------
+
+    def known_image(self, candidate_id: str) -> PreparedImage | None:
+        """A candidate in the vision window, or one a figure pinned after it left."""
+        return self.prepared_images.get(candidate_id) or self._pinned_images.get(candidate_id)
+
+    def figure_images(self, candidate_ids: Sequence[str]) -> list[PreparedImage]:
+        """Resolve the candidates a figure may be composed from.
+
+        Only candidates whose pixels reached a vision-capable attempt qualify,
+        and only while the latest attempt could see images: a textual ``I#``
+        label alone is not inspection.
+
+        Raises:
+            SourceFigureError: with a message the model can act on.
+        """
+        if not self._presented_candidate_ids:
+            raise SourceFigureError("no image has been shown to you yet; inspect images first")
+        images: list[PreparedImage] = []
+        for candidate_id in candidate_ids:
+            prepared = self.known_image(candidate_id)
+            if prepared is None:
+                raise SourceFigureError(f"unknown image {candidate_id}; use an offered I# id")
+            if candidate_id not in self._presented_candidate_ids:
+                raise SourceFigureError(
+                    f"image {candidate_id} was not shown to you yet; inspect it before composing"
+                )
+            images.append(prepared)
+        return images
+
+    def pin_figure(self, figure_id: str, candidate_ids: Sequence[str]) -> None:
+        """Keep a figure's media past later searches until the turn finishes."""
+        for candidate_id in candidate_ids:
+            prepared = self.known_image(candidate_id)
+            if prepared is not None:
+                self._pinned_images[candidate_id] = prepared
+        self._figure_dependencies[figure_id] = tuple(candidate_ids)
+
+    @property
+    def figure_ids(self) -> frozenset[str]:
+        return frozenset(self._figure_dependencies)
+
+    def _held_images(self) -> dict[str, PreparedImage]:
+        return {**self._pinned_images, **self.prepared_images}
+
+    async def finish(
+        self,
+        selected_candidate_ids: Sequence[str],
+        *,
+        selected_figure_ids: Sequence[str] = (),
+    ) -> ResearchCloseout:
+        """Keep the media the answer placed and release the rest, once each.
+
+        A placed figure selects its dependencies; an invented or unplaced
+        figure id selects nothing. Selected media stay pending until message
+        persistence marks them selected; if that never happens the pending
+        TTL reclaims them.
+        """
+        held = self._held_images()
+        figure_candidates = [
+            candidate_id
+            for figure_id in selected_figure_ids
+            for candidate_id in self._figure_dependencies.get(figure_id, ())
+        ]
         selected = tuple(
             dict.fromkeys(
                 candidate_id
-                for candidate_id in selected_candidate_ids
-                if candidate_id in self.prepared_images
+                for candidate_id in (*selected_candidate_ids, *figure_candidates)
+                if candidate_id in held
             )
         )
-        selected_set = set(selected)
-        released_refs = [
-            prepared.reference_id
-            for candidate_id, prepared in self.prepared_images.items()
-            if candidate_id not in selected_set
-        ]
+        kept_refs = {held[candidate_id].reference_id for candidate_id in selected}
+        released_refs = list(
+            dict.fromkeys(
+                prepared.reference_id
+                for prepared in held.values()
+                if prepared.reference_id not in kept_refs
+            )
+        )
         scope = {
             "user_id": UUID(self.scope.user_id),
             "conversation_id": UUID(self.scope.conversation_id),
@@ -976,13 +1060,37 @@ class WebResearchSession:
         return ResearchCloseout(selected_candidate_ids=selected)
 
     async def abort(self) -> None:
+        await self._close_releasing(self._held_images().values())
+
+    async def suspend(self) -> None:
+        """Close for an approval pause, keeping what a composed figure needs.
+
+        The figure's descriptor is checkpointed on its tool message, so the
+        resumed answer may still place it; its media stay pending, and the
+        pending TTL reclaims them if the turn is never resumed. Everything
+        else is released: a resumed run's fresh session cannot select it.
+        """
+        figure_media = {
+            candidate_id
+            for dependencies in self._figure_dependencies.values()
+            for candidate_id in dependencies
+        }
+        await self._close_releasing(
+            prepared
+            for candidate_id, prepared in self._held_images().items()
+            if candidate_id not in figure_media
+        )
+
+    async def _close_releasing(self, images: Iterable[PreparedImage]) -> None:
         if self._closed or self.service.image_service is None:
             return
-        await self.service.image_service.release_references(
-            [prepared.reference_id for prepared in self.prepared_images.values()],
-            user_id=UUID(self.scope.user_id),
-            conversation_id=UUID(self.scope.conversation_id),
-        )
+        references = list(dict.fromkeys(prepared.reference_id for prepared in images))
+        if references:
+            await self.service.image_service.release_references(
+                references,
+                user_id=UUID(self.scope.user_id),
+                conversation_id=UUID(self.scope.conversation_id),
+            )
         self._closed = True
         if self.service.metrics is not None:
             with suppress(Exception):

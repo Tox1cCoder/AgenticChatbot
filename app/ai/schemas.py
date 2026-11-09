@@ -133,6 +133,8 @@ class WorkflowExecutionRequest(BaseModel):
     user_message_id: str | None = None
     assistant_message_id: str | None = None
     inline_rich_response_v1: bool = False
+    answer_visuals_v1: bool = False
+    source_figures_v1: bool = False
     hitl_policy: dict[str, Any] | None = None
     # routing-v2 turn identity. ``turn_id`` is the persisted user-message ID and
     # ``request_id`` is the API correlation ID when available. The service
@@ -183,6 +185,10 @@ class GraphContext(TypedDict, total=False):
     # Per-turn capability flag forwarded from the service boundary so workflow
     # nodes can decide whether to surface marker syntax / inventory to agents.
     inline_rich_response_v1: bool
+    # Effective answer-visual capability; gates create_answer_visual binding.
+    answer_visuals_v1: bool
+    # Effective source-figure capability; gates compose_source_figure binding.
+    source_figures_v1: bool
     # Per-turn, per-user HITL approval policy (checkpoint-safe plain dict). Read by
     # the gate via ``policy_from_context``; absent/None falls back to the global policy.
     hitl_policy: dict[str, Any]

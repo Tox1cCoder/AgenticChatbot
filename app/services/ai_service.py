@@ -125,26 +125,18 @@ class AIService:
         """
         if not isinstance(render, dict) or not tool_call_id:
             return []
-        from app.ai.tool_execution import (
-            build_live_widget_candidate_from_tool_result,
-            build_tool_render_candidate,
-        )
+        from app.ai.tool_execution import build_tool_result_rich_candidates
         from app.core.rich_response import select_transient_upsert_items
 
-        normalized_tool_name = str(tool_name or "")
-        candidate = build_live_widget_candidate_from_tool_result(
-            result,
-            tool_name=normalized_tool_name,
+        candidates = build_tool_result_rich_candidates(
+            raw_result=result,
+            result_text=result,
+            render=render,
+            tool_call_id=str(tool_call_id),
+            tool_name=str(tool_name or ""),
+            include_images=False,
         )
-        if candidate is None:
-            candidate = build_tool_render_candidate(
-                render,
-                tool_call_id=str(tool_call_id),
-                tool_name=normalized_tool_name,
-            )
-        if candidate is None:
-            return []
-        return list(select_transient_upsert_items([candidate]))
+        return list(select_transient_upsert_items(candidates))
 
     def _prepare_request(self, request: WorkflowExecutionRequest) -> WorkflowExecutionRequest:
         if request.persona is not None or not request.conversation_id:

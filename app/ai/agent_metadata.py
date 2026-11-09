@@ -13,27 +13,32 @@ BASE_AGENT_DISPLAY_NAMES = {
 
 # Short capability blurbs for base agents, surfaced to a delegating agent so it
 # can recognise which specialist to hand off to when a request — or a part of it
-# — falls outside its own toolset. Kept terse and aligned with the router's
-# agent descriptions (app/ai/prompts.py::ROUTER_SYSTEM_PROMPT).
+# — falls outside its own toolset. The routing inventory also feeds these to the
+# router as each base agent's capability description, alongside the structured
+# instruction in app/ai/workflow/routing.py::ROUTER_SYSTEM_PROMPT.
 BASE_AGENT_CAPABILITIES = {
     "chat_agent": (
-        "General conversation, explanations, advice, Q&A, coding help, and "
-        "tool-backed work in external integrations, accounts, and apps."
+        "General conversation, explanations, advice, Q&A, coding help, answers "
+        "with compact inline static visuals (steps, bar charts, comparison tables, "
+        "labelled source figures), and tool-backed work in external integrations, "
+        "accounts, and apps."
     ),
     "rag_agent": (
         "Questions about uploaded documents: document analysis and summaries of uploaded content."
     ),
     "search_agent": (
         "Current events, news, recent and time-sensitive information, web search, "
-        "and fact-checking."
+        "and fact-checking, including answers with compact inline static visuals "
+        "and labelled figures from web images."
     ),
     "image_generator_agent": (
         "Creating raster/pixel images, drawings, and illustrations (non-code visual generation)."
     ),
     "planning_agent": ("Creating, editing, viewing, or executing multi-step task plans."),
     "canvas_agent": (
-        "Authoring standalone browser artifacts: websites, web apps, interactive "
-        "components, games, visualizations, SVG, and HTML/CSS/JS."
+        "Authoring or editing standalone browser artifacts only: websites, web apps, "
+        "interactive components, games, dashboards, visualizations, SVG, and "
+        "HTML/CSS/JS. Not for inline visuals inside a chat answer."
     ),
 }
 

@@ -12,8 +12,10 @@ import pytest
 from app.services import message_service as message_service_module
 from app.services.event_streaming.events import make_event
 from app.services.message_service import MessageService
+from app.services.web_image_service import WEB_IMAGE_URL_PREFIX
 
 IMAGE_ID = "image:tool:c1:0"
+LIVE_REFERENCE = "0b0c7f5e-2f4c-4a64-9d55-4c0f3a3a9e11"
 
 
 def _metadata(url: str = "https://img.example/a.jpg") -> dict:
@@ -141,7 +143,7 @@ async def test_registration_failure_drops_only_image_and_exact_marker(caplog):
     "image_payload",
     (
         {"url": "/chat-images/known", "mime_type": "image/png"},
-        {"url": "/web-images/known", "mime_type": "image/png"},
+        {"url": f"{WEB_IMAGE_URL_PREFIX}{LIVE_REFERENCE}", "mime_type": "image/png"},
         {"data": "QUJD", "mime_type": "image/png"},
     ),
 )
@@ -233,6 +235,37 @@ async def test_one_failing_cell_keeps_the_group_and_its_marker():
 
     cells = externalized["rich_items"][0]["payload"]["items"]
     assert [c["url"] for c in cells] == [f"/web-images/{reference_id}"]
+    assert "<!--rich:imagegroup:tool:c1-->" in content
+
+
+@pytest.mark.asyncio
+async def test_a_figure_losing_a_cell_drops_its_comparison_caption():
+    """A before/after conclusion must never stand over a single surviving image."""
+
+    async def _register(**kwargs):
+        if kwargs["upstream_url"].endswith("b.jpg"):
+            raise RuntimeError("upstream rejected")
+        return SimpleNamespace(id=uuid4())
+
+    web_images = AsyncMock()
+    web_images.register.side_effect = _register
+    metadata = _group_metadata()
+    figure = metadata["rich_items"][0]
+    figure["source"] = "source_figure"
+    figure["payload"]["caption"] = "Shadows off removes the contact shadow."
+    figure["payload"]["fallback_markdown"] = "**Figure:** Shadows off removes the contact shadow."
+    for label, cell in zip(("On", "Off"), figure["payload"]["items"], strict=True):
+        cell.update(label=f"Shadows {label}", alt_text=f"Car with shadows {label.lower()}")
+
+    content, externalized = await _service(web_images)._externalize_remote_rich_images(
+        "Body\n\n<!--rich:imagegroup:tool:c1-->\n", metadata, uuid4(), uuid4()
+    )
+
+    [kept] = externalized["rich_items"]
+    assert [cell["label"] for cell in kept["payload"]["items"]] == ["Shadows On"]
+    assert "caption" not in kept["payload"]
+    assert kept["payload"]["comparison_unavailable"] is True
+    assert "contact shadow" not in kept["payload"]["fallback_markdown"]
     assert "<!--rich:imagegroup:tool:c1-->" in content
 
 
@@ -466,3 +499,73 @@ async def test_a_marker_for_a_real_item_survives():
 
     assert f"<!--rich:{IMAGE_ID}-->" in updated_content
     assert updated["rich_reference_warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_released_reference_is_not_reused_and_degrades_its_figure():
+    """A reference released or expired before persistence is gone for good.
+
+    Reusing its URL persisted a cell that can never load. It is dropped like a
+    failed registration, so a figure loses its comparison instead.
+    """
+    live, released = uuid4(), uuid4()
+
+    async def _is_live(image_id, **_scope):
+        return image_id == live
+
+    web_images = AsyncMock()
+    web_images.is_live.side_effect = _is_live
+    metadata = _group_metadata()
+    figure = metadata["rich_items"][0]
+    figure["source"] = "source_figure"
+    figure["payload"]["caption"] = "Shadows off removes the contact shadow."
+    for reference, cell in zip((live, released), figure["payload"]["items"], strict=True):
+        cell["url"] = f"{WEB_IMAGE_URL_PREFIX}{reference}"
+
+    _content, externalized = await _service(web_images)._externalize_remote_rich_images(
+        "Body\n\n<!--rich:imagegroup:tool:c1-->\n", metadata, uuid4(), uuid4()
+    )
+
+    [kept] = externalized["rich_items"]
+    assert [cell["url"] for cell in kept["payload"]["items"]] == [
+        f"{WEB_IMAGE_URL_PREFIX}{live}"
+    ]
+    assert kept["payload"]["comparison_unavailable"] is True
+    assert "caption" not in kept["payload"]
+    web_images.register.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_liveness_lookup_drops_only_that_image():
+    """A database hiccup on one cell costs that cell, never the answer."""
+    web_images = AsyncMock()
+    web_images.is_live.side_effect = RuntimeError("pool timeout")
+    metadata = _metadata()
+    metadata["rich_items"][0]["payload"] = {
+        "url": f"{WEB_IMAGE_URL_PREFIX}{LIVE_REFERENCE}",
+        "mime_type": "image/png",
+    }
+
+    content, externalized = await _service(web_images)._externalize_remote_rich_images(
+        f"Text <!--rich:{IMAGE_ID}-->", metadata, uuid4(), uuid4()
+    )
+
+    assert [item["type"] for item in externalized["rich_items"]] == ["live_widget"]
+    assert content.startswith("Text")
+
+
+@pytest.mark.asyncio
+async def test_a_reference_that_is_not_an_id_is_not_reused():
+    web_images = AsyncMock()
+    metadata = _metadata()
+    metadata["rich_items"][0]["payload"] = {
+        "url": f"{WEB_IMAGE_URL_PREFIX}not-an-id",
+        "mime_type": "image/png",
+    }
+
+    content, externalized = await _service(web_images)._externalize_remote_rich_images(
+        f"Text <!--rich:{IMAGE_ID}-->", metadata, uuid4(), uuid4()
+    )
+
+    assert [item["type"] for item in externalized["rich_items"]] == ["live_widget"]
+    assert f"<!--rich:{IMAGE_ID}-->" not in content

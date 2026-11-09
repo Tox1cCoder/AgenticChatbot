@@ -1,0 +1,195 @@
+{
+  "content": "Compare the shadows:\n\n<!--rich:figure:242d1a004a09969dee7f9860-->\n\nKeep shadows at least Medium.",
+  "example": "Side-by-side graphics screenshots",
+  "projections": {
+    "base_rich": {
+      "content": "Compare the shadows:\n\n**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))\n\n<!--rich:figure:242d1a004a09969dee7f9860-->\n\nKeep shadows at least Medium.",
+      "rich_items": [
+        {
+          "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "display_policy": "inline_only",
+          "id": "figure:242d1a004a09969dee7f9860",
+          "payload": {
+            "items": [
+              {
+                "height": 720,
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens1.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000001",
+                "width": 1280
+              },
+              {
+                "height": 720,
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens2.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000002",
+                "width": 1280
+              }
+            ]
+          },
+          "provenance": {
+            "provider": "source_figure"
+          },
+          "source": "source_figure",
+          "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "type": "image_group"
+        }
+      ]
+    },
+    "figures_only": {
+      "content": "Compare the shadows:\n\n<!--rich:figure:242d1a004a09969dee7f9860-->\n\nKeep shadows at least Medium.",
+      "rich_items": [
+        {
+          "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "display_policy": "inline_only",
+          "id": "figure:242d1a004a09969dee7f9860",
+          "payload": {
+            "caption": "Low shadows remove the contact shadow, so the car looks like it floats.",
+            "fallback_markdown": "**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))",
+            "items": [
+              {
+                "alt_text": "Car with a soft contact shadow under the chassis",
+                "height": 720,
+                "label": "Shadows: High",
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens1.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000001",
+                "width": 1280
+              },
+              {
+                "alt_text": "Same car with no contact shadow",
+                "height": 720,
+                "label": "Shadows: Low",
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens2.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000002",
+                "width": 1280
+              }
+            ]
+          },
+          "provenance": {
+            "provider": "source_figure"
+          },
+          "source": "source_figure",
+          "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "type": "image_group"
+        }
+      ]
+    },
+    "full": {
+      "content": "Compare the shadows:\n\n<!--rich:figure:242d1a004a09969dee7f9860-->\n\nKeep shadows at least Medium.",
+      "rich_items": [
+        {
+          "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "display_policy": "inline_only",
+          "id": "figure:242d1a004a09969dee7f9860",
+          "payload": {
+            "caption": "Low shadows remove the contact shadow, so the car looks like it floats.",
+            "fallback_markdown": "**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))",
+            "items": [
+              {
+                "alt_text": "Car with a soft contact shadow under the chassis",
+                "height": 720,
+                "label": "Shadows: High",
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens1.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000001",
+                "width": 1280
+              },
+              {
+                "alt_text": "Same car with no contact shadow",
+                "height": 720,
+                "label": "Shadows: Low",
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens2.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000002",
+                "width": 1280
+              }
+            ]
+          },
+          "provenance": {
+            "provider": "source_figure"
+          },
+          "source": "source_figure",
+          "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "type": "image_group"
+        }
+      ]
+    },
+    "non_rich": {
+      "content": "Compare the shadows:\n\n**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))\n\nKeep shadows at least Medium.",
+      "rich_items": null
+    },
+    "visuals_only": {
+      "content": "Compare the shadows:\n\n**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))\n\n<!--rich:figure:242d1a004a09969dee7f9860-->\n\nKeep shadows at least Medium.",
+      "rich_items": [
+        {
+          "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "display_policy": "inline_only",
+          "id": "figure:242d1a004a09969dee7f9860",
+          "payload": {
+            "items": [
+              {
+                "height": 720,
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens1.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000001",
+                "width": 1280
+              },
+              {
+                "height": 720,
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens2.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000002",
+                "width": 1280
+              }
+            ]
+          },
+          "provenance": {
+            "provider": "source_figure"
+          },
+          "source": "source_figure",
+          "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "type": "image_group"
+        }
+      ]
+    }
+  },
+  "rich_items": [
+    {
+      "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+      "display_policy": "inline_only",
+      "id": "figure:242d1a004a09969dee7f9860",
+      "payload": {
+        "caption": "Low shadows remove the contact shadow, so the car looks like it floats.",
+        "fallback_markdown": "**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))",
+        "items": [
+          {
+            "alt_text": "Car with a soft contact shadow under the chassis",
+            "height": 720,
+            "label": "Shadows: High",
+            "mime_type": "image/jpeg",
+            "source_url": "https://screens1.example/graphics",
+            "url": "/web-images/00000000-0000-4000-8000-000000000001",
+            "width": 1280
+          },
+          {
+            "alt_text": "Same car with no contact shadow",
+            "height": 720,
+            "label": "Shadows: Low",
+            "mime_type": "image/jpeg",
+            "source_url": "https://screens2.example/graphics",
+            "url": "/web-images/00000000-0000-4000-8000-000000000002",
+            "width": 1280
+          }
+        ]
+      },
+      "provenance": {
+        "provider": "source_figure"
+      },
+      "source": "source_figure",
+      "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+      "type": "image_group"
+    }
+  ]
+}

@@ -1,0 +1,381 @@
+{
+  "content": "The overclock adds 50 MHz:\n\n<!--rich:visual:24b585185c11cf4a6f93cb06-->\n\nat a higher voltage:\n\n<!--rich:visual:95a94599fa3a37e74f671843-->\n\nIf FPS tracked clock exactly:\n\n<!--rich:visual:61247804e47ed29cb7cb48a9-->\n\nThat is about 1%, within run-to-run noise.",
+  "example": "Clock/voltage/FPS comparison",
+  "projections": {
+    "base_rich": {
+      "content": "The overclock adds 50 MHz:\n\n**Core clock**\n\n| Item | Value (MHz) | Sources |\n| --- | --- | --- |\n| Stock | 4700 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 4750 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 4750 MHz.\n\nat a higher voltage:\n\n**Core voltage**\n\n| Item | Value (V) | Sources |\n| --- | --- | --- |\n| Stock | 1.25 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 1.32 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 1.32 V.\n\nIf FPS tracked clock exactly:\n\n**Average FPS (teaching example)**\n\n| Item | Value (FPS) |\n| --- | --- |\n| Stock | 100 |\n| Overclocked | 101 |\n\nBasis: calculated — Assumes FPS scales exactly with core clock (about +1%); real games rarely scale this way. Scale: 0 to 101 FPS.\n\nThat is about 1%, within run-to-run noise.",
+      "rich_items": []
+    },
+    "figures_only": {
+      "content": "The overclock adds 50 MHz:\n\n**Core clock**\n\n| Item | Value (MHz) | Sources |\n| --- | --- | --- |\n| Stock | 4700 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 4750 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 4750 MHz.\n\nat a higher voltage:\n\n**Core voltage**\n\n| Item | Value (V) | Sources |\n| --- | --- | --- |\n| Stock | 1.25 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 1.32 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 1.32 V.\n\nIf FPS tracked clock exactly:\n\n**Average FPS (teaching example)**\n\n| Item | Value (FPS) |\n| --- | --- |\n| Stock | 100 |\n| Overclocked | 101 |\n\nBasis: calculated — Assumes FPS scales exactly with core clock (about +1%); real games rarely scale this way. Scale: 0 to 101 FPS.\n\nThat is about 1%, within run-to-run noise.",
+      "rich_items": []
+    },
+    "full": {
+      "content": "The overclock adds 50 MHz:\n\n<!--rich:visual:24b585185c11cf4a6f93cb06-->\n\nat a higher voltage:\n\n<!--rich:visual:95a94599fa3a37e74f671843-->\n\nIf FPS tracked clock exactly:\n\n<!--rich:visual:61247804e47ed29cb7cb48a9-->\n\nThat is about 1%, within run-to-run noise.",
+      "rich_items": [
+        {
+          "display_policy": "inline_only",
+          "id": "visual:24b585185c11cf4a6f93cb06",
+          "payload": {
+            "bars": [
+              {
+                "citations": [
+                  1
+                ],
+                "label": "Stock",
+                "value": 4700.0
+              },
+              {
+                "citations": [
+                  1
+                ],
+                "label": "Overclocked",
+                "value": 4750.0
+              }
+            ],
+            "basis": "measured",
+            "caption_citations": [],
+            "evidence": [
+              {
+                "label": "bench.example",
+                "title": "CPU review",
+                "url": "https://bench.example/cpu-review"
+              }
+            ],
+            "fallback_markdown": "**Core clock**\n\n| Item | Value (MHz) | Sources |\n| --- | --- | --- |\n| Stock | 4700 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 4750 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 4750 MHz.",
+            "scale": {
+              "max": 4750.0,
+              "min": 0
+            },
+            "title": "Core clock",
+            "unit": "MHz",
+            "variant": "bars"
+          },
+          "source": "answer_visual_tool",
+          "title": "Core clock",
+          "type": "answer_visual"
+        },
+        {
+          "display_policy": "inline_only",
+          "id": "visual:95a94599fa3a37e74f671843",
+          "payload": {
+            "bars": [
+              {
+                "citations": [
+                  1
+                ],
+                "label": "Stock",
+                "value": 1.25
+              },
+              {
+                "citations": [
+                  1
+                ],
+                "label": "Overclocked",
+                "value": 1.32
+              }
+            ],
+            "basis": "measured",
+            "caption_citations": [],
+            "evidence": [
+              {
+                "label": "bench.example",
+                "title": "CPU review",
+                "url": "https://bench.example/cpu-review"
+              }
+            ],
+            "fallback_markdown": "**Core voltage**\n\n| Item | Value (V) | Sources |\n| --- | --- | --- |\n| Stock | 1.25 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 1.32 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 1.32 V.",
+            "scale": {
+              "max": 1.32,
+              "min": 0
+            },
+            "title": "Core voltage",
+            "unit": "V",
+            "variant": "bars"
+          },
+          "source": "answer_visual_tool",
+          "title": "Core voltage",
+          "type": "answer_visual"
+        },
+        {
+          "display_policy": "inline_only",
+          "id": "visual:61247804e47ed29cb7cb48a9",
+          "payload": {
+            "assumptions": "Assumes FPS scales exactly with core clock (about +1%); real games rarely scale this way.",
+            "bars": [
+              {
+                "citations": [],
+                "label": "Stock",
+                "value": 100.0
+              },
+              {
+                "citations": [],
+                "label": "Overclocked",
+                "value": 101.0
+              }
+            ],
+            "basis": "calculated",
+            "caption_citations": [],
+            "evidence": [],
+            "fallback_markdown": "**Average FPS (teaching example)**\n\n| Item | Value (FPS) |\n| --- | --- |\n| Stock | 100 |\n| Overclocked | 101 |\n\nBasis: calculated — Assumes FPS scales exactly with core clock (about +1%); real games rarely scale this way. Scale: 0 to 101 FPS.",
+            "scale": {
+              "max": 101.0,
+              "min": 0
+            },
+            "title": "Average FPS (teaching example)",
+            "unit": "FPS",
+            "variant": "bars"
+          },
+          "source": "answer_visual_tool",
+          "title": "Average FPS (teaching example)",
+          "type": "answer_visual"
+        }
+      ]
+    },
+    "non_rich": {
+      "content": "The overclock adds 50 MHz:\n\n**Core clock**\n\n| Item | Value (MHz) | Sources |\n| --- | --- | --- |\n| Stock | 4700 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 4750 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 4750 MHz.\n\nat a higher voltage:\n\n**Core voltage**\n\n| Item | Value (V) | Sources |\n| --- | --- | --- |\n| Stock | 1.25 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 1.32 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 1.32 V.\n\nIf FPS tracked clock exactly:\n\n**Average FPS (teaching example)**\n\n| Item | Value (FPS) |\n| --- | --- |\n| Stock | 100 |\n| Overclocked | 101 |\n\nBasis: calculated — Assumes FPS scales exactly with core clock (about +1%); real games rarely scale this way. Scale: 0 to 101 FPS.\n\nThat is about 1%, within run-to-run noise.",
+      "rich_items": null
+    },
+    "visuals_only": {
+      "content": "The overclock adds 50 MHz:\n\n<!--rich:visual:24b585185c11cf4a6f93cb06-->\n\nat a higher voltage:\n\n<!--rich:visual:95a94599fa3a37e74f671843-->\n\nIf FPS tracked clock exactly:\n\n<!--rich:visual:61247804e47ed29cb7cb48a9-->\n\nThat is about 1%, within run-to-run noise.",
+      "rich_items": [
+        {
+          "display_policy": "inline_only",
+          "id": "visual:24b585185c11cf4a6f93cb06",
+          "payload": {
+            "bars": [
+              {
+                "citations": [
+                  1
+                ],
+                "label": "Stock",
+                "value": 4700.0
+              },
+              {
+                "citations": [
+                  1
+                ],
+                "label": "Overclocked",
+                "value": 4750.0
+              }
+            ],
+            "basis": "measured",
+            "caption_citations": [],
+            "evidence": [
+              {
+                "label": "bench.example",
+                "title": "CPU review",
+                "url": "https://bench.example/cpu-review"
+              }
+            ],
+            "fallback_markdown": "**Core clock**\n\n| Item | Value (MHz) | Sources |\n| --- | --- | --- |\n| Stock | 4700 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 4750 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 4750 MHz.",
+            "scale": {
+              "max": 4750.0,
+              "min": 0
+            },
+            "title": "Core clock",
+            "unit": "MHz",
+            "variant": "bars"
+          },
+          "source": "answer_visual_tool",
+          "title": "Core clock",
+          "type": "answer_visual"
+        },
+        {
+          "display_policy": "inline_only",
+          "id": "visual:95a94599fa3a37e74f671843",
+          "payload": {
+            "bars": [
+              {
+                "citations": [
+                  1
+                ],
+                "label": "Stock",
+                "value": 1.25
+              },
+              {
+                "citations": [
+                  1
+                ],
+                "label": "Overclocked",
+                "value": 1.32
+              }
+            ],
+            "basis": "measured",
+            "caption_citations": [],
+            "evidence": [
+              {
+                "label": "bench.example",
+                "title": "CPU review",
+                "url": "https://bench.example/cpu-review"
+              }
+            ],
+            "fallback_markdown": "**Core voltage**\n\n| Item | Value (V) | Sources |\n| --- | --- | --- |\n| Stock | 1.25 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 1.32 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 1.32 V.",
+            "scale": {
+              "max": 1.32,
+              "min": 0
+            },
+            "title": "Core voltage",
+            "unit": "V",
+            "variant": "bars"
+          },
+          "source": "answer_visual_tool",
+          "title": "Core voltage",
+          "type": "answer_visual"
+        },
+        {
+          "display_policy": "inline_only",
+          "id": "visual:61247804e47ed29cb7cb48a9",
+          "payload": {
+            "assumptions": "Assumes FPS scales exactly with core clock (about +1%); real games rarely scale this way.",
+            "bars": [
+              {
+                "citations": [],
+                "label": "Stock",
+                "value": 100.0
+              },
+              {
+                "citations": [],
+                "label": "Overclocked",
+                "value": 101.0
+              }
+            ],
+            "basis": "calculated",
+            "caption_citations": [],
+            "evidence": [],
+            "fallback_markdown": "**Average FPS (teaching example)**\n\n| Item | Value (FPS) |\n| --- | --- |\n| Stock | 100 |\n| Overclocked | 101 |\n\nBasis: calculated — Assumes FPS scales exactly with core clock (about +1%); real games rarely scale this way. Scale: 0 to 101 FPS.",
+            "scale": {
+              "max": 101.0,
+              "min": 0
+            },
+            "title": "Average FPS (teaching example)",
+            "unit": "FPS",
+            "variant": "bars"
+          },
+          "source": "answer_visual_tool",
+          "title": "Average FPS (teaching example)",
+          "type": "answer_visual"
+        }
+      ]
+    }
+  },
+  "rich_items": [
+    {
+      "display_policy": "inline_only",
+      "id": "visual:24b585185c11cf4a6f93cb06",
+      "payload": {
+        "bars": [
+          {
+            "citations": [
+              1
+            ],
+            "label": "Stock",
+            "value": 4700.0
+          },
+          {
+            "citations": [
+              1
+            ],
+            "label": "Overclocked",
+            "value": 4750.0
+          }
+        ],
+        "basis": "measured",
+        "caption_citations": [],
+        "evidence": [
+          {
+            "label": "bench.example",
+            "title": "CPU review",
+            "url": "https://bench.example/cpu-review"
+          }
+        ],
+        "fallback_markdown": "**Core clock**\n\n| Item | Value (MHz) | Sources |\n| --- | --- | --- |\n| Stock | 4700 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 4750 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 4750 MHz.",
+        "scale": {
+          "max": 4750.0,
+          "min": 0
+        },
+        "title": "Core clock",
+        "unit": "MHz",
+        "variant": "bars"
+      },
+      "source": "answer_visual_tool",
+      "title": "Core clock",
+      "type": "answer_visual"
+    },
+    {
+      "display_policy": "inline_only",
+      "id": "visual:95a94599fa3a37e74f671843",
+      "payload": {
+        "bars": [
+          {
+            "citations": [
+              1
+            ],
+            "label": "Stock",
+            "value": 1.25
+          },
+          {
+            "citations": [
+              1
+            ],
+            "label": "Overclocked",
+            "value": 1.32
+          }
+        ],
+        "basis": "measured",
+        "caption_citations": [],
+        "evidence": [
+          {
+            "label": "bench.example",
+            "title": "CPU review",
+            "url": "https://bench.example/cpu-review"
+          }
+        ],
+        "fallback_markdown": "**Core voltage**\n\n| Item | Value (V) | Sources |\n| --- | --- | --- |\n| Stock | 1.25 | [bench.example](https://bench.example/cpu-review) |\n| Overclocked | 1.32 | [bench.example](https://bench.example/cpu-review) |\n\nBasis: measured. Scale: 0 to 1.32 V.",
+        "scale": {
+          "max": 1.32,
+          "min": 0
+        },
+        "title": "Core voltage",
+        "unit": "V",
+        "variant": "bars"
+      },
+      "source": "answer_visual_tool",
+      "title": "Core voltage",
+      "type": "answer_visual"
+    },
+    {
+      "display_policy": "inline_only",
+      "id": "visual:61247804e47ed29cb7cb48a9",
+      "payload": {
+        "assumptions": "Assumes FPS scales exactly with core clock (about +1%); real games rarely scale this way.",
+        "bars": [
+          {
+            "citations": [],
+            "label": "Stock",
+            "value": 100.0
+          },
+          {
+            "citations": [],
+            "label": "Overclocked",
+            "value": 101.0
+          }
+        ],
+        "basis": "calculated",
+        "caption_citations": [],
+        "evidence": [],
+        "fallback_markdown": "**Average FPS (teaching example)**\n\n| Item | Value (FPS) |\n| --- | --- |\n| Stock | 100 |\n| Overclocked | 101 |\n\nBasis: calculated — Assumes FPS scales exactly with core clock (about +1%); real games rarely scale this way. Scale: 0 to 101 FPS.",
+        "scale": {
+          "max": 101.0,
+          "min": 0
+        },
+        "title": "Average FPS (teaching example)",
+        "unit": "FPS",
+        "variant": "bars"
+      },
+      "source": "answer_visual_tool",
+      "title": "Average FPS (teaching example)",
+      "type": "answer_visual"
+    }
+  ]
+}

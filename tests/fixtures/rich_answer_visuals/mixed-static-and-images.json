@@ -1,0 +1,398 @@
+{
+  "content": "Settings page:\n\n<!--rich:image:web:00000000-0000-4000-8000-000000000009-->\n\nSteps:\n\n<!--rich:visual:e23b6d9e1e12af505eaf1b48-->\n\nResult:\n\n<!--rich:figure:242d1a004a09969dee7f9860-->",
+  "example": "Mixed answer: static visual, selected web image, composed figure",
+  "projections": {
+    "base_rich": {
+      "content": "Settings page:\n\n<!--rich:image:web:00000000-0000-4000-8000-000000000009-->\n\nSteps:\n\n**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)\n\nResult:\n\n**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))\n\n<!--rich:figure:242d1a004a09969dee7f9860-->",
+      "rich_items": [
+        {
+          "alt_text": "Edge settings page",
+          "display_policy": "inline_only",
+          "id": "image:web:00000000-0000-4000-8000-000000000009",
+          "payload": {
+            "mime_type": "image/png",
+            "source_url": "https://support.example/edge-search",
+            "url": "/web-images/00000000-0000-4000-8000-000000000009"
+          },
+          "provenance": {
+            "provider": "images",
+            "source_id": "S1"
+          },
+          "source": "image_search",
+          "type": "image"
+        },
+        {
+          "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "display_policy": "inline_only",
+          "id": "figure:242d1a004a09969dee7f9860",
+          "payload": {
+            "items": [
+              {
+                "height": 720,
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens1.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000001",
+                "width": 1280
+              },
+              {
+                "height": 720,
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens2.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000002",
+                "width": 1280
+              }
+            ]
+          },
+          "provenance": {
+            "provider": "source_figure"
+          },
+          "source": "source_figure",
+          "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "type": "image_group"
+        }
+      ]
+    },
+    "figures_only": {
+      "content": "Settings page:\n\n<!--rich:image:web:00000000-0000-4000-8000-000000000009-->\n\nSteps:\n\n**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)\n\nResult:\n\n<!--rich:figure:242d1a004a09969dee7f9860-->",
+      "rich_items": [
+        {
+          "alt_text": "Edge settings page",
+          "display_policy": "inline_only",
+          "id": "image:web:00000000-0000-4000-8000-000000000009",
+          "payload": {
+            "mime_type": "image/png",
+            "source_url": "https://support.example/edge-search",
+            "url": "/web-images/00000000-0000-4000-8000-000000000009"
+          },
+          "provenance": {
+            "provider": "images",
+            "source_id": "S1"
+          },
+          "source": "image_search",
+          "type": "image"
+        },
+        {
+          "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "display_policy": "inline_only",
+          "id": "figure:242d1a004a09969dee7f9860",
+          "payload": {
+            "caption": "Low shadows remove the contact shadow, so the car looks like it floats.",
+            "fallback_markdown": "**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))",
+            "items": [
+              {
+                "alt_text": "Car with a soft contact shadow under the chassis",
+                "height": 720,
+                "label": "Shadows: High",
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens1.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000001",
+                "width": 1280
+              },
+              {
+                "alt_text": "Same car with no contact shadow",
+                "height": 720,
+                "label": "Shadows: Low",
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens2.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000002",
+                "width": 1280
+              }
+            ]
+          },
+          "provenance": {
+            "provider": "source_figure"
+          },
+          "source": "source_figure",
+          "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "type": "image_group"
+        }
+      ]
+    },
+    "full": {
+      "content": "Settings page:\n\n<!--rich:image:web:00000000-0000-4000-8000-000000000009-->\n\nSteps:\n\n<!--rich:visual:e23b6d9e1e12af505eaf1b48-->\n\nResult:\n\n<!--rich:figure:242d1a004a09969dee7f9860-->",
+      "rich_items": [
+        {
+          "alt_text": "Edge settings page",
+          "display_policy": "inline_only",
+          "id": "image:web:00000000-0000-4000-8000-000000000009",
+          "payload": {
+            "mime_type": "image/png",
+            "source_url": "https://support.example/edge-search",
+            "url": "/web-images/00000000-0000-4000-8000-000000000009"
+          },
+          "provenance": {
+            "provider": "images",
+            "source_id": "S1"
+          },
+          "source": "image_search",
+          "type": "image"
+        },
+        {
+          "display_policy": "inline_only",
+          "id": "visual:e23b6d9e1e12af505eaf1b48",
+          "payload": {
+            "caption_citations": [],
+            "evidence": [
+              {
+                "label": "support.example",
+                "title": "Microsoft Edge help",
+                "url": "https://support.example/edge-search"
+              }
+            ],
+            "fallback_markdown": "**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)",
+            "steps": [
+              {
+                "citations": [],
+                "title": "Open Settings from the ... menu"
+              },
+              {
+                "citations": [],
+                "title": "Choose Privacy, search, and services"
+              },
+              {
+                "citations": [],
+                "title": "Open Address bar and search"
+              },
+              {
+                "citations": [
+                  1
+                ],
+                "note": "Google appears only after you have searched with it once.",
+                "title": "Pick Google under Search engine used in the address bar"
+              }
+            ],
+            "title": "Make Google the default search engine in Edge",
+            "variant": "steps"
+          },
+          "source": "answer_visual_tool",
+          "title": "Make Google the default search engine in Edge",
+          "type": "answer_visual"
+        },
+        {
+          "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "display_policy": "inline_only",
+          "id": "figure:242d1a004a09969dee7f9860",
+          "payload": {
+            "caption": "Low shadows remove the contact shadow, so the car looks like it floats.",
+            "fallback_markdown": "**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))",
+            "items": [
+              {
+                "alt_text": "Car with a soft contact shadow under the chassis",
+                "height": 720,
+                "label": "Shadows: High",
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens1.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000001",
+                "width": 1280
+              },
+              {
+                "alt_text": "Same car with no contact shadow",
+                "height": 720,
+                "label": "Shadows: Low",
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens2.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000002",
+                "width": 1280
+              }
+            ]
+          },
+          "provenance": {
+            "provider": "source_figure"
+          },
+          "source": "source_figure",
+          "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "type": "image_group"
+        }
+      ]
+    },
+    "non_rich": {
+      "content": "Settings page:\n\n\n\nSteps:\n\n**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)\n\nResult:\n\n**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))",
+      "rich_items": null
+    },
+    "visuals_only": {
+      "content": "Settings page:\n\n<!--rich:image:web:00000000-0000-4000-8000-000000000009-->\n\nSteps:\n\n<!--rich:visual:e23b6d9e1e12af505eaf1b48-->\n\nResult:\n\n**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))\n\n<!--rich:figure:242d1a004a09969dee7f9860-->",
+      "rich_items": [
+        {
+          "alt_text": "Edge settings page",
+          "display_policy": "inline_only",
+          "id": "image:web:00000000-0000-4000-8000-000000000009",
+          "payload": {
+            "mime_type": "image/png",
+            "source_url": "https://support.example/edge-search",
+            "url": "/web-images/00000000-0000-4000-8000-000000000009"
+          },
+          "provenance": {
+            "provider": "images",
+            "source_id": "S1"
+          },
+          "source": "image_search",
+          "type": "image"
+        },
+        {
+          "display_policy": "inline_only",
+          "id": "visual:e23b6d9e1e12af505eaf1b48",
+          "payload": {
+            "caption_citations": [],
+            "evidence": [
+              {
+                "label": "support.example",
+                "title": "Microsoft Edge help",
+                "url": "https://support.example/edge-search"
+              }
+            ],
+            "fallback_markdown": "**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)",
+            "steps": [
+              {
+                "citations": [],
+                "title": "Open Settings from the ... menu"
+              },
+              {
+                "citations": [],
+                "title": "Choose Privacy, search, and services"
+              },
+              {
+                "citations": [],
+                "title": "Open Address bar and search"
+              },
+              {
+                "citations": [
+                  1
+                ],
+                "note": "Google appears only after you have searched with it once.",
+                "title": "Pick Google under Search engine used in the address bar"
+              }
+            ],
+            "title": "Make Google the default search engine in Edge",
+            "variant": "steps"
+          },
+          "source": "answer_visual_tool",
+          "title": "Make Google the default search engine in Edge",
+          "type": "answer_visual"
+        },
+        {
+          "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "display_policy": "inline_only",
+          "id": "figure:242d1a004a09969dee7f9860",
+          "payload": {
+            "items": [
+              {
+                "height": 720,
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens1.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000001",
+                "width": 1280
+              },
+              {
+                "height": 720,
+                "mime_type": "image/jpeg",
+                "source_url": "https://screens2.example/graphics",
+                "url": "/web-images/00000000-0000-4000-8000-000000000002",
+                "width": 1280
+              }
+            ]
+          },
+          "provenance": {
+            "provider": "source_figure"
+          },
+          "source": "source_figure",
+          "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+          "type": "image_group"
+        }
+      ]
+    }
+  },
+  "rich_items": [
+    {
+      "alt_text": "Edge settings page",
+      "display_policy": "inline_only",
+      "id": "image:web:00000000-0000-4000-8000-000000000009",
+      "payload": {
+        "mime_type": "image/png",
+        "source_url": "https://support.example/edge-search",
+        "url": "/web-images/00000000-0000-4000-8000-000000000009"
+      },
+      "provenance": {
+        "provider": "images",
+        "source_id": "S1"
+      },
+      "source": "image_search",
+      "type": "image"
+    },
+    {
+      "display_policy": "inline_only",
+      "id": "visual:e23b6d9e1e12af505eaf1b48",
+      "payload": {
+        "caption_citations": [],
+        "evidence": [
+          {
+            "label": "support.example",
+            "title": "Microsoft Edge help",
+            "url": "https://support.example/edge-search"
+          }
+        ],
+        "fallback_markdown": "**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)",
+        "steps": [
+          {
+            "citations": [],
+            "title": "Open Settings from the ... menu"
+          },
+          {
+            "citations": [],
+            "title": "Choose Privacy, search, and services"
+          },
+          {
+            "citations": [],
+            "title": "Open Address bar and search"
+          },
+          {
+            "citations": [
+              1
+            ],
+            "note": "Google appears only after you have searched with it once.",
+            "title": "Pick Google under Search engine used in the address bar"
+          }
+        ],
+        "title": "Make Google the default search engine in Edge",
+        "variant": "steps"
+      },
+      "source": "answer_visual_tool",
+      "title": "Make Google the default search engine in Edge",
+      "type": "answer_visual"
+    },
+    {
+      "alt_text": "Low shadows remove the contact shadow, so the car looks like it floats.",
+      "display_policy": "inline_only",
+      "id": "figure:242d1a004a09969dee7f9860",
+      "payload": {
+        "caption": "Low shadows remove the contact shadow, so the car looks like it floats.",
+        "fallback_markdown": "**Figure:** Low shadows remove the contact shadow, so the car looks like it floats.\n\n- Shadows: High — Car with a soft contact shadow under the chassis ([screens1.example](https://screens1.example/graphics))\n- Shadows: Low — Same car with no contact shadow ([screens2.example](https://screens2.example/graphics))",
+        "items": [
+          {
+            "alt_text": "Car with a soft contact shadow under the chassis",
+            "height": 720,
+            "label": "Shadows: High",
+            "mime_type": "image/jpeg",
+            "source_url": "https://screens1.example/graphics",
+            "url": "/web-images/00000000-0000-4000-8000-000000000001",
+            "width": 1280
+          },
+          {
+            "alt_text": "Same car with no contact shadow",
+            "height": 720,
+            "label": "Shadows: Low",
+            "mime_type": "image/jpeg",
+            "source_url": "https://screens2.example/graphics",
+            "url": "/web-images/00000000-0000-4000-8000-000000000002",
+            "width": 1280
+          }
+        ]
+      },
+      "provenance": {
+        "provider": "source_figure"
+      },
+      "source": "source_figure",
+      "title": "Low shadows remove the contact shadow, so the car looks like it floats.",
+      "type": "image_group"
+    }
+  ]
+}

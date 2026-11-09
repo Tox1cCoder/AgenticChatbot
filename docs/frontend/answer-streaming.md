@@ -92,6 +92,15 @@ Rules:
 4. On error, abort or Stop, drop the draft and repair text and refetch history. Never save a draft
    as the assistant message. On history load, persisted content wins.
 
+### Answer visuals without `answerVisualsV1`
+
+`data-answer-reconcile` also arrives on a non-web answer when the server withheld an
+answer-visual marker (`<!--rich:visual:...-->`) that this client did not advertise
+support for. Its `content` carries the visual's Markdown fallback in place of the marker.
+Handle it exactly as above; a client that ignores it keeps a draft without the visual and
+gets the fallback on the next history load. See `plans/AI_SDK_FE_RICH_ITEM_CONTRACT.md`
+section 2 for the flag.
+
 ## Stop and recovery
 
 1. Call `stop()`, then `POST /messages/stop` with `generationId`, `conversationId`,

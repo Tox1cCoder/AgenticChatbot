@@ -14,6 +14,7 @@ from .rich_response import (
     ALLOWED_URL_SCHEMES,
     PROTECTED_IMAGE_URL_PREFIXES,
 )
+from .source_figures import is_source_figure
 
 _IMAGE_TYPES = frozenset({"image", "image_group"})
 _DIRECT_SOURCES = frozenset({"rag_document", "tool_image", "generated_image"})
@@ -21,10 +22,19 @@ _REMOTE_DISCOVERY_SOURCES = frozenset({"image_search"})
 _BASE64_DATA_PATTERN = re.compile(
     r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?\Z"
 )
-_IMAGE_PAYLOAD_KEYS = frozenset(
-    {"url", "data", "mime_type", "source_url", "description", "width", "height", "caption"}
+#: Fields a composed source figure adds to a single image payload.
+_FIGURE_PAYLOAD_KEYS = frozenset(
+    {"label", "caption_evidence", "fallback_markdown", "comparison_unavailable"}
 )
-_GROUP_CELL_KEYS = frozenset({"url", "mime_type", "source_url", "description", "width", "height"})
+_IMAGE_PAYLOAD_KEYS = (
+    frozenset(
+        {"url", "data", "mime_type", "source_url", "description", "width", "height", "caption"}
+    )
+    | _FIGURE_PAYLOAD_KEYS
+)
+_GROUP_CELL_KEYS = frozenset(
+    {"url", "mime_type", "source_url", "description", "width", "height", "label", "alt_text"}
+)
 _JUNK_IMAGE_URL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"favicon", re.IGNORECASE),
     re.compile(r"sprite", re.IGNORECASE),
@@ -348,10 +358,21 @@ def select_rich_item_candidates(
     """Return a stable, capped candidate sequence without mutating input."""
 
     copied = [deepcopy(dict(candidate)) for candidate in candidates]
-    non_images = [candidate for candidate in copied if not is_image_candidate(candidate)]
+    # A composed figure is built from media already validated, shown to the
+    # model, and pinned. Ranking it against other candidates before anyone
+    # knows which figure the answer places let an earlier draft claim a
+    # revision's media, so figures pass through; finalization admits only the
+    # placed ones.
+    passthrough = [
+        candidate
+        for candidate in copied
+        if not is_image_candidate(candidate) or is_source_figure(candidate)
+    ]
     indexed_images = [
         (index, candidate)
         for index, candidate in enumerate(copied)
-        if is_image_candidate(candidate) and _intent_rank(candidate) is not None
+        if is_image_candidate(candidate)
+        and not is_source_figure(candidate)
+        and _intent_rank(candidate) is not None
     ]
-    return [*non_images, *_select_ranked_images(indexed_images, policy)]
+    return [*passthrough, *_select_ranked_images(indexed_images, policy)]

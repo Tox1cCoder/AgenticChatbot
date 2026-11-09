@@ -11,6 +11,7 @@ is itself a contract — see :func:`build_specialist_middleware`.
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
@@ -36,6 +37,7 @@ from app.ai.tool_execution import (
     build_rejected_tool_artifacts,
     ensure_agent_tool_map,
     execute_tool_calls,
+    is_server_descriptor_tool,
 )
 from app.ai.utils import apply_hitl_decisions, normalize_tool_call
 from app.ai.web_research.model_context import inject_latest_web_evidence
@@ -535,13 +537,40 @@ class ToolExecutionMiddleware(AgentMiddleware):
         output = outputs[0] if outputs else {}
         status = "error" if _is_error(artifacts) else "success"
         self._scope.worker_event("end", call, status=status)
+        tool_call_id = str(output.get("tool_call_id") or call.get("id") or "")
+        name = str(output.get("name") or call.get("name") or "tool")
         message = ToolMessage(
             content=str(output.get("content") or ""),
-            tool_call_id=str(output.get("tool_call_id") or call.get("id") or ""),
-            name=str(output.get("name") or call.get("name") or "tool"),
+            tool_call_id=tool_call_id,
+            name=name,
             status=status,
+            artifact=_durable_descriptor_artifact(
+                artifacts, tool_map.get(call.get("name")), tool_call_id, name
+            ),
         )
         return message, artifacts
+
+
+def _durable_descriptor_artifact(
+    artifacts: list[dict[str, Any]], tool: Any, tool_call_id: str, name: str
+) -> dict[str, Any] | None:
+    """The descriptor a server-owned visual or figure tool produced, for the message.
+
+    ``self.artifacts`` lives in this middleware's memory, and a run resumed
+    after an approval interrupt gets a new middleware. The message is
+    checkpointed with the subgraph, so a descriptor carried on it is still
+    there for the resumed answer to place. Only this server's own descriptor
+    tools carry one; nothing else is restored from a message.
+    """
+    if not is_server_descriptor_tool(tool):
+        return None
+    for artifact in artifacts:
+        if isinstance(artifact, dict) and artifact.get("_rich_item_candidates"):
+            # The whole tool card, so a resumed turn records the same card the
+            # live run did. Bounded: the args are the visual's own spec and
+            # the output is the short marker reply.
+            return {**copy.deepcopy(artifact), "tool_call_id": tool_call_id, "tool": name}
+    return None
 
 
 class _MutationRejected(RuntimeError):
@@ -553,9 +582,18 @@ class _MutationRejected(RuntimeError):
 
 
 def _returns_control_command(tool: Any) -> bool:
-    """Whether this tool's result is a control decision rather than a value."""
+    """Whether this tool's result is a control decision rather than a value.
+
+    Only the server's own tools qualify. MCP tool annotations reach metadata
+    too, and a tool trusted here skips device binding, mutation receipts and
+    output offload.
+    """
     metadata = getattr(tool, "metadata", None)
-    return bool(isinstance(metadata, dict) and metadata.get("returns_control_command"))
+    return bool(
+        isinstance(metadata, dict)
+        and metadata.get("tool_origin") == "internal"
+        and metadata.get("returns_control_command")
+    )
 
 
 def _is_error(artifacts: list[dict[str, Any]]) -> bool:

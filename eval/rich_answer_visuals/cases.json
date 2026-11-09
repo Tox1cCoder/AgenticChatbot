@@ -1,0 +1,37 @@
+[
+  {
+    "case_id": "edge-google-steps",
+    "fixture": "tests/fixtures/rich_answer_visuals/edge-google-steps.json",
+    "expected_visual_kinds": ["steps"],
+    "admitted_source_urls": ["https://support.example/edge-search"]
+  },
+  {
+    "case_id": "game-edition-markdown-table",
+    "fixture": "tests/fixtures/rich_answer_visuals/game-edition-markdown-table.json",
+    "expected_visual_kinds": ["markdown_table"]
+  },
+  {
+    "case_id": "overclock-bars",
+    "fixture": "tests/fixtures/rich_answer_visuals/overclock-bars.json",
+    "expected_visual_kinds": ["bars"],
+    "admitted_source_urls": ["https://bench.example/cpu-review"]
+  },
+  {
+    "case_id": "tweak-assessment-table",
+    "fixture": "tests/fixtures/rich_answer_visuals/tweak-assessment-table.json",
+    "expected_visual_kinds": ["comparison_table"],
+    "admitted_source_urls": ["https://lab.example/tweaks"]
+  },
+  {
+    "case_id": "graphics-screenshot-figure",
+    "fixture": "tests/fixtures/rich_answer_visuals/graphics-screenshot-figure.json",
+    "expected_visual_kinds": ["figure"],
+    "selected_image_ids": ["I1", "I2"],
+    "irrelevant_image_ids": ["I3"]
+  },
+  {
+    "case_id": "simple-question-stays-prose",
+    "answer_content": "Paris is the capital of France.",
+    "expected_visual_kinds": ["none"]
+  }
+]

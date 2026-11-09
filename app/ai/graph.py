@@ -14,6 +14,7 @@ from qdrant_client import QdrantClient
 
 from ..core.config import settings
 from ..core.response_constants import NO_RESPONSE_GENERATED
+from ..core.rich_response import RichItemType, merge_rich_item_candidates
 from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
@@ -520,27 +521,35 @@ class MultiAgentWorkflow(
             if not response.metadata:
                 response.metadata = {}
             response.metadata["_inline_rich_response_v1"] = True
-            if rich_candidates:
-                # Grounded selections already belong to the response. Context
-                # candidates add tool output; they must not replace those
-                # selections or rebind an inspected ID to different content.
-                existing = response.metadata.get("_rich_item_candidates")
-                existing = existing if isinstance(existing, list) else []
-                merged: dict[str, dict[str, Any]] = {}
-                for candidate in [*existing, *rich_candidates]:
-                    if not isinstance(candidate, dict):
-                        continue
-                    candidate_id = candidate.get("id")
-                    if not isinstance(candidate_id, str) or not candidate_id:
-                        continue
-                    if candidate_id in merged:
-                        if merged[candidate_id] != candidate:
-                            logger.warning(
-                                "Ignored conflicting rich-item candidate %s", candidate_id
-                            )
-                        continue
-                    merged[candidate_id] = candidate
-                response.metadata["_rich_item_candidates"] = list(merged.values())
+            # Grounding may already have placed selected web images here.
+            # Context candidates join them by id. One that reuses a selected
+            # image's id for different content is ignored -- tool output must
+            # never rebind an image the answer already selected -- while any
+            # other conflict still fails closed in the merge.
+            grounded = response.metadata.get("_rich_item_candidates") or ()
+            grounded_ids = {
+                item.get("id")
+                for item in grounded
+                if isinstance(item, dict)
+                and item.get("type") in {RichItemType.image.value, RichItemType.image_group.value}
+            }
+            context_candidates = []
+            for candidate in rich_candidates or ():
+                if isinstance(candidate, dict) and candidate.get("id") in grounded_ids:
+                    if candidate not in grounded:
+                        logger.warning(
+                            "Ignored rich-item candidate %s conflicting with a grounded one",
+                            candidate.get("id"),
+                        )
+                    continue
+                context_candidates.append(candidate)
+            merged, conflicts = merge_rich_item_candidates(grounded, context_candidates)
+            if merged:
+                response.metadata["_rich_item_candidates"] = merged
+            else:
+                response.metadata.pop("_rich_item_candidates", None)
+            if conflicts:
+                response.metadata["_rich_item_conflicts"] = conflicts
             presented_image_ids = context.get("_presented_rich_image_ids")
             if isinstance(presented_image_ids, list):
                 grounded_image_ids = response.metadata.get("_presented_rich_image_ids")
@@ -590,6 +599,8 @@ class MultiAgentWorkflow(
             "messages": [HumanMessage(**human_message_kwargs)],
             "context": {
                 "inline_rich_response_v1": bool(getattr(request, "inline_rich_response_v1", False)),
+                "answer_visuals_v1": bool(getattr(request, "answer_visuals_v1", False)),
+                "source_figures_v1": bool(getattr(request, "source_figures_v1", False)),
                 "hitl_policy": getattr(request, "hitl_policy", None),
             },
         }

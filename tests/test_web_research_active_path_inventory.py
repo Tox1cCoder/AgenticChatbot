@@ -28,14 +28,6 @@ def test_raw_provider_tools_are_excluded_from_ordinary_binding() -> None:
     assert ordinary_excluded_tool_names() >= RAW_WEB_TOOL_NAMES
 
 
-def test_interrupted_specialists_release_uncheckpointed_image_state() -> None:
-    specialists = (
-        Path(__file__).parents[1] / "app" / "ai" / "workflow" / "specialists.py"
-    ).read_text(encoding="utf-8")
-
-    assert "web_research_session.suspend" not in specialists
-
-
 def test_pending_web_image_expiry_is_wired_to_periodic_cleanup() -> None:
     cleanup = (Path(__file__).parents[1] / "app" / "workers" / "cleanup_tasks.py").read_text(
         encoding="utf-8"

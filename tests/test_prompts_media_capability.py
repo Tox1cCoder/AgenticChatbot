@@ -2,6 +2,7 @@
 
 from app.ai import prompts
 from app.ai.web_tools import WEB_SEARCH_DESCRIPTION
+from app.ai.workflow.routing import ROUTER_SYSTEM_PROMPT
 
 WEB_CAPABLE_PROMPTS = (
     prompts.CHAT_SYSTEM_PROMPT,
@@ -64,7 +65,7 @@ def test_widget_marker_mechanics_still_reach_every_answer_prompt() -> None:
 
 def test_non_answer_prompts_stay_free_of_media_instructions() -> None:
     for prompt in (
-        prompts.ROUTER_SYSTEM_PROMPT,
+        ROUTER_SYSTEM_PROMPT,
         prompts.TITLE_GENERATION_PROMPT,
         prompts.PLANNING_EXECUTION_PROMPT,
     ):

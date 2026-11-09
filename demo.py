@@ -3060,6 +3060,23 @@ def _handle_stop_rerun(conversation_id: str) -> None:
     st.rerun()
 
 
+#: The rich-response contract this client renders natively, advertised on every
+#: request that streams an assistant message (Send, approval Resume, Continue).
+#: Sending the same flags everywhere keeps a stream, its continuation and its
+#: reload projected identically.
+RICH_RESPONSE_CAPABILITIES: dict[str, bool] = {
+    "inlineRichResponseV1": True,
+    "answerVisualsV1": True,
+    "sourceFiguresV1": True,
+}
+
+#: The same capabilities as the view model's keyword flags. History arrives in
+#: stored (canonical) form, so the view projects it for these locally.
+RICH_VIEW_CAPABILITIES: dict[str, bool] = {"answer_visuals": True, "source_figures": True}
+
+_CONTINUE_ERROR_KEY = "continue_error_notice"
+
+
 def build_continue_request(snapshot: dict | None, conversation_id: str) -> dict[str, Any] | None:
     """The body for ``POST /messages/continue``, or ``None`` if it cannot be built.
 
@@ -3084,6 +3101,7 @@ def build_continue_request(snapshot: dict | None, conversation_id: str) -> dict[
         "continuationId": str(continuation_id),
         "expectedVersion": int(version),
         "idempotencyKey": _generation_command_key("continue"),
+        **RICH_RESPONSE_CAPABILITIES,
     }
 
 
@@ -3120,42 +3138,107 @@ def _camel_to_snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", str(name)).lower()
 
 
+def _record_continue_message(result: dict[str, Any], message: Any, renderer: Any) -> None:
+    """Keep a persisted assistant row and let the live renderer reconcile to it.
+
+    ``message_end`` (a pause), ``complete`` (a finished epoch) and an approval
+    ``interrupt`` all carry the row as persisted. Whichever arrives last wins,
+    which is correct: a paused epoch that later completes has one final message.
+    Finalizing swaps the transient rich registry for the persisted one, exactly
+    as the send path does.
+    """
+    if not isinstance(message, dict):
+        return
+    result["message"] = message
+    if renderer is not None:
+        renderer.finalize(message)
+
+
+def _apply_continue_live_event(event_type: str, event: dict, renderer: Any) -> bool:
+    """Apply an event whose handling is identical to the send path's.
+
+    Returns whether the event was one of them.
+    """
+    if event_type in {"generation_start", "generation_status", "continuation_available"}:
+        _apply_generation_event(event)
+        return True
+    if event_type == "rich_items":
+        if renderer is not None:
+            renderer.apply_rich_items_upsert(event.get("items") or [])
+        return True
+    if event_type == "sources":
+        _upsert_stream_sources(event.get("sources"))
+        return True
+    return False
+
+
 def consume_continue_stream(events, renderer=None) -> dict[str, Any]:
     """Fold a continued epoch's events into the state a rerun renders.
 
-    Handles exactly the vocabulary a continued turn produces. Two absences are
-    the point: no user message is created, because Continue asks nothing new,
-    and no status is inferred from the stream ending — a turn that stops
-    producing events has not thereby become ``stopped``.
+    Handles the same live vocabulary as the send path -- text, rich items,
+    sources, persisted partials and approval interrupts -- through the same
+    renderer operations. Two absences are the point: no user message is
+    created, because Continue asks nothing new, and no status is inferred from
+    the stream ending — a turn that stops producing events has not thereby
+    become ``stopped``.
 
-    Returns ``{"text", "message", "error", "paused"}``.
+    Returns ``{"text", "message", "error", "paused", "interrupt"}``.
     """
     accumulated = ""
-    result: dict[str, Any] = {"text": "", "message": None, "error": None, "paused": False}
+    thinking = ""
+    result: dict[str, Any] = {
+        "text": "",
+        "message": None,
+        "error": None,
+        "paused": False,
+        "interrupt": None,
+    }
 
     for event in events:
         event_type = str(event.get("type") or "")
-        if event_type in {"generation_start", "generation_status", "continuation_available"}:
-            _apply_generation_event(event)
-            if event_type == "continuation_available":
-                result["paused"] = True
-        elif event_type == "token":
+        if event_type == "continuation_available":
+            result["paused"] = True
+        if _apply_continue_live_event(event_type, event, renderer):
+            continue
+        if event_type == "token":
             accumulated += str(event.get("content") or "")
             if renderer is not None:
                 renderer.append_text(str(event.get("content") or ""))
+        elif event_type == "thinking":
+            thinking += str(event.get("content") or "")
         elif event_type in {"message_end", "complete"}:
-            # Both carry the persisted assistant row: `message_end` is what a
-            # pause emits, `complete` what a finished epoch emits. Whichever
-            # arrives last wins, which is correct — a paused epoch that later
-            # completes has one final message.
-            message = event.get("message")
-            if isinstance(message, dict):
-                result["message"] = message
+            _record_continue_message(result, event.get("message"), renderer)
+        elif event_type == "interrupt":
+            # The epoch paused for approval. The streamed text rides on the
+            # interrupt so the approval panel can show it after the rerun, as
+            # it does for a first epoch; nothing after the pause belongs here.
+            result["interrupt"] = attach_stream_context(
+                event.get("interrupt"), thinking=thinking, content=accumulated
+            )
+            _record_continue_message(result, event.get("message"), renderer)
+            break
         elif event_type == "error":
             result["error"] = str(event.get("error") or "The continuation failed.")
 
     result["text"] = accumulated
     return result
+
+
+def _retire_continuation(continuation_id: Any) -> None:
+    """Withdraw a Continue offer this client already spent.
+
+    The continuation id is single-use, so after a refused or interrupted
+    command the offer that was redeemed must not stay clickable. Only that
+    offer is withdrawn: a fresh one the epoch issued has replaced it in the
+    snapshot and stays. Generation and version -- the fence and the key --
+    are untouched.
+    """
+    snapshot = dict(st.session_state.get("generation_snapshot") or {})
+    if not continuation_id or str(snapshot.get("continuation_id") or "") != str(continuation_id):
+        return
+    snapshot["continuation_id"] = None
+    snapshot["continuation_available"] = False
+    st.session_state.generation_snapshot = snapshot
 
 
 def _render_continue_control(conversation_id: str) -> None:
@@ -3164,6 +3247,11 @@ def _render_continue_control(conversation_id: str) -> None:
     Placed outside the message form so clicking it does not submit a draft the
     user was still typing.
     """
+    notice = st.session_state.get(_CONTINUE_ERROR_KEY)
+    if isinstance(notice, dict) and notice.get("conversation_id") == str(conversation_id):
+        st.session_state.pop(_CONTINUE_ERROR_KEY, None)
+        st.error(str(notice.get("error") or "The continuation failed."))
+
     snapshot = generation_snapshot_for(conversation_id)
     controls = generation_controls(snapshot)
     if controls["continue"] != "enabled":
@@ -3193,10 +3281,31 @@ def _handle_continue(request_body: dict[str, Any], conversation_id: str) -> None
         outcome = consume_continue_stream(
             make_streaming_request("/messages/continue", request_body), renderer
         )
-        _update_stream_status(status, label="Continued", state="complete")
+        if outcome["error"]:
+            _update_stream_status(status, label="Continuation failed", state="error")
+        elif outcome["interrupt"] is not None:
+            _update_stream_status(status, label="Waiting for approval", state="complete")
+        else:
+            _update_stream_status(status, label="Continued", state="complete")
+
+    if outcome["error"] or outcome["interrupt"] is not None:
+        _retire_continuation(request_body.get("continuationId"))
 
     if outcome["error"]:
-        st.error(outcome["error"])
+        # Rerun so the withdrawn offer disappears; the notice survives the
+        # rerun and is shown where the button was.
+        st.session_state[_CONTINUE_ERROR_KEY] = {
+            "conversation_id": str(conversation_id),
+            "error": outcome["error"],
+        }
+        st.rerun()
+        return
+
+    if outcome["interrupt"] is not None:
+        # Same hand-off as a first epoch: the approval panel reads these.
+        st.session_state.pending_interrupt = outcome["interrupt"]
+        st.session_state.interrupt_conversation_id = conversation_id
+        st.rerun()
         return
 
     if outcome["message"] is not None:
@@ -8610,7 +8719,7 @@ def _build_rich_response_view_for_msg(content_text: str, message_metadata: dict)
     minimal and avoid coupling demo.py boot to app modules in tests."""
     from app.ui.rich_response import build_rich_response_view
 
-    return build_rich_response_view(content_text, message_metadata)
+    return build_rich_response_view(content_text, message_metadata, **RICH_VIEW_CAPABILITIES)
 
 
 def _render_rich_segments(
@@ -8668,7 +8777,7 @@ class _StreamingRichResponseRenderer:
 
         self.placeholder = placeholder
         self.message_key = message_key
-        self.state = RichStreamState(latest=True)
+        self.state = RichStreamState(latest=True, **RICH_VIEW_CAPABILITIES)
         self._layout_signature: tuple[Any, ...] | None = None
         self._markdown_slots: dict[int, Any] = {}
         self._finalized = False
@@ -8862,6 +8971,70 @@ def _render_pending_rich_placeholder(item_id: str | None) -> None:
     )
 
 
+def _render_answer_visual(item: dict[str, Any]) -> None:
+    """A static steps/bars/table block, or its stored Markdown fallback.
+
+    The fallback goes through the normal Markdown path with raw HTML off: it is
+    what the contract prescribes for a variant this client cannot draw.
+    """
+    from app.ui.rich_response import build_answer_visual_html
+
+    visual_html = build_answer_visual_html(item)
+    if visual_html:
+        st.markdown(visual_html, unsafe_allow_html=True)
+        return
+    fallback = (item.get("payload") or {}).get("fallback_markdown")
+    if isinstance(fallback, str) and fallback.strip():
+        st.markdown(normalize_display_markdown_text(fallback))
+
+
+def _is_source_figure(item: dict[str, Any]) -> bool:
+    return item.get("source") == "source_figure"
+
+
+def _figure_cells(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """The cells of a group, or a single-image source figure as one cell."""
+    payload = item.get("payload") or {}
+    if item.get("type") == "image_group":
+        return [cell for cell in payload.get("items") or [] if isinstance(cell, dict)]
+    return [{**payload, "alt_text": payload.get("alt_text") or item.get("alt_text")}]
+
+
+def _render_image_group_item(item: dict[str, Any]) -> None:
+    """Render an image group, or any source figure, as one labelled figure."""
+    from app.ui.rich_response import build_inline_image_group_html
+
+    payload = item.get("payload") or {}
+    # Every cell URL is a protected /web-images/<id> reference after
+    # persistence, so each one must go through the shared authenticated
+    # resolver for the same reason the single-image branch does: a bare
+    # relative path in an <img src> can't carry the app Bearer token. Preserve
+    # a renderer-local failure record for each unresolved cell so group order
+    # stays stable and successful siblings remain visible.
+    resolved_cells: list[dict[str, Any]] = []
+    for cell in _figure_cells(item):
+        cell_src = _resolve_displayable_image_src(
+            cell.get("url"), None, cell.get("mime_type") or "image/png"
+        )
+        resolved_cells.append(
+            {**cell, "url": cell_src} if cell_src else {**cell, "url": None, "_load_failed": True}
+        )
+    figure_fields: dict[str, Any] = {}
+    if _is_source_figure(item):
+        figure_fields = {
+            "caption": payload.get("caption"),
+            "caption_evidence": payload.get("caption_evidence"),
+            "comparison_unavailable": payload.get("comparison_unavailable") is True,
+        }
+    group_html = build_inline_image_group_html(
+        resolved_cells,
+        alt_text=item.get("alt_text"),
+        **figure_fields,
+    )
+    if group_html:
+        st.markdown(group_html, unsafe_allow_html=True)
+
+
 def _render_inline_rich_item(
     item: dict[str, Any],
     *,
@@ -8871,35 +9044,15 @@ def _render_inline_rich_item(
 ) -> None:
     """Render a single rich-item record at its inline marker position."""
     from app.core.rich_response import GENERIC_IMAGE_ALT_TEXT
-    from app.ui.rich_response import build_inline_image_group_html, build_inline_image_html
+    from app.ui.rich_response import build_inline_image_html
 
     item_type = item.get("type")
     payload = item.get("payload") or {}
-    if item_type == "image_group":
-        # Every cell URL is a protected /web-images/<id> reference after
-        # persistence, so each one must go through the shared authenticated
-        # resolver for the same reason the single-image branch below does: a bare
-        # relative path in an <img src> can't carry the app Bearer token. Preserve
-        # a renderer-local failure record for each unresolved cell so group order
-        # stays stable and successful siblings remain visible.
-        resolved_cells: list[dict[str, Any]] = []
-        for cell in payload.get("items") or []:
-            if not isinstance(cell, dict):
-                continue
-            cell_src = _resolve_displayable_image_src(
-                cell.get("url"), None, cell.get("mime_type") or "image/png"
-            )
-            resolved_cells.append(
-                {**cell, "url": cell_src}
-                if cell_src
-                else {**cell, "url": None, "_load_failed": True}
-            )
-        group_html = build_inline_image_group_html(
-            resolved_cells,
-            alt_text=item.get("alt_text"),
-        )
-        if group_html:
-            st.markdown(group_html, unsafe_allow_html=True)
+    if item_type == "answer_visual":
+        _render_answer_visual(item)
+        return
+    if item_type == "image_group" or (item_type == "image" and _is_source_figure(item)):
+        _render_image_group_item(item)
         return
     if item_type == "image":
         url = payload.get("url")
@@ -10842,7 +10995,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
         "decisions": decisions,
         # Match the send path so resumed turns keep the inline rich-response
         # contract — widgets/tool outputs render inline at marker position.
-        "inlineRichResponseV1": True,
+        **RICH_RESPONSE_CAPABILITIES,
     }
 
     with st.status("Resuming execution...", expanded=True) as status:
@@ -11497,7 +11650,8 @@ def render_chat_view():
                     # offers the bounded rich-item inventory to the model and the
                     # response-bubble path renders widgets/tool outputs inline at
                     # the author-placed marker position rather than appended.
-                    "inlineRichResponseV1": True,
+                    # Answer visuals and source figures ride on the same flags.
+                    **RICH_RESPONSE_CAPABILITIES,
                 }
 
                 if pending_attachments:

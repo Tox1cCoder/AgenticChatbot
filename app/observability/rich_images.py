@@ -9,7 +9,7 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 from app.observability.labels import bounded_label as _bounded
 
 _PROVIDERS = {"brave", "tavily"}
-_REGISTRATION_OUTCOMES = {"registered", "reused", "skipped_scheme", "failed"}
+_REGISTRATION_OUTCOMES = {"registered", "reused", "expired", "skipped_scheme", "failed"}
 _FETCH_OUTCOMES = {
     "success",
     "timeout",

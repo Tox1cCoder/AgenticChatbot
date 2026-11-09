@@ -1,0 +1,153 @@
+{
+  "content": "Here is how to switch:\n\n<!--rich:visual:e23b6d9e1e12af505eaf1b48-->\n\nRestart Edge if it does not apply.",
+  "example": "Edge/Google sequence",
+  "projections": {
+    "base_rich": {
+      "content": "Here is how to switch:\n\n**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)\n\nRestart Edge if it does not apply.",
+      "rich_items": []
+    },
+    "figures_only": {
+      "content": "Here is how to switch:\n\n**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)\n\nRestart Edge if it does not apply.",
+      "rich_items": []
+    },
+    "full": {
+      "content": "Here is how to switch:\n\n<!--rich:visual:e23b6d9e1e12af505eaf1b48-->\n\nRestart Edge if it does not apply.",
+      "rich_items": [
+        {
+          "display_policy": "inline_only",
+          "id": "visual:e23b6d9e1e12af505eaf1b48",
+          "payload": {
+            "caption_citations": [],
+            "evidence": [
+              {
+                "label": "support.example",
+                "title": "Microsoft Edge help",
+                "url": "https://support.example/edge-search"
+              }
+            ],
+            "fallback_markdown": "**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)",
+            "steps": [
+              {
+                "citations": [],
+                "title": "Open Settings from the ... menu"
+              },
+              {
+                "citations": [],
+                "title": "Choose Privacy, search, and services"
+              },
+              {
+                "citations": [],
+                "title": "Open Address bar and search"
+              },
+              {
+                "citations": [
+                  1
+                ],
+                "note": "Google appears only after you have searched with it once.",
+                "title": "Pick Google under Search engine used in the address bar"
+              }
+            ],
+            "title": "Make Google the default search engine in Edge",
+            "variant": "steps"
+          },
+          "source": "answer_visual_tool",
+          "title": "Make Google the default search engine in Edge",
+          "type": "answer_visual"
+        }
+      ]
+    },
+    "non_rich": {
+      "content": "Here is how to switch:\n\n**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)\n\nRestart Edge if it does not apply.",
+      "rich_items": null
+    },
+    "visuals_only": {
+      "content": "Here is how to switch:\n\n<!--rich:visual:e23b6d9e1e12af505eaf1b48-->\n\nRestart Edge if it does not apply.",
+      "rich_items": [
+        {
+          "display_policy": "inline_only",
+          "id": "visual:e23b6d9e1e12af505eaf1b48",
+          "payload": {
+            "caption_citations": [],
+            "evidence": [
+              {
+                "label": "support.example",
+                "title": "Microsoft Edge help",
+                "url": "https://support.example/edge-search"
+              }
+            ],
+            "fallback_markdown": "**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)",
+            "steps": [
+              {
+                "citations": [],
+                "title": "Open Settings from the ... menu"
+              },
+              {
+                "citations": [],
+                "title": "Choose Privacy, search, and services"
+              },
+              {
+                "citations": [],
+                "title": "Open Address bar and search"
+              },
+              {
+                "citations": [
+                  1
+                ],
+                "note": "Google appears only after you have searched with it once.",
+                "title": "Pick Google under Search engine used in the address bar"
+              }
+            ],
+            "title": "Make Google the default search engine in Edge",
+            "variant": "steps"
+          },
+          "source": "answer_visual_tool",
+          "title": "Make Google the default search engine in Edge",
+          "type": "answer_visual"
+        }
+      ]
+    }
+  },
+  "rich_items": [
+    {
+      "display_policy": "inline_only",
+      "id": "visual:e23b6d9e1e12af505eaf1b48",
+      "payload": {
+        "caption_citations": [],
+        "evidence": [
+          {
+            "label": "support.example",
+            "title": "Microsoft Edge help",
+            "url": "https://support.example/edge-search"
+          }
+        ],
+        "fallback_markdown": "**Make Google the default search engine in Edge**\n\n1. Open Settings from the ... menu\n2. Choose Privacy, search, and services\n3. Open Address bar and search\n4. Pick Google under Search engine used in the address bar — Google appears only after you have searched with it once. [support.example](https://support.example/edge-search)",
+        "steps": [
+          {
+            "citations": [],
+            "title": "Open Settings from the ... menu"
+          },
+          {
+            "citations": [],
+            "title": "Choose Privacy, search, and services"
+          },
+          {
+            "citations": [],
+            "title": "Open Address bar and search"
+          },
+          {
+            "citations": [
+              1
+            ],
+            "note": "Google appears only after you have searched with it once.",
+            "title": "Pick Google under Search engine used in the address bar"
+          }
+        ],
+        "title": "Make Google the default search engine in Edge",
+        "variant": "steps"
+      },
+      "source": "answer_visual_tool",
+      "title": "Make Google the default search engine in Edge",
+      "type": "answer_visual"
+    }
+  ]
+}

@@ -1,0 +1,207 @@
+{
+  "content": "Most of these do nothing:\n\n<!--rich:visual:eea5d2a68ff70348e24d3212-->",
+  "example": "Tweak assessment table",
+  "projections": {
+    "base_rich": {
+      "content": "Most of these do nothing:\n\n**Windows gaming tweaks**\n\n| Item | Claimed effect | Assessment |\n| --- | --- | --- |\n| Disable HPET | Lower input latency | Caution: Skip — No measurable change in testing; can break timers. [lab.example](https://lab.example/tweaks) |\n| Enable XMP | Memory runs at rated speed | Positive: Do it — Measured gains in CPU-bound games. [lab.example](https://lab.example/tweaks) |",
+      "rich_items": []
+    },
+    "figures_only": {
+      "content": "Most of these do nothing:\n\n**Windows gaming tweaks**\n\n| Item | Claimed effect | Assessment |\n| --- | --- | --- |\n| Disable HPET | Lower input latency | Caution: Skip — No measurable change in testing; can break timers. [lab.example](https://lab.example/tweaks) |\n| Enable XMP | Memory runs at rated speed | Positive: Do it — Measured gains in CPU-bound games. [lab.example](https://lab.example/tweaks) |",
+      "rich_items": []
+    },
+    "full": {
+      "content": "Most of these do nothing:\n\n<!--rich:visual:eea5d2a68ff70348e24d3212-->",
+      "rich_items": [
+        {
+          "display_policy": "inline_only",
+          "id": "visual:eea5d2a68ff70348e24d3212",
+          "payload": {
+            "caption_citations": [],
+            "columns": [
+              "Claimed effect"
+            ],
+            "evidence": [
+              {
+                "label": "lab.example",
+                "title": "Tweak myths tested",
+                "url": "https://lab.example/tweaks"
+              }
+            ],
+            "fallback_markdown": "**Windows gaming tweaks**\n\n| Item | Claimed effect | Assessment |\n| --- | --- | --- |\n| Disable HPET | Lower input latency | Caution: Skip — No measurable change in testing; can break timers. [lab.example](https://lab.example/tweaks) |\n| Enable XMP | Memory runs at rated speed | Positive: Do it — Measured gains in CPU-bound games. [lab.example](https://lab.example/tweaks) |",
+            "rows": [
+              {
+                "assessment": {
+                  "citations": [
+                    1
+                  ],
+                  "label": "Skip",
+                  "reason": "No measurable change in testing; can break timers.",
+                  "status": "caution"
+                },
+                "cells": [
+                  {
+                    "citations": [],
+                    "text": "Lower input latency"
+                  }
+                ],
+                "label": "Disable HPET"
+              },
+              {
+                "assessment": {
+                  "citations": [
+                    1
+                  ],
+                  "label": "Do it",
+                  "reason": "Measured gains in CPU-bound games.",
+                  "status": "positive"
+                },
+                "cells": [
+                  {
+                    "citations": [],
+                    "text": "Memory runs at rated speed"
+                  }
+                ],
+                "label": "Enable XMP"
+              }
+            ],
+            "title": "Windows gaming tweaks",
+            "variant": "comparison_table"
+          },
+          "source": "answer_visual_tool",
+          "title": "Windows gaming tweaks",
+          "type": "answer_visual"
+        }
+      ]
+    },
+    "non_rich": {
+      "content": "Most of these do nothing:\n\n**Windows gaming tweaks**\n\n| Item | Claimed effect | Assessment |\n| --- | --- | --- |\n| Disable HPET | Lower input latency | Caution: Skip — No measurable change in testing; can break timers. [lab.example](https://lab.example/tweaks) |\n| Enable XMP | Memory runs at rated speed | Positive: Do it — Measured gains in CPU-bound games. [lab.example](https://lab.example/tweaks) |",
+      "rich_items": null
+    },
+    "visuals_only": {
+      "content": "Most of these do nothing:\n\n<!--rich:visual:eea5d2a68ff70348e24d3212-->",
+      "rich_items": [
+        {
+          "display_policy": "inline_only",
+          "id": "visual:eea5d2a68ff70348e24d3212",
+          "payload": {
+            "caption_citations": [],
+            "columns": [
+              "Claimed effect"
+            ],
+            "evidence": [
+              {
+                "label": "lab.example",
+                "title": "Tweak myths tested",
+                "url": "https://lab.example/tweaks"
+              }
+            ],
+            "fallback_markdown": "**Windows gaming tweaks**\n\n| Item | Claimed effect | Assessment |\n| --- | --- | --- |\n| Disable HPET | Lower input latency | Caution: Skip — No measurable change in testing; can break timers. [lab.example](https://lab.example/tweaks) |\n| Enable XMP | Memory runs at rated speed | Positive: Do it — Measured gains in CPU-bound games. [lab.example](https://lab.example/tweaks) |",
+            "rows": [
+              {
+                "assessment": {
+                  "citations": [
+                    1
+                  ],
+                  "label": "Skip",
+                  "reason": "No measurable change in testing; can break timers.",
+                  "status": "caution"
+                },
+                "cells": [
+                  {
+                    "citations": [],
+                    "text": "Lower input latency"
+                  }
+                ],
+                "label": "Disable HPET"
+              },
+              {
+                "assessment": {
+                  "citations": [
+                    1
+                  ],
+                  "label": "Do it",
+                  "reason": "Measured gains in CPU-bound games.",
+                  "status": "positive"
+                },
+                "cells": [
+                  {
+                    "citations": [],
+                    "text": "Memory runs at rated speed"
+                  }
+                ],
+                "label": "Enable XMP"
+              }
+            ],
+            "title": "Windows gaming tweaks",
+            "variant": "comparison_table"
+          },
+          "source": "answer_visual_tool",
+          "title": "Windows gaming tweaks",
+          "type": "answer_visual"
+        }
+      ]
+    }
+  },
+  "rich_items": [
+    {
+      "display_policy": "inline_only",
+      "id": "visual:eea5d2a68ff70348e24d3212",
+      "payload": {
+        "caption_citations": [],
+        "columns": [
+          "Claimed effect"
+        ],
+        "evidence": [
+          {
+            "label": "lab.example",
+            "title": "Tweak myths tested",
+            "url": "https://lab.example/tweaks"
+          }
+        ],
+        "fallback_markdown": "**Windows gaming tweaks**\n\n| Item | Claimed effect | Assessment |\n| --- | --- | --- |\n| Disable HPET | Lower input latency | Caution: Skip — No measurable change in testing; can break timers. [lab.example](https://lab.example/tweaks) |\n| Enable XMP | Memory runs at rated speed | Positive: Do it — Measured gains in CPU-bound games. [lab.example](https://lab.example/tweaks) |",
+        "rows": [
+          {
+            "assessment": {
+              "citations": [
+                1
+              ],
+              "label": "Skip",
+              "reason": "No measurable change in testing; can break timers.",
+              "status": "caution"
+            },
+            "cells": [
+              {
+                "citations": [],
+                "text": "Lower input latency"
+              }
+            ],
+            "label": "Disable HPET"
+          },
+          {
+            "assessment": {
+              "citations": [
+                1
+              ],
+              "label": "Do it",
+              "reason": "Measured gains in CPU-bound games.",
+              "status": "positive"
+            },
+            "cells": [
+              {
+                "citations": [],
+                "text": "Memory runs at rated speed"
+              }
+            ],
+            "label": "Enable XMP"
+          }
+        ],
+        "title": "Windows gaming tweaks",
+        "variant": "comparison_table"
+      },
+      "source": "answer_visual_tool",
+      "title": "Windows gaming tweaks",
+      "type": "answer_visual"
+    }
+  ]
+}

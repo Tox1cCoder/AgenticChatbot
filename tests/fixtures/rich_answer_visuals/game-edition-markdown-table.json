@@ -1,0 +1,27 @@
+{
+  "content": "| Edition | Price | Includes |\n| --- | --- | --- |\n| Standard | $60 | Base game |\n| Deluxe | $80 | Base game, season pass |",
+  "example": "Game edition comparison",
+  "projections": {
+    "base_rich": {
+      "content": "| Edition | Price | Includes |\n| --- | --- | --- |\n| Standard | $60 | Base game |\n| Deluxe | $80 | Base game, season pass |",
+      "rich_items": []
+    },
+    "figures_only": {
+      "content": "| Edition | Price | Includes |\n| --- | --- | --- |\n| Standard | $60 | Base game |\n| Deluxe | $80 | Base game, season pass |",
+      "rich_items": []
+    },
+    "full": {
+      "content": "| Edition | Price | Includes |\n| --- | --- | --- |\n| Standard | $60 | Base game |\n| Deluxe | $80 | Base game, season pass |",
+      "rich_items": []
+    },
+    "non_rich": {
+      "content": "| Edition | Price | Includes |\n| --- | --- | --- |\n| Standard | $60 | Base game |\n| Deluxe | $80 | Base game, season pass |",
+      "rich_items": null
+    },
+    "visuals_only": {
+      "content": "| Edition | Price | Includes |\n| --- | --- | --- |\n| Standard | $60 | Base game |\n| Deluxe | $80 | Base game, season pass |",
+      "rich_items": []
+    }
+  },
+  "rich_items": []
+}

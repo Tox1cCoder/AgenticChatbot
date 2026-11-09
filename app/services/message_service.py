@@ -42,6 +42,7 @@ from app.core.rich_response import (
     remove_inline_rich_reference,
     validate_rich_references,
 )
+from app.core.source_figures import degrade_source_figure
 from app.factories.message_factory import MessageFactory
 from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole, PlanLifecycle
@@ -65,6 +66,7 @@ from app.services.ai_service import AIService
 from app.services.client_device_service import ClientDeviceService
 from app.services.event_streaming.events import V3StreamEvent, make_event
 from app.services.generation_registry import get_generation_registry
+from app.services.web_image_service import WEB_IMAGE_URL_PREFIX
 from app.usage import UsageContext
 from app.utils.cancellation import await_to_completion
 from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
@@ -4523,10 +4525,11 @@ class MessageService(IMessageService):
                 continue
 
             if item.get("type") == RichItemType.image_group.value:
-                if await self._externalize_group_cells(
+                externalized = await self._externalize_group_cells(
                     item, conversation_id=conversation_id, user_id=user_id
-                ):
-                    kept_items.append(item)
+                )
+                if externalized is not None:
+                    kept_items.append(externalized)
                 else:
                     updated_content = remove_inline_rich_reference(
                         updated_content, str(item.get("id") or "")
@@ -4613,19 +4616,19 @@ class MessageService(IMessageService):
         *,
         conversation_id: UUID,
         user_id: UUID,
-    ) -> bool:
-        """Rewrite an image group's cell URLs in place to owned references.
+    ) -> dict[str, Any] | None:
+        """Rewrite an image group's cell URLs to owned references.
 
-        Cells that cannot be registered are dropped. Returns whether the group
-        item should be kept: True when at least one cell survived, and also when
-        the group carries no usable cell list at all (nothing to externalize, so
-        the item is left exactly as it was). False means every cell failed and
+        Cells that cannot be registered are dropped. Returns the item to keep:
+        the group with its surviving cells -- a source figure that lost a cell
+        also loses its comparison caption -- or the item unchanged when it
+        carries no usable cell list at all. ``None`` means every cell failed and
         the caller must drop the item and remove its marker.
         """
         payload = item.get("payload")
         cells = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(cells, list):
-            return True
+            return item
         kept_cells: list[dict[str, Any]] = []
         for cell in cells:
             if not isinstance(cell, dict):
@@ -4641,10 +4644,7 @@ class MessageService(IMessageService):
                 continue
             cell["url"] = reference_url
             kept_cells.append(cell)
-        if not kept_cells:
-            return False
-        payload["items"] = kept_cells
-        return True
+        return degrade_source_figure(item, kept_cells)
 
     def _record_final_image_selection(self, kept_items: list[dict[str, Any]]) -> None:
         """Count image items surviving finalization. Never raises: telemetry
@@ -4668,6 +4668,25 @@ class MessageService(IMessageService):
     def _provider_of(item: dict[str, Any]) -> str:
         return provenance_provider(item)
 
+    async def _web_image_is_live(
+        self, image_url: str, *, conversation_id: UUID, user_id: UUID
+    ) -> bool:
+        try:
+            image_id = UUID(image_url.removeprefix(WEB_IMAGE_URL_PREFIX).split("?", 1)[0])
+        except ValueError:
+            return False
+        try:
+            return bool(
+                await self.web_image_service.is_live(
+                    image_id, user_id=user_id, conversation_id=conversation_id
+                )
+            )
+        except Exception:
+            # Optional media never fails the answer: the cell is dropped, as
+            # a failed registration is.
+            logging.warning("Web image liveness check failed code=web_image_reference_failed")
+            return False
+
     async def _register_web_image_url(
         self,
         raw_url: Any,
@@ -4684,6 +4703,15 @@ class MessageService(IMessageService):
         if not isinstance(raw_url, str) or not raw_url.strip():
             return None
         image_url = raw_url.strip()
+        if image_url.startswith(WEB_IMAGE_URL_PREFIX) and not await self._web_image_is_live(
+            image_url, conversation_id=conversation_id, user_id=user_id
+        ):
+            # Released or expired before this answer persisted -- typically a
+            # figure placed after a pause outlived its media. It can never
+            # load, so it is dropped like a failed registration.
+            with contextlib.suppress(Exception):
+                rich_image_metrics.record_registration(provider=provider, outcome="expired")
+            return None
         if image_url.startswith(PROTECTED_IMAGE_URL_PREFIXES):
             with contextlib.suppress(Exception):
                 rich_image_metrics.record_registration(provider=provider, outcome="reused")
@@ -4902,6 +4930,8 @@ class MessageService(IMessageService):
             inline_rich_response_v1=bool(
                 getattr(message_create_data, "inline_rich_response_v1", False)
             ),
+            answer_visuals_v1=bool(getattr(message_create_data, "answer_visuals_v1", False)),
+            source_figures_v1=bool(getattr(message_create_data, "source_figures_v1", False)),
             hitl_policy=hitl_policy,
         )
         return resolved_user_id, sanitized_persona, request

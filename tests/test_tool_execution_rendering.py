@@ -275,6 +275,64 @@ async def test_aliased_brave_execution_uses_canonical_identity_for_privacy():
     assert "_rich_item_candidates" not in artifacts[0]
 
 
+_WIDGET_RESULT = json.dumps(
+    {"widget_id": "w-1", "session_id": "conv-1", "status": "active", "version": 1}
+)
+
+
+def test_dedicated_widget_output_does_not_also_append_a_generic_render():
+    from app.ai.tool_execution import build_tool_result_rich_candidates
+
+    candidates = build_tool_result_rich_candidates(
+        raw_result=_WIDGET_RESULT,
+        result_text=_WIDGET_RESULT,
+        render={"version": 1, "type": "table", "title": "Widget table"},
+        tool_call_id="call-widget",
+        tool_name="widget_create",
+    )
+
+    assert [item["id"] for item in candidates] == ["widget:w-1"]
+
+
+def test_tool_artifact_and_tool_end_paths_build_the_same_candidate():
+    from app.ai.tool_execution import _attach_rich_candidates_to_artifact
+    from app.services.ai_service import AIService
+
+    render = {"version": 1, "type": "table", "title": "Widget table"}
+    artifact: dict = {}
+    _attach_rich_candidates_to_artifact(
+        artifact,
+        raw_result=_WIDGET_RESULT,
+        result_text=_WIDGET_RESULT,
+        render=render,
+        tool_call_id="call-widget",
+        tool_name="widget_create",
+    )
+    streamed = AIService._build_tool_end_rich_items(
+        render=render,
+        result=_WIDGET_RESULT,
+        tool_call_id="call-widget",
+        tool_name="widget_create",
+    )
+
+    assert [item["id"] for item in artifact["_rich_item_candidates"]] == ["widget:w-1"]
+    assert [item["id"] for item in streamed] == ["widget:w-1"]
+
+
+def test_generic_render_is_kept_when_no_dedicated_record_exists():
+    from app.ai.tool_execution import build_tool_result_rich_candidates
+
+    candidates = build_tool_result_rich_candidates(
+        raw_result="rows",
+        result_text="rows",
+        render={"version": 1, "type": "table", "title": "Revenue"},
+        tool_call_id="call-table",
+        tool_name="sql_query",
+    )
+
+    assert [item["id"] for item in candidates] == ["tool:call-table"]
+
+
 def test_tool_artifact_preserves_full_output_by_default():
     output = "x" * 1001
 

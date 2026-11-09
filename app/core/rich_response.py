@@ -30,6 +30,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from .answer_visuals import AnswerVisualPayload, PublicEvidence
+
 # ---------------------------------------------------------------------------
 # Public constants
 # ---------------------------------------------------------------------------
@@ -82,6 +84,7 @@ class RichItemType(str, Enum):
     canvas_artifact = "canvas_artifact"
     citation = "citation"
     resource_link = "resource_link"
+    answer_visual = "answer_visual"
 
 
 class RichDisplayPolicy(str, Enum):
@@ -144,6 +147,11 @@ class ImagePayload(PublicPayload):
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
     caption: str | None = Field(default=None, max_length=500)
+    # Composed source figures (``sourceFiguresV1``); absent on every other image.
+    label: str | None = Field(default=None, min_length=1, max_length=160)
+    caption_evidence: list[PublicEvidence] | None = None
+    fallback_markdown: str | None = Field(default=None, min_length=1)
+    comparison_unavailable: bool | None = None
 
     @model_validator(mode="after")
     def _has_exactly_one_source(self) -> ImagePayload:
@@ -164,6 +172,9 @@ class ImageGroupCell(PublicPayload):
     description: str | None = None
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
+    # Composed source figures only.
+    label: str | None = Field(default=None, min_length=1, max_length=160)
+    alt_text: str | None = Field(default=None, min_length=1, max_length=500)
 
     @model_validator(mode="after")
     def _validate_cell(self) -> ImageGroupCell:
@@ -174,7 +185,19 @@ class ImageGroupCell(PublicPayload):
 
 
 class ImageGroupPayload(PublicPayload):
-    items: list[ImageGroupCell] = Field(min_length=2)
+    items: list[ImageGroupCell] = Field(min_length=1)
+    # Composed source figures only.
+    caption: str | None = Field(default=None, max_length=500)
+    caption_evidence: list[PublicEvidence] | None = None
+    fallback_markdown: str | None = Field(default=None, min_length=1)
+    comparison_unavailable: bool | None = None
+
+    @model_validator(mode="after")
+    def _is_a_comparison(self) -> ImageGroupPayload:
+        # A group of one is only valid as the declared remains of a comparison.
+        if len(self.items) < 2 and not self.comparison_unavailable:
+            raise ValueError("image group requires at least two items")
+        return self
 
 
 class LiveWidgetPayload(PublicPayload):
@@ -284,6 +307,17 @@ class ResourceLinkRichItem(RichItemBase):
     payload: ResourceLinkPayload
 
 
+class AnswerVisualRichItem(RichItemBase):
+    """A bounded static visual created by ``create_answer_visual``.
+
+    Public only where the answer places its marker, so it is ``inline_only``.
+    """
+
+    type: Literal[RichItemType.answer_visual]
+    display_policy: Literal[RichDisplayPolicy.inline_only] = RichDisplayPolicy.inline_only
+    payload: AnswerVisualPayload
+
+
 RichItem = Annotated[
     ImageRichItem
     | ImageGroupRichItem
@@ -291,7 +325,8 @@ RichItem = Annotated[
     | ToolRenderRichItem
     | CanvasRichItem
     | CitationRichItem
-    | ResourceLinkRichItem,
+    | ResourceLinkRichItem
+    | AnswerVisualRichItem,
     Field(discriminator="type"),
 ]
 
@@ -813,6 +848,56 @@ def replace_inline_rich_references(
     return "\n".join(output), found
 
 
+def expand_inline_rich_references(markdown: str, blocks: dict[str, str]) -> str:
+    """Replace each marker naming a key of ``blocks`` with that Markdown block.
+
+    The first marker for an id becomes its block, set apart as its own
+    paragraph; later markers for the same id are removed, so a fallback is
+    shown once. Code fences, indented code, and inline code are preserved.
+    Block text is inserted verbatim and never re-scanned for markers.
+    """
+    if not markdown or not blocks or "<!--rich:" not in markdown:
+        return markdown
+    normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    in_fence = _strip_fenced_code_blocks(lines)
+    expanded: set[str] = set()
+    changed = False
+    output: list[str] = []
+    for line, inside in zip(lines, in_fence, strict=False):
+        if inside or _is_indented_code(line):
+            output.append(line)
+            continue
+        matches = [
+            match
+            for match in _iter_inline_rich_marker_matches(line)
+            if match.group(1) in blocks
+        ]
+        if not matches:
+            output.append(line)
+            continue
+        changed = True
+        pieces: list[str] = []
+        text = ""
+        cursor = 0
+        for match in matches:
+            text += line[cursor : match.start()]
+            cursor = match.end()
+            item_id = match.group(1)
+            if item_id in expanded:
+                continue
+            expanded.add(item_id)
+            if text.strip():
+                pieces.append(text.strip())
+            text = ""
+            pieces.append(blocks[item_id])
+        text += line[cursor:]
+        if text.strip():
+            pieces.append(text.strip())
+        output.append("\n\n".join(pieces))
+    return "\n".join(output) if changed else markdown
+
+
 # ---------------------------------------------------------------------------
 # Validation warnings
 # ---------------------------------------------------------------------------
@@ -865,6 +950,49 @@ def select_append_fallback_items(
     return fallback
 
 
+def merge_rich_item_candidates(
+    *groups: Iterable[Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Merge candidate lists by stable id, keeping first-seen order.
+
+    Identical records for one id collapse to one (a replayed tool call). Two
+    different records for one id are both dropped: neither source can prove it
+    owns the id, and a last-write-wins update would silently publish whichever
+    arrived later. Returns the merged candidates and the conflicting ids.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    conflicts: list[str] = []
+    for group in groups:
+        for candidate in group or ():
+            if not isinstance(candidate, dict):
+                continue
+            item_id = candidate.get("id")
+            if not isinstance(item_id, str) or not item_id:
+                continue
+            if item_id in conflicts:
+                continue
+            existing = merged.get(item_id)
+            if existing is None:
+                merged[item_id] = candidate
+            elif existing != candidate:
+                conflicts.append(item_id)
+    return [item for item_id, item in merged.items() if item_id not in conflicts], conflicts
+
+
+def is_admitted_candidate(candidate: dict[str, Any], referenced_ids: set[str]) -> bool:
+    """Whether a candidate becomes public for an answer with these markers.
+
+    A referenced candidate is admitted. An unreferenced one is admitted only
+    when its policy allows append; images are always ``inline_only``, so this
+    is the selected-only image rule applied to every inline-only record.
+    """
+    if candidate.get("id") in referenced_ids:
+        return True
+    if _is_image_item(candidate):
+        return False
+    return candidate.get("display_policy") == RichDisplayPolicy.inline_or_append.value
+
+
 def provenance_provider(item: Any) -> str:
     """Return an item's provenance provider, or ``"other"`` when absent.
 
@@ -902,6 +1030,9 @@ def select_transient_upsert_items(
             # Canvas source is the asset; do not stream until terminal
             # finalization confirms the boundary review.
             continue
+        if _get_display_policy(item) == RichDisplayPolicy.inline_only.value:
+            # Public only once the answer places it, which finalization decides.
+            continue
         if _payload_has_inline_binary(item):
             continue
         try:
@@ -921,6 +1052,15 @@ def _get_type(item: Any) -> str | None:
     if isinstance(raw, str):
         return raw
     return None
+
+
+def _get_display_policy(item: Any) -> str | None:
+    raw = getattr(item, "display_policy", None)
+    if raw is None and isinstance(item, dict):
+        raw = item.get("display_policy")
+    if isinstance(raw, RichDisplayPolicy):
+        return raw.value
+    return raw if isinstance(raw, str) else None
 
 
 def _payload_has_inline_binary(item: Any) -> bool:
@@ -1075,6 +1215,7 @@ def build_rich_item_inventory_block(
 __all__ = [
     "ALLOWED_IMAGE_MIME_TYPES",
     "ALLOWED_URL_SCHEMES",
+    "AnswerVisualRichItem",
     "CanvasPayload",
     "CanvasRichItem",
     "GENERIC_IMAGE_ALT_TEXT",
@@ -1098,6 +1239,9 @@ __all__ = [
     "ToolRenderPayload",
     "ToolRenderRichItem",
     "build_rich_item_inventory_block",
+    "expand_inline_rich_references",
+    "is_admitted_candidate",
+    "merge_rich_item_candidates",
     "parse_inline_rich_references",
     "remove_inline_rich_reference",
     "replace_inline_rich_references",

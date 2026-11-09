@@ -19,6 +19,7 @@ from ..core.rich_response import (
     RichItemType,
     sanitize_public_image_fields,
 )
+from .answer_visual_tools import CREATE_ANSWER_VISUAL_TOOL_NAME, split_rich_item_result
 from .client_runtime_tools import (
     CLIENT_TOOL_PREFIX,
     get_active_client_runtime_session,
@@ -26,6 +27,7 @@ from .client_runtime_tools import (
     get_client_tool_device_id,
     is_client_tool,
 )
+from .source_figure_tools import COMPOSE_SOURCE_FIGURE_TOOL_NAME
 from .tool_error_policy import (
     ToolErrorKind,
     ToolErrorSummary,
@@ -278,6 +280,80 @@ def build_live_widget_candidate_from_tool_result(
     }
 
 
+#: Server-owned tools whose output is a validated rich-item descriptor. They
+#: never fall back to a generic ``tool_render`` view, with or without one.
+_DESCRIPTOR_TOOLS = frozenset({CREATE_ANSWER_VISUAL_TOOL_NAME, COMPOSE_SOURCE_FIGURE_TOOL_NAME})
+
+
+def is_server_descriptor_tool(tool: Any) -> bool:
+    """Whether ``tool`` is this server's own descriptor tool, not a namesake.
+
+    Trust follows the internal identity the server stamped on its tool. A
+    third-party tool that merely shares the name never gets its output
+    promoted to a public rich item.
+    """
+    metadata = getattr(tool, "metadata", None) or {}
+    qualified = metadata.get("qualified_tool_id") if isinstance(metadata, dict) else None
+    return any(qualified == f"internal::{name}" for name in _DESCRIPTOR_TOOLS)
+
+
+def build_dedicated_rich_candidate(
+    result: Any,
+    *,
+    tool_name: str,
+    descriptor: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return the record a server-owned tool publishes for its own output.
+
+    Only tools whose output this server defines get a dedicated record; a
+    third-party result is never promoted by shape alone.
+    """
+    if tool_name in _DESCRIPTOR_TOOLS:
+        return descriptor
+    return build_live_widget_candidate_from_tool_result(result, tool_name=tool_name)
+
+
+def build_tool_result_rich_candidates(
+    *,
+    raw_result: Any,
+    result_text: str,
+    render: dict[str, Any] | None,
+    tool_call_id: str | None,
+    tool_name: str,
+    include_images: bool = True,
+    descriptor: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """The one candidate builder for a tool result.
+
+    Shared by the tool-artifact path and the tool-end stream path so the two
+    cannot drift. A result yields its dedicated record or the generic
+    ``tool_render`` view, never both. ``descriptor`` is the validated record a
+    descriptor tool split out of its result before the result became model text.
+    """
+    candidates: list[dict[str, Any]] = []
+    if include_images:
+        candidates.extend(
+            build_image_candidates_from_tool_content(
+                raw_result,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+            )
+        )
+    dedicated = build_dedicated_rich_candidate(
+        result_text, tool_name=tool_name, descriptor=descriptor
+    )
+    if dedicated is not None:
+        candidates.append(dedicated)
+    if dedicated is not None or tool_name in _DESCRIPTOR_TOOLS:
+        return candidates
+    tool_render = build_tool_render_candidate(
+        render, tool_call_id=tool_call_id, tool_name=tool_name
+    )
+    if tool_render is not None:
+        candidates.append(tool_render)
+    return candidates
+
+
 def _attach_rich_candidates_to_artifact(
     artifact: dict[str, Any],
     *,
@@ -286,30 +362,20 @@ def _attach_rich_candidates_to_artifact(
     render: dict[str, Any] | None,
     tool_call_id: str | None,
     tool_name: str,
+    descriptor: dict[str, Any] | None = None,
 ) -> None:
     """Compute rich-item candidates for a tool result and attach them as
     ``artifact["_rich_item_candidates"]`` for the graph layer to lift into
     ``context["rich_item_candidates"]``.
     """
-    candidates: list[dict[str, Any]] = []
-    candidates.extend(
-        build_image_candidates_from_tool_content(
-            raw_result,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-        )
-    )
-    live_widget = build_live_widget_candidate_from_tool_result(
-        result_text,
+    candidates = build_tool_result_rich_candidates(
+        raw_result=raw_result,
+        result_text=result_text,
+        render=render,
+        tool_call_id=tool_call_id,
         tool_name=tool_name,
+        descriptor=descriptor,
     )
-    if live_widget is not None:
-        candidates.append(live_widget)
-    tool_render = build_tool_render_candidate(
-        render, tool_call_id=tool_call_id, tool_name=tool_name
-    )
-    if tool_render is not None:
-        candidates.append(tool_render)
     if candidates:
         artifact["_rich_item_candidates"] = candidates
 
@@ -1974,12 +2040,18 @@ class _ToolCallResults:
         tool_args: Any,
         execution_detail: dict[str, Any],
         capture_images: bool,
+        descriptor_tool: bool = False,
     ) -> None:
         public_result = (
             sanitize_public_image_fields(make_json_safe(result))
             if canonical_tool_name == "brave_image_search"
             else result
         )
+        descriptor = None
+        if descriptor_tool:
+            # The descriptor belongs to the artifact, not to the model's context.
+            public_result, descriptor = split_rich_item_result(public_result)
+            result = public_result
         structured_error = _structured_tool_error(public_result)
         normalized_result = normalize_tool_result_for_rendering(
             public_result,
@@ -2013,6 +2085,7 @@ class _ToolCallResults:
             render=normalized_result.render,
             tool_call_id=tool_call_id,
             tool_name=tool_name,
+            descriptor=descriptor,
         )
         self.artifacts.append(artifact)
         if capture_images:
@@ -2160,6 +2233,7 @@ async def execute_tool_calls(
             results.append_result(
                 result,
                 canonical_tool_name=canonical_tool_name,
+                descriptor_tool=is_server_descriptor_tool(tool),
                 tool_call_id=tool_id,
                 tool_name=tool_name,
                 tool_args=tool_args,

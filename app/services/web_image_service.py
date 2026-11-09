@@ -173,6 +173,16 @@ class WebImageService:
             image_ids, user_id=user_id, conversation_id=conversation_id
         )
 
+    async def is_live(self, image_id: UUID, *, user_id: UUID, conversation_id: UUID) -> bool:
+        """Whether this conversation's reference can still be served.
+
+        The same test the image route applies: owned and not released. An
+        expired pending reference the sweeper has not reclaimed yet still
+        loads, and persisting it marks it selected, so it counts as live.
+        """
+        record = await self.repository.aget_for_user(image_id, user_id)
+        return record is not None and record.conversation_id == conversation_id
+
     async def release_references(
         self,
         image_ids: list[UUID] | tuple[UUID, ...],

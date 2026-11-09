@@ -13,6 +13,7 @@ public ``AIMessage`` and no wrapper reaches ``END`` — ``finalize`` owns both.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -22,15 +23,20 @@ from typing import Any
 
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
-from langchain_core.messages import HumanMessage
-from langgraph.errors import GraphBubbleUp
+from langchain_core.messages import HumanMessage, ToolMessage
+from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.types import Command
 
 from app.ai.agents.canvas_agent import _build_previous_artifact_message, finalize_canvas_response
+from app.ai.answer_visual_tools import CREATE_ANSWER_VISUAL_TOOL_NAME, create_answer_visual_tool
 from app.ai.hitl_config import policy_from_context
 from app.ai.image_generation import current_media_delivery_service
 from app.ai.research_budget import get_research_budget
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.ai.source_figure_tools import (
+    COMPOSE_SOURCE_FIGURE_TOOL_NAME,
+    create_compose_source_figure_tool,
+)
 from app.ai.tool_context import rich_response_capable_from_context
 from app.ai.utils import coerce_response_text, extract_inline_images_from_content
 from app.ai.web_research.contracts import ResearchScope
@@ -66,6 +72,13 @@ from app.ai.workflow.middleware import (
     ToolExecutionMiddleware,
     WorkerToolScopeMiddleware,
     build_specialist_middleware,
+)
+from app.core.config import settings as app_settings
+from app.core.rich_response import (
+    is_admitted_candidate,
+    merge_rich_item_candidates,
+    parse_inline_rich_references,
+    validate_public_rich_item,
 )
 from app.observability.routing import get_routing_metrics_recorder
 
@@ -446,7 +459,12 @@ class SpecialistFactory:
             if build.web_research_session is not None:
                 parser = GroundingParser(build.web_research_session)
                 grounding = parser.resolve(_final_text(produced))
-                if build.web_research_session.answer_sources and not grounding.source_ids:
+                cites_a_source = bool(grounding.source_ids) or bool(
+                    placed_descriptor_citations(
+                        _turn_artifacts(build.tool_execution, produced), grounding.text
+                    )
+                )
+                if build.web_research_session.answer_sources and not cites_a_source:
                     correction = HumanMessage(
                         content=(
                             "Your previous draft cannot be published because it did not cite an "
@@ -483,7 +501,20 @@ class SpecialistFactory:
                     produced = [*produced, correction, *repaired_produced]
                     grounding = parser.resolve(_final_text(repaired_produced))
                 produced = _replace_final_text(produced, grounding.text)
-                await build.web_research_session.finish(grounding.selected_image_ids)
+                placed_figures = [
+                    item_id
+                    for item_id in parse_inline_rich_references(grounding.text)
+                    if item_id in build.web_research_session.figure_ids
+                ]
+                await build.web_research_session.finish(
+                    grounding.selected_image_ids, selected_figure_ids=placed_figures
+                )
+        except GraphInterrupt:
+            # An approval pause: the resumed run may still place a figure
+            # composed before it, so that figure's media are kept.
+            if build.web_research_session is not None:
+                await build.web_research_session.suspend()
+            raise
         except GraphBubbleUp:
             if build.web_research_session is not None:
                 await build.web_research_session.abort()
@@ -615,7 +646,9 @@ class SpecialistFactory:
         request: SpecialistRequest,
     ) -> SpecialistBuild:
         system_prompt = await _resolve(definition.system_prompt_factory, request)
-        tools = await _resolve(definition.tool_factory, request) or []
+        tools = with_answer_authoring_tools(
+            await _resolve(definition.tool_factory, request) or [], definition, request
+        )
         web_research_enabled = getattr(self._settings, "web_research_enabled", True)
         if not web_research_enabled:
             tools = [
@@ -732,7 +765,9 @@ class SpecialistFactory:
             """
             if accountant.state.forced_synthesis or request.extras.get("disable_tools"):
                 return []
-            live_tools = await _resolve(definition.tool_factory, request) or []
+            live_tools = with_answer_authoring_tools(
+                await _resolve(definition.tool_factory, request) or [], definition, request
+            )
             if not web_research_enabled:
                 live_tools = [
                     tool
@@ -845,7 +880,7 @@ class SpecialistFactory:
         grounding: GroundingResolution | None = None,
         web_research_session: Any = None,
     ) -> ResponseOutcome:
-        artifacts = list(tool_execution.artifacts)
+        artifacts = _turn_artifacts(tool_execution, produced)
         images = [
             *tool_execution.images,
             *self._inline_generated_images(definition, request, produced),
@@ -861,12 +896,18 @@ class SpecialistFactory:
             metadata["execution_budget"] = accountant.state.model_dump(mode="json")
         web_sources: tuple[dict[str, Any], ...] = ()
         rich_items: tuple[dict[str, Any], ...] = ()
+        final_text = _final_text(produced)
+        admitted_items, descriptor_source_ids = _admitted_rich_items(
+            grounding.rich_items if grounding is not None else (), artifacts, final_text
+        )
         if web_research_session is not None:
+            cited = [
+                *(grounding.source_ids if grounding is not None else ()),
+                *descriptor_source_ids,
+            ]
             web_sources = tuple(
                 source.model_dump(mode="json")
-                for source in web_research_session.published_sources(
-                    grounding.source_ids if grounding is not None else ()
-                )
+                for source in web_research_session.published_sources(tuple(dict.fromkeys(cited)))
             )
             if web_sources:
                 metadata["web_sources"] = list(web_sources)
@@ -886,7 +927,7 @@ class SpecialistFactory:
             agent_id=request.agent_id,
             message=AgentMessage(
                 role=MessageRole.ASSISTANT,
-                content=_final_text(produced) or ("Here is your image." if images else ""),
+                content=final_text or ("Here is your image." if images else ""),
             ),
             metadata=metadata,
             tool_artifacts=artifacts or None,
@@ -903,7 +944,7 @@ class SpecialistFactory:
                 artifacts=tuple(artifacts),
                 images=tuple(images),
                 web_sources=web_sources,
-                rich_items=rich_items,
+                rich_items=admitted_items,
                 private_messages=tuple(produced),
             ),
         )
@@ -1146,6 +1187,138 @@ def _final_text(messages: list[Any]) -> str:
         if text.strip():
             return text
     return ""
+
+
+#: Public answering specialists that may author static visuals. RAG renders its
+#: answer from structured claims, custom agents follow their own allowlists, and
+#: canvas output is a standalone artifact.
+_ANSWER_VISUAL_AGENT_KEYS = frozenset({"chat", "search"})
+
+
+_AUTHORING_TOOLS = (
+    ("answer_visuals_v1", CREATE_ANSWER_VISUAL_TOOL_NAME, create_answer_visual_tool),
+    ("source_figures_v1", COMPOSE_SOURCE_FIGURE_TOOL_NAME, create_compose_source_figure_tool),
+)
+
+
+def with_answer_authoring_tools(tools: list[Any], definition: Any, request: Any) -> list[Any]:
+    """Add ``create_answer_visual`` / ``compose_source_figure`` where allowed.
+
+    Each is bound only behind the inline rich-response kill switch and the
+    request's rich capability plus its own, and never for a
+    private Planning worker, whose markers the parent strips and whose images
+    are released at its boundary. A live stream can only show what its client
+    renders, so a client that cannot is never offered the tool.
+    """
+    if definition.model_config_key not in _ANSWER_VISUAL_AGENT_KEYS:
+        return tools
+    if request.extras.get("worker"):
+        return tools
+    context = request.state.get("context")
+    if not (
+        getattr(app_settings, "inline_rich_response_enabled", False)
+        and rich_response_capable_from_context(context)
+        and isinstance(context, dict)
+    ):
+        return tools
+    bound = {getattr(tool, "name", None) for tool in tools}
+    added = [
+        factory()
+        for capability, name, factory in _AUTHORING_TOOLS
+        if context.get(capability) and name not in bound
+    ]
+    return [*tools, *added] if added else tools
+
+
+_DESCRIPTOR_TOOL_NAMES = frozenset(
+    {CREATE_ANSWER_VISUAL_TOOL_NAME, COMPOSE_SOURCE_FIGURE_TOOL_NAME}
+)
+
+
+def _turn_artifacts(tool_execution: Any, produced: list[Any]) -> list[dict[str, Any]]:
+    """This run's tool artifacts plus descriptors checkpointed on its messages.
+
+    A run resumed after an approval interrupt has a fresh middleware, so a
+    visual or figure created before the interrupt survives only on its
+    ``ToolMessage``. Restored once per call id, and only from the server's own
+    descriptor tools.
+    """
+    live = list(tool_execution.artifacts)
+    seen = {
+        str(artifact.get("tool_call_id") or "") for artifact in live if isinstance(artifact, dict)
+    }
+    restored = []
+    for message in produced:
+        artifact = getattr(message, "artifact", None)
+        call_id = str(artifact.get("tool_call_id") or "") if isinstance(artifact, dict) else ""
+        if (
+            isinstance(message, ToolMessage)
+            and message.name in _DESCRIPTOR_TOOL_NAMES
+            and isinstance(artifact, dict)
+            and artifact.get("_rich_item_candidates")
+            and call_id not in seen
+        ):
+            seen.add(call_id)
+            # A copy: lifting its candidates later must not edit the
+            # checkpointed message.
+            restored.append(copy.deepcopy(artifact))
+    return [*live, *restored]
+
+
+def _artifact_candidates(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        candidate
+        for artifact in artifacts
+        if isinstance(artifact, dict)
+        for candidate in artifact.get("_rich_item_candidates") or ()
+        if isinstance(candidate, dict)
+    ]
+
+
+def _admitted_rich_items(
+    grounded: tuple[dict[str, Any], ...],
+    artifacts: list[dict[str, Any]],
+    final_text: str,
+) -> tuple[tuple[dict[str, Any], ...], list[str]]:
+    """Grounded items plus the tool descriptors this answer admits.
+
+    Returns the public form of each admitted item -- recorded on provenance so
+    a continuation can find it without recovering it from prose, and
+    persisted as-is by a paused partial, so never the private record -- and
+    the turn-local source ids those descriptors rest on. A source a reader can
+    only reach through a visual or figure is published like one cited in prose.
+    """
+    merged, _conflicts = merge_rich_item_candidates(grounded, _artifact_candidates(artifacts))
+    referenced = set(parse_inline_rich_references(final_text))
+    public: list[dict[str, Any]] = []
+    source_ids: list[str] = []
+    for item in merged:
+        if not is_admitted_candidate(item, referenced):
+            continue
+        try:
+            validated = validate_public_rich_item(
+                {key: value for key, value in item.items() if key != "_internal"}
+            )
+        except ValueError:
+            continue
+        public.append(validated.model_dump(mode="json", exclude_none=True))
+        source_ids.extend(str(i) for i in (item.get("_internal") or {}).get("web_source_ids") or ())
+    return tuple(public), source_ids
+
+
+def placed_descriptor_citations(artifacts: list[dict[str, Any]], text: str) -> list[str]:
+    """Source ids cited by visuals or figure captions the answer places.
+
+    A figure's cells name where each image came from; that is attribution,
+    not a citation, so only its caption evidence counts.
+    """
+    referenced = set(parse_inline_rich_references(text))
+    return [
+        str(source_id)
+        for candidate in _artifact_candidates(artifacts)
+        if candidate.get("id") in referenced
+        for source_id in (candidate.get("_internal") or {}).get("cited_source_ids") or ()
+    ]
 
 
 def _replace_final_text(messages: list[Any], text: str) -> list[Any]:
