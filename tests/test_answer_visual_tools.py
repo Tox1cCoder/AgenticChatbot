@@ -414,11 +414,10 @@ def test_binding_skips_only_when_the_server_tool_is_already_bound(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _gate(monkeypatch, *, rich: bool = True, visuals: bool = True):
+def _gate(monkeypatch, *, rich: bool = True):
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "inline_rich_response_enabled", rich)
-    monkeypatch.setattr(settings, "answer_visuals_enabled", visuals)
 
 
 def _bound(
@@ -457,12 +456,6 @@ def test_private_planning_workers_do_not_bind_the_tool(monkeypatch):
     _gate(monkeypatch)
 
     assert CREATE_ANSWER_VISUAL_TOOL_NAME not in _bound(worker=True)
-
-
-def test_rollout_gate_off_does_not_bind_the_tool(monkeypatch):
-    _gate(monkeypatch, visuals=False)
-
-    assert CREATE_ANSWER_VISUAL_TOOL_NAME not in _bound()
 
 
 def test_inline_rich_kill_switch_does_not_bind_the_tool(monkeypatch):

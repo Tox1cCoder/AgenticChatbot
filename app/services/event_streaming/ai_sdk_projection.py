@@ -261,25 +261,15 @@ def selected_image_file_parts_from_rich_items(
 def effective_answer_visuals(*, base: bool, requested: bool) -> bool:
     """Whether a client may receive answer visuals as rich items.
 
-    The feature rides on the base rich contract and its own rollout gate; a
-    client that asks without either gets the Markdown fallback.
+    The feature rides on the base rich contract and its kill switch; a client
+    that asks without either gets the Markdown fallback.
     """
-    return bool(
-        requested
-        and base
-        and getattr(settings, "inline_rich_response_enabled", False)
-        and getattr(settings, "answer_visuals_enabled", False)
-    )
+    return bool(requested and base and getattr(settings, "inline_rich_response_enabled", False))
 
 
 def effective_source_figures(*, base: bool, requested: bool) -> bool:
     """Whether a client may receive composed figures with labels and captions."""
-    return bool(
-        requested
-        and base
-        and getattr(settings, "inline_rich_response_enabled", False)
-        and getattr(settings, "source_figures_enabled", False)
-    )
+    return bool(requested and base and getattr(settings, "inline_rich_response_enabled", False))
 
 
 def _rich_items_of(metadata: dict[str, Any] | None) -> list[dict[str, Any]]:

@@ -320,7 +320,6 @@ def _visuals_rollout(monkeypatch):
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
-    monkeypatch.setattr(settings, "answer_visuals_enabled", True)
 
 
 async def _payloads(response) -> list[dict]:
@@ -375,11 +374,10 @@ async def test_chat_carries_the_effective_visual_capability_into_generation(requ
 
 
 @pytest.mark.asyncio
-async def test_chat_does_not_request_visuals_while_the_rollout_gate_is_off(monkeypatch):
+async def test_chat_does_not_request_visuals_while_the_kill_switch_is_off(monkeypatch):
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
-    monkeypatch.setattr(settings, "answer_visuals_enabled", False)
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", False)
     service = _FakeMessageService()
     response = await _call(
         "chat", {"inlineRichResponseV1": True, "answerVisualsV1": True}, service
@@ -447,13 +445,12 @@ def test_base_rich_history_drops_the_descriptor_and_keeps_other_items():
     assert [item["id"] for item in message["metadata"]["rich_items"]] == ["tool:t1"]
 
 
-def test_effective_capability_requires_base_and_rollout(monkeypatch):
+def test_effective_capability_requires_base_and_the_kill_switch(monkeypatch):
     from app.core.config import settings
     from app.services.event_streaming.ai_sdk_projection import effective_answer_visuals
 
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
-    monkeypatch.setattr(settings, "answer_visuals_enabled", True)
     assert effective_answer_visuals(base=True, requested=True) is True
     assert effective_answer_visuals(base=False, requested=True) is False
-    monkeypatch.setattr(settings, "answer_visuals_enabled", False)
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", False)
     assert effective_answer_visuals(base=True, requested=True) is False

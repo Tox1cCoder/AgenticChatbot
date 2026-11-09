@@ -1195,26 +1195,16 @@ _ANSWER_VISUAL_AGENT_KEYS = frozenset({"chat", "search"})
 
 
 _AUTHORING_TOOLS = (
-    (
-        "answer_visuals_enabled",
-        "answer_visuals_v1",
-        CREATE_ANSWER_VISUAL_TOOL_NAME,
-        create_answer_visual_tool,
-    ),
-    (
-        "source_figures_enabled",
-        "source_figures_v1",
-        COMPOSE_SOURCE_FIGURE_TOOL_NAME,
-        create_compose_source_figure_tool,
-    ),
+    ("answer_visuals_v1", CREATE_ANSWER_VISUAL_TOOL_NAME, create_answer_visual_tool),
+    ("source_figures_v1", COMPOSE_SOURCE_FIGURE_TOOL_NAME, create_compose_source_figure_tool),
 )
 
 
 def with_answer_authoring_tools(tools: list[Any], definition: Any, request: Any) -> list[Any]:
     """Add ``create_answer_visual`` / ``compose_source_figure`` where allowed.
 
-    Each is bound only behind its rollout gate, the inline rich-response kill
-    switch, and the request's rich capability plus its own, and never for a
+    Each is bound only behind the inline rich-response kill switch and the
+    request's rich capability plus its own, and never for a
     private Planning worker, whose markers the parent strips and whose images
     are released at its boundary. A live stream can only show what its client
     renders, so a client that cannot is never offered the tool.
@@ -1233,8 +1223,8 @@ def with_answer_authoring_tools(tools: list[Any], definition: Any, request: Any)
     bound = {getattr(tool, "name", None) for tool in tools}
     added = [
         factory()
-        for gate, capability, name, factory in _AUTHORING_TOOLS
-        if getattr(app_settings, gate, False) and context.get(capability) and name not in bound
+        for capability, name, factory in _AUTHORING_TOOLS
+        if context.get(capability) and name not in bound
     ]
     return [*tools, *added] if added else tools
 

@@ -1884,24 +1884,6 @@ class Settings(BaseSettings):
             "events, regardless of the per-request capability."
         ),
     )
-    answer_visuals_enabled: bool = Field(
-        default=False,
-        description=(
-            "Rollout gate for create_answer_visual (static steps, bars, and "
-            "comparison tables). Binds the tool for public chat/search answers "
-            "only when inline rich responses are also enabled and the request is "
-            "rich-capable. Keep off until a client renders answer visuals."
-        ),
-    )
-    source_figures_enabled: bool = Field(
-        default=False,
-        description=(
-            "Rollout gate for compose_source_figure (labelled single images and "
-            "comparisons built from inspected web images). Binds the tool for public "
-            "chat/search answers only for a rich-capable client that sent "
-            "sourceFiguresV1. Keep off until a client renders labelled figures."
-        ),
-    )
     web_research_enabled: bool = Field(
         default=True,
         description="Short-lived rollout switch for canonical web research.",

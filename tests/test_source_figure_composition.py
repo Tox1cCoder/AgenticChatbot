@@ -391,16 +391,15 @@ def test_non_rich_client_gets_text_only_and_the_media_as_file_parts():
 @pytest.fixture
 def _figures_rollout(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
-    monkeypatch.setattr(settings, "source_figures_enabled", True)
 
 
 @pytest.mark.usefixtures("_figures_rollout")
-def test_effective_figure_capability_requires_base_and_rollout(monkeypatch):
+def test_effective_figure_capability_requires_base_and_the_kill_switch(monkeypatch):
     from app.services.event_streaming.ai_sdk_projection import effective_source_figures
 
     assert effective_source_figures(base=True, requested=True) is True
     assert effective_source_figures(base=False, requested=True) is False
-    monkeypatch.setattr(settings, "source_figures_enabled", False)
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", False)
     assert effective_source_figures(base=True, requested=True) is False
 
 
