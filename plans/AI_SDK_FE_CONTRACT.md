@@ -1,5 +1,8 @@
 # AI SDK Frontend Contract
 
+For the focused Continue integration, use
+[CONTINUE_AI_SDK_FE_CONTRACT.md](CONTINUE_AI_SDK_FE_CONTRACT.md).
+
 For rich items, assistant images, protected media loading, and Streamlit parity,
 the sole normative specification is
 [AI_SDK_FE_RICH_ITEM_CONTRACT.md](AI_SDK_FE_RICH_ITEM_CONTRACT.md). The summary
