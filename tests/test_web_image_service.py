@@ -331,3 +331,30 @@ async def test_metrics_failure_cannot_break_a_valid_image_fetch():
     result = await service.fetch(_record("https://img.example/image.png"))
 
     assert result.content == content
+
+
+@pytest.mark.asyncio
+async def test_a_reference_is_live_exactly_when_the_image_route_would_serve_it():
+    """Liveness matches what /web-images serves: owned, in this conversation, not released.
+
+    An expired pending reference the sweeper has not reclaimed yet is still
+    served, and persistence marks it selected, so a long turn keeps its images.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    user, conversation = uuid4(), uuid4()
+    expired_pending = SimpleNamespace(
+        conversation_id=conversation,
+        lifecycle_state="pending",
+        expires_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    repository = AsyncMock()
+    service, _ = _service(repository=repository)
+
+    repository.aget_for_user.return_value = expired_pending
+    assert await service.is_live(uuid4(), user_id=user, conversation_id=conversation) is True
+
+    assert await service.is_live(uuid4(), user_id=user, conversation_id=uuid4()) is False
+
+    repository.aget_for_user.return_value = None
+    assert await service.is_live(uuid4(), user_id=user, conversation_id=conversation) is False

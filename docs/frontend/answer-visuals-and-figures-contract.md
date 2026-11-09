@@ -422,9 +422,9 @@ Please send back:
 ## 9. Known limitations
 
 - A visual or figure created before an approval pause is kept and can be placed
-  by the resumed answer. A figure's images are held for the pending-image TTL
-  (15 minutes by default); if the approval comes later than that, the images
-  are gone and the figure degrades as in "Comparison unavailable" (or is
+  by the resumed answer. A figure's images are held until the pending-image
+  cleanup reclaims them (15 minutes after the images were fetched, by default);
+  if the approval comes later than that, the images are gone and the figure degrades as in "Comparison unavailable" (or is
   removed with its marker when no image survives).
 - A figure composed during one budget epoch but placed only after Continue is
   removed with its marker; the prose stays.

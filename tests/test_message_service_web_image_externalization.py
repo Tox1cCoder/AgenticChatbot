@@ -536,6 +536,25 @@ async def test_a_released_reference_is_not_reused_and_degrades_its_figure():
 
 
 @pytest.mark.asyncio
+async def test_a_failed_liveness_lookup_drops_only_that_image():
+    """A database hiccup on one cell costs that cell, never the answer."""
+    web_images = AsyncMock()
+    web_images.is_live.side_effect = RuntimeError("pool timeout")
+    metadata = _metadata()
+    metadata["rich_items"][0]["payload"] = {
+        "url": f"{WEB_IMAGE_URL_PREFIX}{LIVE_REFERENCE}",
+        "mime_type": "image/png",
+    }
+
+    content, externalized = await _service(web_images)._externalize_remote_rich_images(
+        f"Text <!--rich:{IMAGE_ID}-->", metadata, uuid4(), uuid4()
+    )
+
+    assert [item["type"] for item in externalized["rich_items"]] == ["live_widget"]
+    assert content.startswith("Text")
+
+
+@pytest.mark.asyncio
 async def test_a_reference_that_is_not_an_id_is_not_reused():
     web_images = AsyncMock()
     metadata = _metadata()

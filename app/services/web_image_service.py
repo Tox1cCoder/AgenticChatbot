@@ -10,7 +10,7 @@ import time
 import warnings
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from io import BytesIO
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -176,18 +176,12 @@ class WebImageService:
     async def is_live(self, image_id: UUID, *, user_id: UUID, conversation_id: UUID) -> bool:
         """Whether this conversation's reference can still be served.
 
-        A released reference is soft-deleted; an expired pending one is about
-        to be. Neither will ever load again.
+        The same test the image route applies: owned and not released. An
+        expired pending reference the sweeper has not reclaimed yet still
+        loads, and persisting it marks it selected, so it counts as live.
         """
         record = await self.repository.aget_for_user(image_id, user_id)
-        if record is None or record.conversation_id != conversation_id:
-            return False
-        expires_at = record.expires_at
-        return not (
-            record.lifecycle_state == "pending"
-            and expires_at is not None
-            and expires_at <= datetime.now(UTC)
-        )
+        return record is not None and record.conversation_id == conversation_id
 
     async def release_references(
         self,

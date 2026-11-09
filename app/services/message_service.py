@@ -4675,11 +4675,17 @@ class MessageService(IMessageService):
             image_id = UUID(image_url.removeprefix(WEB_IMAGE_URL_PREFIX).split("?", 1)[0])
         except ValueError:
             return False
-        return bool(
-            await self.web_image_service.is_live(
-                image_id, user_id=user_id, conversation_id=conversation_id
+        try:
+            return bool(
+                await self.web_image_service.is_live(
+                    image_id, user_id=user_id, conversation_id=conversation_id
+                )
             )
-        )
+        except Exception:
+            # Optional media never fails the answer: the cell is dropped, as
+            # a failed registration is.
+            logging.warning("Web image liveness check failed code=web_image_reference_failed")
+            return False
 
     async def _register_web_image_url(
         self,
