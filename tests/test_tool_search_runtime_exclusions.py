@@ -35,9 +35,7 @@ _CATALOG = [
         ["query"],
         "f3",
     ),
-    ToolDescriptor(
-        "tavily_map", "tavily", "Discover URLs on a website.", ["url"], ["url"], "f4"
-    ),
+    ToolDescriptor("tavily_map", "tavily", "Discover URLs on a website.", ["url"], ["url"], "f4"),
 ]
 
 
@@ -112,15 +110,15 @@ async def test_a_raw_web_tool_is_never_autoloaded_by_an_excluded_search():
         excluded_tool_names=RAW_WEB_TOOL_NAMES,
     )
 
-    recommended = result.get("recommended_tool") or {}
-    assert recommended.get("tool_name") not in RAW_WEB_TOOL_NAMES
-    assert result.get("loaded_count", 0) == 0
+    loaded = [item for item in result["results"] if item["is_loaded"]]
+    assert not loaded
 
 
 @pytest.mark.asyncio
 async def test_filtered_web_discovery_explains_the_bound_replacements():
     result = await _execute_tool_search(
-        query="image search", excluded_tool_names=RAW_WEB_TOOL_NAMES,
+        query="image search",
+        excluded_tool_names=RAW_WEB_TOOL_NAMES,
     )
 
     assert "web_search" in result.get("guidance", "")

@@ -58,3 +58,28 @@ async def test_a_search_during_a_rebuild_sees_the_previous_catalog(monkeypatch) 
     manager.release.set()
     assert await rebuild is True
     assert catalog.tool_count == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_refresh_preserves_snapshot_and_can_retry_same_generation(monkeypatch) -> None:
+    generation = [1]
+    monkeypatch.setattr(catalog_module, "get_mcp_tools_generation", lambda: generation[0])
+    manager = _Manager()
+    catalog = McpToolCatalog(manager)
+    await catalog.refresh_if_needed()
+    fetch_tools = manager.get_all_tools_info
+
+    async def unavailable():
+        raise RuntimeError("MCP transport unavailable")
+
+    generation[0] = 2
+    monkeypatch.setattr(manager, "get_all_tools_info", unavailable)
+
+    with pytest.raises(RuntimeError, match="MCP transport unavailable"):
+        await catalog.refresh_if_needed()
+    assert [tool.tool_name for tool in catalog.list_all()] == ["tavily_search"]
+
+    monkeypatch.setattr(manager, "get_all_tools_info", fetch_tools)
+    manager.tools = [{**manager.tools[0], "name": "recovered_search"}]
+    assert await catalog.refresh_if_needed() is True
+    assert [tool.tool_name for tool in catalog.list_all()] == ["recovered_search"]

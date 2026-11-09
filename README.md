@@ -802,7 +802,13 @@ wall-clock limits remain independent safeguards.
 
 ### Deferred tool search
 
-When `MCP_TOOL_SEARCH_ENABLED=true`, only lightweight discovery, pinned tools, already-loaded deferred tools, internal tools, and device-scoped loaded client tools are bound at start. Agents should use a clearly matching bound tool directly and use [`tool_search`](app/ai/tool_search_tool.py) when capability is missing, ambiguous, or tied to an unknown integration/server identifier — with intent-aware scoring in [`tool_search_scoring.py`](app/ai/tool_search_scoring.py), conservative autoload of the single high-confidence recommended tool, TTL eviction, and a per-conversation loaded-tools cap.
+When `MCP_TOOL_SEARCH_ENABLED=true`, only lightweight discovery, pinned tools, already-loaded deferred tools, internal tools, and device-scoped loaded client tools are bound at start. Agents should use a clearly matching bound tool directly and use [`tool_search`](app/ai/tool_search_tool.py) when capability is missing, ambiguous, or tied to an unknown integration/server identifier — with intent-aware scoring in [`tool_search_scoring.py`](app/ai/tool_search_scoring.py), conservative autoload of the single high-confidence eligible tool, TTL eviction, and a per-conversation loaded-tools cap.
+
+Discovery returns compact `results` (callable name, purpose, argument hints, and `is_loaded`) and one `next_action`. An empty search returns `{"results":[],"next_action":"refine_search"}`. Suitable loaded results use `call_a_loaded_tool`; inventory uses `inspect_inventory` and retains its `mode`. Canonical `resolved_server_name` values are preserved, and `more_available` appears only when true. Queries, duplicate recommendations, refinement booleans, and load counts are kept out of model output. Set `MCP_TOOL_SEARCH_DEBUG_SCORES=true` to include ranking scores, confidence, and match reasons in `debug_scores`.
+
+Catalog failures return `error="catalog_unavailable"`, `unavailable_sources`, recovery guidance, and `next_action="report_unavailable"` when no results are available. Partial failures retain healthy results and identify unavailable sources; suitable loaded results can still be used. Rewording a search cannot repair an unavailable integration connection.
+
+Failed catalog fetches preserve the previous snapshot and remain retryable; incomplete catalogs can refresh after recovery without a configuration-generation change. An enabled server whose tool loading failed and a requested device without an active session are reported as unavailable. A successfully connected integration with zero tools remains a valid empty catalog. Exact offline server names retain their identity during resolution, and explicitly disallowed origins are not queried.
 
 Run the deterministic tool-search accuracy checks before changing ranking:
 

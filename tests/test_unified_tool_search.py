@@ -177,14 +177,26 @@ def test_resolve_server_name_fuzzy_returns_none_for_weak_match():
 def test_capability_queries_do_not_resolve_to_a_provider_by_generic_name_tokens(query):
     catalog = McpToolCatalog(mcp_manager=object())
     catalog._tools_by_server = {
-        "brave_image_search": [ToolDescriptor(
-            "brave_image_search", "brave_image_search", "Search the web for images.",
-            ["query"], ["query"], "brave-fp",
-        )],
-        "tavily": [ToolDescriptor(
-            "tavily_search", "tavily", "Search the web for current information.",
-            ["query"], ["query"], "tavily-fp",
-        )],
+        "brave_image_search": [
+            ToolDescriptor(
+                "brave_image_search",
+                "brave_image_search",
+                "Search the web for images.",
+                ["query"],
+                ["query"],
+                "brave-fp",
+            )
+        ],
+        "tavily": [
+            ToolDescriptor(
+                "tavily_search",
+                "tavily",
+                "Search the web for current information.",
+                ["query"],
+                ["query"],
+                "tavily-fp",
+            )
+        ],
     }
     catalog._server_name_lower_map = {name: name for name in catalog._tools_by_server}
     assert catalog.resolve_server_name(query) is None
@@ -277,7 +289,7 @@ async def test_execute_tool_search_passes_query_through_unchanged(monkeypatch):
 
     result = await _execute_tool_search(query="edit file on my computer")
 
-    assert result["query"] == "edit file on my computer"
+    assert "query" not in result  # The input is already present in the tool call.
     assert fake_catalog.query == "edit file on my computer"
 
 
@@ -471,7 +483,7 @@ async def test_execute_tool_search_preserves_client_execution_scope_for_autoload
 
     result = await _execute_tool_search(query="start local process")
 
-    assert result["loaded_count"] == 1
+    assert sum(item["is_loaded"] for item in result["results"]) == 1
     assert deferred_state.client_calls
     autoload_call = deferred_state.client_calls[0]
     assert autoload_call["device_id"] == "device-123"
@@ -713,7 +725,7 @@ def test_tool_search_result_description_is_compact_purpose():
     )
 
     ranked = rank_tool_candidates(query="run shell command", candidates=[desc])
-    public, _ = _merge_search_results(
+    public, internal = _merge_search_results(
         server_results=ranked,
         client_results=[],
         query="run shell command",
@@ -722,8 +734,8 @@ def test_tool_search_result_description_is_compact_purpose():
 
     assert public[0]["description"] == "Start a shell command or local process."
     assert len(public[0]["description"]) <= 120
-    assert public[0]["confidence"] == "high"
-    assert len(public[0]["match_reasons"]) <= 2
+    assert internal[0]["_confidence"] == "high"
+    assert len(internal[0]["_match_reasons"]) <= 2
 
 
 @pytest.mark.asyncio
@@ -776,8 +788,9 @@ async def test_run_shell_command_autoloads_only_start_process(monkeypatch):
 
     result = await _execute_tool_search(query="run shell command")
 
-    assert result["recommended_tool"]["tool_name"] == "start_process"
-    assert result["recommended_tool"]["is_loaded"] is True
+    assert result["results"][0]["tool_name"] == "start_process"
+    assert result["results"][0]["is_loaded"] is True
+    assert result["next_action"] == "call_a_loaded_tool"
     assert [ref.tool_name for ref in state.refs] == ["start_process"]
     assert {ref.tool_name for ref in state.refs}.isdisjoint({"start_search", "get_config"})
 
@@ -958,13 +971,8 @@ async def test_browser_action_prefers_client_process_over_remote_direct_opener(m
     result = await _execute_tool_search(query="open url in browser play youtube video")
 
     expected_name = "client__desktop_commander__start_process"
-    assert result["recommended_tool"] == {
-        "tool_name": expected_name,
-        "confidence": "high",
-        "is_loaded": True,
-    }
-    assert result["next_action"] == "call_recommended_tool"
-    assert result["requires_refinement"] is False
+    assert result["next_action"] == "call_a_loaded_tool"
+    assert result["results"][0]["is_loaded"] is True
     assert result["results"][0]["tool_name"] == expected_name
     assert state.server_refs == []
     assert [ref.tool_name for ref in state.client_refs] == [expected_name]
@@ -1031,14 +1039,8 @@ def test_compact_tool_search_output_stays_within_representative_budget(caplog):
     )
 
     result = {
-        "query": "open URL in browser",
-        "mode": "discovery",
-        "recommended_tool": None,
         "results": public,
-        "requires_refinement": True,
         "next_action": "refine_search",
-        "loaded_count": 0,
-        "more_available": False,
     }
 
     with caplog.at_level(logging.DEBUG, logger="app.ai.tool_search_tool"):
@@ -1048,7 +1050,7 @@ def test_compact_tool_search_output_stays_within_representative_budget(caplog):
     assert len(public) == 3
     assert all(len(item["arg_hints"]) <= 160 for item in public)
     assert all(item["arg_hints"].endswith("...") for item in public)
-    assert len(payload.encode("utf-8")) <= 2000
+    assert len(payload.encode("utf-8")) <= 1500
     assert "response_bytes=" in caplog.text
     assert "next_action=refine_search" in caplog.text
     assert "open URL in browser" not in caplog.text

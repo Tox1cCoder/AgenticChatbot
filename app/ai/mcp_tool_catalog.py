@@ -125,7 +125,6 @@ class ToolDescriptor:
         }
 
 
-
 @dataclass
 class ToolReference:
     """Minimal reference to a tool for loading purposes."""
@@ -189,11 +188,12 @@ class McpToolCatalog:
         # Case-insensitive server name lookup: {lower_name: canonical_name}
         self._server_name_lower_map: dict[str, str] = {}
         self._server_descriptions: dict[str, str] = {}
+        self._unavailable_servers: set[str] = set()
 
     async def refresh_if_needed(self) -> bool:
         """Rebuild when the MCP tools generation changed; True if it rebuilt."""
         current_gen = get_mcp_tools_generation()
-        if current_gen == self._cached_generation:
+        if current_gen == self._cached_generation and not self._unavailable_servers:
             return False
 
         await self._rebuild_catalog()
@@ -214,11 +214,15 @@ class McpToolCatalog:
         # catalog is a shared singleton, so a search issued during the fetch
         # used to see an empty catalog, and two overlapping rebuilds both
         # appended into the same lists and duplicated every descriptor.
-        try:
-            tools_info = await self._mcp_manager.get_all_tools_info()
-        except Exception as e:
-            logger.error("Failed to fetch tools from MCP manager: %s", e)
-            tools_info = []
+        # Propagate fetch errors before clearing the last snapshot. An outage
+        # must not become an empty, successfully cached generation.
+        tools_info = await self._mcp_manager.get_all_tools_info()
+        server_status = self._mcp_manager.get_servers_status()
+        unavailable_servers = (
+            self._mcp_manager.get_unavailable_servers()
+            if hasattr(self._mcp_manager, "get_unavailable_servers")
+            else set()
+        )
 
         self._tools.clear()
         self._tools_by_name.clear()
@@ -226,6 +230,7 @@ class McpToolCatalog:
         self._colliding_names.clear()
         self._server_name_lower_map.clear()
         self._server_descriptions.clear()
+        self._unavailable_servers = set(unavailable_servers)
 
         # Track filtered tools for logging
         filtered_count = 0
@@ -267,13 +272,15 @@ class McpToolCatalog:
             self._tools_by_server.setdefault(server_name, []).append(descriptor)
 
         # Build case-insensitive server name lookup
-        for sname in self._tools_by_server:
+        # Preserve exact configured identities even when their connection failed;
+        # an offline integration must not fuzzy-resolve to a healthy neighbor.
+        for sname in self._tools_by_server.keys() | self._unavailable_servers:
             self._server_name_lower_map[sname.lower()] = sname
 
         # Cache configured server descriptions so inventory mode can expose
         # short capability summaries without forcing the model to guess from
         # opaque server identifiers alone.
-        for sname, info in self._mcp_manager.get_servers_status().items():
+        for sname, info in server_status.items():
             description = str((info or {}).get("description") or "").strip()
             if description:
                 self._server_descriptions[sname] = description
@@ -315,6 +322,26 @@ class McpToolCatalog:
                 sorted(self._colliding_names),
             )
 
+    def has_unavailable_servers(
+        self,
+        server_name: str | None = None,
+        allowlist: list[str] | None = None,
+    ) -> bool:
+        """Whether this search's server scope includes an incomplete catalog."""
+        names = self._unavailable_servers
+        if server_name:
+            names = {name for name in names if name.lower() == server_name.lower()}
+        if not allowlist:
+            return bool(names)
+        for name in names:
+            if name in allowlist or any(entry.startswith(f"{name}::") for entry in allowlist):
+                return True
+        # An unavailable catalog cannot resolve an unqualified tool allowlist.
+        # Report incompleteness conservatively without disclosing server names.
+        return bool(names) and any(
+            "::" not in entry and entry not in self._tools_by_server for entry in allowlist
+        )
+
     def is_ambiguous(self, tool_name: str) -> bool:
         """Check if a tool name is ambiguous (exposed by multiple servers)."""
         return tool_name in self._colliding_names
@@ -343,11 +370,17 @@ class McpToolCatalog:
             # Capability words do not identify an integration. In particular,
             # "web search" must not hard-scope discovery to brave_image_search.
             name_tokens = candidate_tokens - {
-                "web", "image", "images", "search", "server", "mcp", "tool", "tools", "api"
+                "web",
+                "image",
+                "images",
+                "search",
+                "server",
+                "mcp",
+                "tool",
+                "tools",
+                "api",
             }
-            has_name_signal = (
-                bool(set(tokenize_text(server_name)) & name_tokens)
-            )
+            has_name_signal = bool(set(tokenize_text(server_name)) & name_tokens)
             if not has_name_signal:
                 continue
 

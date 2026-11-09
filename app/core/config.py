@@ -1755,7 +1755,7 @@ class Settings(BaseSettings):
     )
     mcp_tool_search_match_reasons_max: int = Field(
         default=2,
-        description="Maximum match reasons exposed per search result.",
+        description="Maximum match reasons exposed per result in tool-search debug scores.",
     )
     mcp_tool_search_debug_scores: bool = Field(
         default=False,
@@ -1764,7 +1764,7 @@ class Settings(BaseSettings):
     mcp_tool_search_autoload_top_k: int = Field(
         default=1,
         description=(
-            "Maximum high-confidence recommended tools to automatically load after tool_search."
+            "Maximum high-confidence eligible tools to automatically load after tool_search."
         ),
     )
     mcp_tool_search_inventory_default_top_k: int = Field(

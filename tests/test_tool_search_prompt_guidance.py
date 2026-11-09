@@ -94,13 +94,16 @@ def test_tool_search_description_respects_already_bound_tools():
     assert "not currently bound" in description
 
 
-def test_tool_exploration_suffix_uses_recommended_tool_without_synonym_search():
+def test_tool_exploration_suffix_uses_loaded_results_without_synonym_search():
     lower = TOOL_EXPLORATION_SUFFIX.lower()
 
-    assert "recommended_tool" in lower
+    assert "results" in lower
+    assert "is_loaded=true" in lower
+    assert "call_a_loaded_tool" in lower
     assert "do not issue another" in lower
     assert "synonym" in lower
-    assert "requires_refinement" in lower
+    assert "refine_search" in lower
+    assert "report_unavailable" in lower
 
 
 def test_tool_exploration_suffix_scopes_discovery_to_current_runtime_context():

@@ -8,14 +8,14 @@ tool origin - the only difference is the tool list available on each device.
 Key features:
 - Searches server MCP tools (from McpToolCatalog)
 - Searches client device tools (from ClientToolCatalog) when a device is connected
-- Results include origin information (server_mcp, client_mcp)
+- Model-facing results include only compact, actionable tool information
 - Autoloading works for both server and client tools
 """
 
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -48,19 +48,56 @@ def _compact_arg_hints(value: Any) -> str:
 
 def _serialize_tool_search_output(result: dict[str, Any]) -> str:
     payload = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-    recommended = result.get("recommended_tool")
-    recommended_name = recommended.get("tool_name") if isinstance(recommended, dict) else None
     logger.debug(
         "tool_search output: mode=%s response_bytes=%d results=%d "
-        "recommended=%s next_action=%s requires_refinement=%s",
-        result.get("mode"),
+        "next_action=%s unavailable_sources=%s",
+        result.get("mode", "discovery"),
         len(payload.encode("utf-8")),
         len(result.get("results") or []),
-        recommended_name,
         result.get("next_action"),
-        result.get("requires_refinement"),
+        result.get("unavailable_sources", []),
     )
     return payload
+
+
+def _build_tool_search_output(
+    results: list[dict[str, Any]],
+    *,
+    mode: str = "discovery",
+    inventory: list[dict[str, Any]] | None = None,
+    resolved_server_name: str | None = None,
+    more_available: bool = False,
+    unavailable_sources: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build one compact contract for discovery, inventory, and catalog failures."""
+    if mode == "inventory":
+        output: dict[str, Any] = {"mode": mode, "inventory": inventory or []}
+        next_action = "inspect_inventory"
+    else:
+        output = {"results": results}
+        next_action = (
+            "call_a_loaded_tool" if any(r["is_loaded"] for r in results) else "refine_search"
+        )
+        if mode == "per_server_inventory":
+            output["mode"] = mode
+            next_action = "inspect_inventory"
+
+    if resolved_server_name:
+        output["resolved_server_name"] = resolved_server_name
+    if more_available:
+        output["more_available"] = True
+    if unavailable_sources:
+        output["unavailable_sources"] = unavailable_sources
+        output["guidance"] = (
+            "Check the unavailable integration connection. Rewording the query will not "
+            "restore its catalog; use suitable results from available sources if present."
+        )
+        if not results and not inventory:
+            output["error"] = "catalog_unavailable"
+        if not inventory and not any(r["is_loaded"] for r in results):
+            next_action = "report_unavailable"
+    output["next_action"] = next_action
+    return output
 
 
 def _search_results_refer_to_same_capability(
@@ -152,27 +189,17 @@ class ToolSearchResult(BaseModel):
     is_loaded: bool = Field(
         default=False, description="True if this tool was autoloaded and is ready for immediate use"
     )
-    confidence: str = Field(
-        default="low", description="Match confidence band: high, medium, or low"
+    source_server: str | None = Field(
+        default=None, description="Source server when needed to disambiguate a callable alias"
     )
-    match_reasons: list[str] = Field(
-        default_factory=list, description="At most two short reasons this tool matched"
-    )
-
-
-class RecommendedTool(BaseModel):
-    """Response-level recommendation pointing at the single best loaded tool."""
-
-    tool_name: str = Field(description="The exact name to call")
-    confidence: str = Field(description="Match confidence band: high, medium, or low")
-    is_loaded: bool = Field(description="True when the recommended tool is callable this turn")
 
 
 class ToolSearchOutput(BaseModel):
-    """Output schema for the tool_search tool."""
+    """Output contract; optional/default fields are omitted from runtime responses."""
 
-    query: str | None = Field(description="The search query used")
-    mode: str = Field(description="Search mode: discovery, inventory, or per_server_inventory")
+    mode: Literal["discovery", "inventory", "per_server_inventory"] = Field(
+        default="discovery", description="Only emitted for inventory responses"
+    )
     resolved_server_name: str | None = Field(
         default=None,
         description=(
@@ -187,26 +214,26 @@ class ToolSearchOutput(BaseModel):
             "server_name, description, and tool_count."
         ),
     )
-    recommended_tool: RecommendedTool | None = Field(
-        default=None,
-        description=(
-            "The single high-confidence loaded tool to call next, or null when the "
-            "search should be refined."
-        ),
+    results: list[ToolSearchResult] = Field(
+        default_factory=list, description="Matching tools; omitted from global inventory"
     )
-    results: list[ToolSearchResult] = Field(description="List of matching tools")
-    requires_refinement: bool = Field(
-        description="True when no loaded high-confidence recommendation is available"
+    next_action: Literal[
+        "call_a_loaded_tool", "refine_search", "inspect_inventory", "report_unavailable"
+    ] = Field(description="Suggested next step based on loaded results and catalog availability")
+    more_available: bool = Field(
+        default=False, description="Only emitted when additional matches were truncated"
     )
-    next_action: str = Field(
-        description="call_recommended_tool, refine_search, or inspect_inventory"
+    error: Literal["catalog_unavailable"] | None = Field(
+        default=None, description="Catalog failure when no results could be returned"
     )
-    loaded_count: int = Field(
-        description="Number of tools that were autoloaded and ready for immediate use"
+    unavailable_sources: list[Literal["server", "client"]] = Field(
+        default_factory=list, description="Catalog sources that failed; omitted when healthy"
     )
-    more_available: bool = Field(description="True if more results exist beyond the returned list")
+    debug_scores: list[dict[str, Any]] | None = Field(
+        default=None, description="Ranking diagnostics; only emitted when debug scores are enabled"
+    )
     guidance: str | None = Field(
-        default=None, description="Recovery guidance when provider tools are intentionally hidden"
+        default=None, description="Recovery guidance for unavailable catalogs or hidden tools"
     )
 
 
@@ -263,7 +290,7 @@ async def _execute_tool_search(
     resolved_server_name: str | None = None
 
     # Get the MCP manager and catalog for SERVER tools
-    unavailable_servers: list[str] = []
+    unavailable_sources: list[str] = []
     server_results = []
     catalog = None
     is_inventory_mode = not query or not str(query).strip()
@@ -278,7 +305,7 @@ async def _execute_tool_search(
     effective_top_k = top_k if top_k is not None else default_top_k
     effective_top_k = max(1, min(effective_top_k, max_top_k))
 
-    if not client_only_scope:
+    if not client_only_scope and effective_server_allowlist != ["__custom_agent_no_server_tools__"]:
         try:
             mcp_manager = await get_global_mcp_manager()
             catalog = await get_tool_catalog(mcp_manager)
@@ -304,6 +331,12 @@ async def _execute_tool_search(
                         max_top_k = settings.mcp_tool_search_inventory_max_top_k
                         effective_top_k = top_k if top_k is not None else default_top_k
                         effective_top_k = max(1, min(effective_top_k, max_top_k))
+
+            if hasattr(catalog, "has_unavailable_servers") and catalog.has_unavailable_servers(
+                server_name=server_name,
+                allowlist=effective_server_allowlist,
+            ):
+                unavailable_sources.append("server")
 
             # Log query if enabled (gated on mcp_tool_search_log_queries)
             if settings.mcp_tool_search_log_queries:
@@ -337,22 +370,17 @@ async def _execute_tool_search(
                         latency_ms,
                         len(inventory),
                     )
-                return {
-                    "query": None,
-                    "mode": "inventory",
-                    "resolved_server_name": resolved_server_name,
-                    "inventory": inventory,
-                    "recommended_tool": None,
-                    "results": [],
-                    "requires_refinement": False,
-                    "next_action": "inspect_inventory",
-                    "loaded_count": 0,
-                    "more_available": False,
-                }
+                if inventory or not (device_id and user_id) or not unavailable_sources:
+                    return _build_tool_search_output(
+                        [],
+                        mode="inventory",
+                        inventory=inventory,
+                        unavailable_sources=unavailable_sources,
+                    )
 
             # Search server tools (discovery or per-server inventory mode)
             # Use search_scored() when available so we have real scores for autoload gating
-            if query and hasattr(catalog, "search_scored"):
+            elif query and hasattr(catalog, "search_scored"):
                 server_results = catalog.search_scored(
                     query=query,
                     top_k=effective_top_k * 2,
@@ -368,36 +396,33 @@ async def _execute_tool_search(
                 )
         except Exception as e:
             logger.error("Failed to get server tool catalog: %s", e)
-            unavailable_servers.append("all_server")
+            if "server" not in unavailable_sources:
+                unavailable_sources.append("server")
 
     # Get CLIENT tools if device is connected
     client_results = []
     client_catalog = None
 
-    if device_id and user_id:
+    if device_id and user_id and effective_client_allowlist != ["__custom_agent_no_client_tools__"]:
         try:
             client_catalog = get_client_tool_catalog(device_id, user_id)
+            if hasattr(client_catalog, "session_id") and not client_catalog.session_id:
+                unavailable_sources.append("client")
             if client_only_scope and server_name and hasattr(client_catalog, "resolve_server_name"):
                 resolved_client_server_name = client_catalog.resolve_server_name(server_name)
                 if resolved_client_server_name:
                     server_name = resolved_client_server_name
+            if is_inventory_mode and not is_per_server_inventory:
+                inventory = client_catalog.get_server_inventory(
+                    allowlist=effective_client_allowlist
+                )
+                return _build_tool_search_output(
+                    [],
+                    mode="inventory",
+                    inventory=inventory,
+                    unavailable_sources=unavailable_sources,
+                )
             if client_catalog.tool_count > 0:
-                if client_only_scope and is_inventory_mode and not is_per_server_inventory:
-                    inventory = client_catalog.get_server_inventory(
-                        allowlist=effective_client_allowlist
-                    )
-                    return {
-                        "query": None,
-                        "mode": "inventory",
-                        "resolved_server_name": resolved_server_name,
-                        "inventory": inventory,
-                        "recommended_tool": None,
-                        "results": [],
-                        "requires_refinement": False,
-                        "next_action": "inspect_inventory",
-                        "loaded_count": 0,
-                        "more_available": False,
-                    }
                 if query and hasattr(client_catalog, "search_scored"):
                     client_results = client_catalog.search_scored(
                         query=query,
@@ -419,6 +444,15 @@ async def _execute_tool_search(
                 )
         except Exception as e:
             logger.warning("Failed to search client tool catalog: %s", e)
+            if "client" not in unavailable_sources:
+                unavailable_sources.append("client")
+
+    if is_inventory_mode and not is_per_server_inventory:
+        return _build_tool_search_output(
+            [],
+            mode="inventory",
+            unavailable_sources=unavailable_sources,
+        )
 
     # Merge and rank results from both sources
     # Returns both public (for model) and internal (for autoloading) versions
@@ -478,7 +512,7 @@ async def _execute_tool_search(
             continue
 
         # Scored results carry explicit eligibility: only the single
-        # high-confidence recommended candidate is eligible, so we no longer
+        # high-confidence top candidate is eligible, so we no longer
         # broadly autoload the first N candidates. Legacy/plain results have no
         # eligibility flag (None) and fall back to the score floor above.
         if internal.get("_autoload_eligible") is False:
@@ -575,30 +609,21 @@ async def _execute_tool_search(
 
     # Return clean results for model consumption
     # NO internal metadata like server_name, origin, generation, etc.
-    mode = "per_server_inventory" if is_per_server_inventory else "discovery"
-    recommended_tool, requires_refinement, next_action = _build_recommendation(
+    result = _build_tool_search_output(
         public_results,
-        internal_results,
+        mode="per_server_inventory" if is_per_server_inventory else "discovery",
+        resolved_server_name=resolved_server_name,
+        more_available=truncated,
+        unavailable_sources=unavailable_sources,
     )
-    result = {
-        "query": query,
-        "mode": mode,
-        "recommended_tool": recommended_tool,
-        "results": public_results,
-        "requires_refinement": requires_refinement,
-        "next_action": next_action,
-        "loaded_count": loaded_count,
-        "more_available": truncated,
-    }
-    if resolved_server_name:
-        result["resolved_server_name"] = resolved_server_name
     if filtered_web_tools:
-        result["guidance"] = (
+        web_guidance = (
             "Raw web providers are intentionally hidden from discovery; refining this query "
             "will not expose them. Use web_search directly for web and image search and "
             "web_open for page content if those tools are bound. Otherwise, hand off to a "
             "web-capable agent."
         )
+        result["guidance"] = " ".join(filter(None, [result.get("guidance"), web_guidance]))
     if settings.mcp_tool_search_debug_scores:
         result["debug_scores"] = [
             {
@@ -616,8 +641,8 @@ def _public_result_from_scored(item: Any) -> tuple[dict[str, Any], dict[str, Any
     """Build (public, internal) dicts from a ToolSearchScore.
 
     The public dict uses the compact capability purpose (not a truncated raw MCP
-    prompt) and carries confidence + match reasons. The internal dict carries the
-    numeric score and autoload eligibility for the autoload pass and debug output.
+    prompt). The internal dict carries ranking diagnostics and autoload eligibility
+    for the autoload pass and opt-in debug output.
     """
     score_meta = item if hasattr(item, "tool") else None
     tool = score_meta.tool if score_meta is not None else item
@@ -627,17 +652,15 @@ def _public_result_from_scored(item: Any) -> tuple[dict[str, Any], dict[str, Any
         public["description"] = score_meta.profile.purpose[
             : settings.mcp_tool_search_description_max_chars
         ]
-        public["confidence"] = score_meta.confidence
-        public["match_reasons"] = score_meta.match_reasons[
-            : settings.mcp_tool_search_match_reasons_max
-        ]
 
     internal = tool._to_internal_result()
     if score_meta is not None:
         internal["_score"] = score_meta.score
         internal["_confidence"] = score_meta.confidence
         internal["_autoload_eligible"] = score_meta.autoload_eligible
-        internal["_match_reasons"] = list(score_meta.match_reasons)
+        internal["_match_reasons"] = score_meta.match_reasons[
+            : settings.mcp_tool_search_match_reasons_max
+        ]
         internal["_capabilities"] = sorted(score_meta.profile.capabilities)
         if settings.mcp_tool_search_debug_scores:
             internal["_debug_score"] = {
@@ -685,47 +708,6 @@ def _search_item_to_dicts(item: Any, idx: int) -> tuple[float, dict[str, Any], d
     public_dict["arg_hints"] = _compact_arg_hints(public_dict.get("arg_hints"))
     internal_dict["_score"] = real_score
     return real_score, public_dict, internal_dict
-
-
-def _build_recommendation(
-    public_results: list[dict[str, Any]],
-    internal_results: list[dict[str, Any]],
-) -> tuple[dict[str, Any] | None, bool, str]:
-    """Decide the single recommended tool and the response-level next action.
-
-    A recommendation is only emitted when the top public result is loaded
-    (callable this turn) and high confidence, or medium confidence as the lone
-    result. Otherwise the model is told to refine the search.
-    """
-    if not public_results or not internal_results:
-        return None, True, "refine_search"
-
-    top_public = public_results[0]
-    top_internal = internal_results[0]
-    confidence = str(top_public.get("confidence") or top_internal.get("_confidence") or "low")
-    is_loaded = bool(top_public.get("is_loaded"))
-
-    if confidence == "high" and is_loaded:
-        return (
-            {
-                "tool_name": top_public["tool_name"],
-                "confidence": confidence,
-                "is_loaded": is_loaded,
-            },
-            False,
-            "call_recommended_tool",
-        )
-    if confidence == "medium" and is_loaded and len(public_results) == 1:
-        return (
-            {
-                "tool_name": top_public["tool_name"],
-                "confidence": confidence,
-                "is_loaded": is_loaded,
-            },
-            False,
-            "call_recommended_tool",
-        )
-    return None, True, "refine_search"
 
 
 _EXTERNAL_ACTION_TOOL_CAPABILITIES = {"external_open", "shell_exec"}
@@ -871,6 +853,9 @@ async def tool_search(
     - Refine the query and search again if the results are weak or ambiguous
     - High-confidence eligible results are automatically loaded; any result
       with is_loaded=true is ready to call immediately
+    - Follow next_action: call_a_loaded_tool, refine_search, inspect_inventory,
+      or report_unavailable. For report_unavailable, follow the recovery guidance;
+      rewording the query cannot restore an unavailable catalog.
 
     Examples:
     - Search for web tools: tool_search(query="search the web")
@@ -945,6 +930,9 @@ def create_tool_search_tool(
         resolved_server_name is present, reuse that exact server_name in later
         calls. High-confidence eligible results with is_loaded=true are ready
         to use immediately.
+        Follow next_action: call_a_loaded_tool, refine_search, inspect_inventory,
+        or report_unavailable. For report_unavailable, follow the recovery guidance;
+        rewording the query cannot restore an unavailable catalog.
         """
         result = await _execute_tool_search(
             query=query,

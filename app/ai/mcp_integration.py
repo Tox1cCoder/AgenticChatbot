@@ -830,6 +830,15 @@ class MCPManager:
         else:
             return "unknown_error"
 
+    def get_unavailable_servers(self) -> set[str]:
+        """Enabled servers whose tool catalog could not be loaded.
+
+        A successfully loaded empty catalog has an entry in ``_server_tools``;
+        a failed connection does not. This preserves partial discovery without
+        changing the manager's existing best-effort tool loading behavior.
+        """
+        return set(self._get_enabled_server_names()) - self._server_tools.keys()
+
     def get_servers_status(self) -> dict[str, dict[str, Any]]:
         """
         Get status of all configured servers
