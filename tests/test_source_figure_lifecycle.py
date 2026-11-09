@@ -355,8 +355,6 @@ def _figures_rollout(monkeypatch):
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
-    monkeypatch.setattr(settings, "source_figures_enabled", True)
-    monkeypatch.setattr(settings, "answer_visuals_enabled", False)
 
 
 @pytest.mark.usefixtures("_figures_rollout")
@@ -381,7 +379,24 @@ def test_agents_without_web_images_never_compose(key):
     assert _bound(key) == []
 
 
-def test_figure_rollout_gate_defaults_off():
-    from app.core.config import Settings
+@pytest.mark.asyncio
+async def test_an_approval_pause_keeps_figure_media_and_releases_the_rest():
+    """The figure is checkpointed on its tool message; its media must outlive the pause.
 
-    assert Settings.model_fields["source_figures_enabled"].default is False
+    Released references cannot come back, so a resumed answer that places the
+    figure would otherwise persist dead cells. Unpinned images are released:
+    a resumed run's fresh session cannot select them by ``I#`` anyway, and the
+    pending TTL reclaims the kept ones if the turn is never resumed.
+    """
+    session, service = await _session([_urls("a", 3, 640)])
+    session.model_evidence_blocks()
+    await _compose(session, _cells("I1", "I2"))
+    pinned = {_ref(session, "I1"), _ref(session, "I2")}
+    unpinned = _ref(session, "I3")
+
+    await session.suspend()
+
+    assert pinned.isdisjoint(service.released)
+    assert unpinned in service.released
+    await session.abort()
+    assert pinned.isdisjoint(service.released), "a suspended session is closed"

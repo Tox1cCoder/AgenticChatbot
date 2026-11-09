@@ -7,7 +7,7 @@ import base64
 import hashlib
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1060,13 +1060,37 @@ class WebResearchSession:
         return ResearchCloseout(selected_candidate_ids=selected)
 
     async def abort(self) -> None:
+        await self._close_releasing(self._held_images().values())
+
+    async def suspend(self) -> None:
+        """Close for an approval pause, keeping what a composed figure needs.
+
+        The figure's descriptor is checkpointed on its tool message, so the
+        resumed answer may still place it; its media stay pending, and the
+        pending TTL reclaims them if the turn is never resumed. Everything
+        else is released: a resumed run's fresh session cannot select it.
+        """
+        figure_media = {
+            candidate_id
+            for dependencies in self._figure_dependencies.values()
+            for candidate_id in dependencies
+        }
+        await self._close_releasing(
+            prepared
+            for candidate_id, prepared in self._held_images().items()
+            if candidate_id not in figure_media
+        )
+
+    async def _close_releasing(self, images: Iterable[PreparedImage]) -> None:
         if self._closed or self.service.image_service is None:
             return
-        await self.service.image_service.release_references(
-            list(dict.fromkeys(prepared.reference_id for prepared in self._held_images().values())),
-            user_id=UUID(self.scope.user_id),
-            conversation_id=UUID(self.scope.conversation_id),
-        )
+        references = list(dict.fromkeys(prepared.reference_id for prepared in images))
+        if references:
+            await self.service.image_service.release_references(
+                references,
+                user_id=UUID(self.scope.user_id),
+                conversation_id=UUID(self.scope.conversation_id),
+            )
         self._closed = True
         if self.service.metrics is not None:
             with suppress(Exception):

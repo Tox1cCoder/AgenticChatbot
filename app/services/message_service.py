@@ -66,6 +66,7 @@ from app.services.ai_service import AIService
 from app.services.client_device_service import ClientDeviceService
 from app.services.event_streaming.events import V3StreamEvent, make_event
 from app.services.generation_registry import get_generation_registry
+from app.services.web_image_service import WEB_IMAGE_URL_PREFIX
 from app.usage import UsageContext
 from app.utils.cancellation import await_to_completion
 from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
@@ -4667,6 +4668,19 @@ class MessageService(IMessageService):
     def _provider_of(item: dict[str, Any]) -> str:
         return provenance_provider(item)
 
+    async def _web_image_is_live(
+        self, image_url: str, *, conversation_id: UUID, user_id: UUID
+    ) -> bool:
+        try:
+            image_id = UUID(image_url.removeprefix(WEB_IMAGE_URL_PREFIX).split("?", 1)[0])
+        except ValueError:
+            return False
+        return bool(
+            await self.web_image_service.is_live(
+                image_id, user_id=user_id, conversation_id=conversation_id
+            )
+        )
+
     async def _register_web_image_url(
         self,
         raw_url: Any,
@@ -4683,6 +4697,15 @@ class MessageService(IMessageService):
         if not isinstance(raw_url, str) or not raw_url.strip():
             return None
         image_url = raw_url.strip()
+        if image_url.startswith(WEB_IMAGE_URL_PREFIX) and not await self._web_image_is_live(
+            image_url, conversation_id=conversation_id, user_id=user_id
+        ):
+            # Released or expired before this answer persisted -- typically a
+            # figure placed after a pause outlived its media. It can never
+            # load, so it is dropped like a failed registration.
+            with contextlib.suppress(Exception):
+                rich_image_metrics.record_registration(provider=provider, outcome="expired")
+            return None
         if image_url.startswith(PROTECTED_IMAGE_URL_PREFIXES):
             with contextlib.suppress(Exception):
                 rich_image_metrics.record_registration(provider=provider, outcome="reused")

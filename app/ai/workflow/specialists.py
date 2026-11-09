@@ -22,8 +22,8 @@ from typing import Any
 
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
-from langchain_core.messages import HumanMessage
-from langgraph.errors import GraphBubbleUp
+from langchain_core.messages import HumanMessage, ToolMessage
+from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.types import Command
 
 from app.ai.agents.canvas_agent import _build_previous_artifact_message, finalize_canvas_response
@@ -459,7 +459,9 @@ class SpecialistFactory:
                 parser = GroundingParser(build.web_research_session)
                 grounding = parser.resolve(_final_text(produced))
                 cites_a_source = bool(grounding.source_ids) or bool(
-                    placed_descriptor_citations(build.tool_execution.artifacts, grounding.text)
+                    placed_descriptor_citations(
+                        _turn_artifacts(build.tool_execution, produced), grounding.text
+                    )
                 )
                 if build.web_research_session.answer_sources and not cites_a_source:
                     correction = HumanMessage(
@@ -506,6 +508,12 @@ class SpecialistFactory:
                 await build.web_research_session.finish(
                     grounding.selected_image_ids, selected_figure_ids=placed_figures
                 )
+        except GraphInterrupt:
+            # An approval pause: the resumed run may still place a figure
+            # composed before it, so that figure's media are kept.
+            if build.web_research_session is not None:
+                await build.web_research_session.suspend()
+            raise
         except GraphBubbleUp:
             if build.web_research_session is not None:
                 await build.web_research_session.abort()
@@ -871,7 +879,7 @@ class SpecialistFactory:
         grounding: GroundingResolution | None = None,
         web_research_session: Any = None,
     ) -> ResponseOutcome:
-        artifacts = list(tool_execution.artifacts)
+        artifacts = _turn_artifacts(tool_execution, produced)
         images = [
             *tool_execution.images,
             *self._inline_generated_images(definition, request, produced),
@@ -1229,6 +1237,36 @@ def with_answer_authoring_tools(tools: list[Any], definition: Any, request: Any)
         if getattr(app_settings, gate, False) and context.get(capability) and name not in bound
     ]
     return [*tools, *added] if added else tools
+
+
+_DESCRIPTOR_TOOL_NAMES = frozenset(
+    {CREATE_ANSWER_VISUAL_TOOL_NAME, COMPOSE_SOURCE_FIGURE_TOOL_NAME}
+)
+
+
+def _turn_artifacts(tool_execution: Any, produced: list[Any]) -> list[dict[str, Any]]:
+    """This run's tool artifacts plus descriptors checkpointed on its messages.
+
+    A run resumed after an approval interrupt has a fresh middleware, so a
+    visual or figure created before the interrupt survives only on its
+    ``ToolMessage``. Restored once per call id, and only from the server's own
+    descriptor tools.
+    """
+    live = list(tool_execution.artifacts)
+    seen = {artifact.get("tool_call_id") for artifact in live if isinstance(artifact, dict)}
+    restored = []
+    for message in produced:
+        artifact = getattr(message, "artifact", None)
+        if (
+            isinstance(message, ToolMessage)
+            and message.name in _DESCRIPTOR_TOOL_NAMES
+            and isinstance(artifact, dict)
+            and artifact.get("_rich_item_candidates")
+            and artifact.get("tool_call_id") not in seen
+        ):
+            seen.add(artifact.get("tool_call_id"))
+            restored.append(artifact)
+    return [*live, *restored]
 
 
 def _artifact_candidates(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:

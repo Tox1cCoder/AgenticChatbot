@@ -12,8 +12,10 @@ import pytest
 from app.services import message_service as message_service_module
 from app.services.event_streaming.events import make_event
 from app.services.message_service import MessageService
+from app.services.web_image_service import WEB_IMAGE_URL_PREFIX
 
 IMAGE_ID = "image:tool:c1:0"
+LIVE_REFERENCE = "0b0c7f5e-2f4c-4a64-9d55-4c0f3a3a9e11"
 
 
 def _metadata(url: str = "https://img.example/a.jpg") -> dict:
@@ -141,7 +143,7 @@ async def test_registration_failure_drops_only_image_and_exact_marker(caplog):
     "image_payload",
     (
         {"url": "/chat-images/known", "mime_type": "image/png"},
-        {"url": "/web-images/known", "mime_type": "image/png"},
+        {"url": f"{WEB_IMAGE_URL_PREFIX}{LIVE_REFERENCE}", "mime_type": "image/png"},
         {"data": "QUJD", "mime_type": "image/png"},
     ),
 )
@@ -497,3 +499,54 @@ async def test_a_marker_for_a_real_item_survives():
 
     assert f"<!--rich:{IMAGE_ID}-->" in updated_content
     assert updated["rich_reference_warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_released_reference_is_not_reused_and_degrades_its_figure():
+    """A reference released or expired before persistence is gone for good.
+
+    Reusing its URL persisted a cell that can never load. It is dropped like a
+    failed registration, so a figure loses its comparison instead.
+    """
+    live, released = uuid4(), uuid4()
+
+    async def _is_live(image_id, **_scope):
+        return image_id == live
+
+    web_images = AsyncMock()
+    web_images.is_live.side_effect = _is_live
+    metadata = _group_metadata()
+    figure = metadata["rich_items"][0]
+    figure["source"] = "source_figure"
+    figure["payload"]["caption"] = "Shadows off removes the contact shadow."
+    for reference, cell in zip((live, released), figure["payload"]["items"], strict=True):
+        cell["url"] = f"{WEB_IMAGE_URL_PREFIX}{reference}"
+
+    _content, externalized = await _service(web_images)._externalize_remote_rich_images(
+        "Body\n\n<!--rich:imagegroup:tool:c1-->\n", metadata, uuid4(), uuid4()
+    )
+
+    [kept] = externalized["rich_items"]
+    assert [cell["url"] for cell in kept["payload"]["items"]] == [
+        f"{WEB_IMAGE_URL_PREFIX}{live}"
+    ]
+    assert kept["payload"]["comparison_unavailable"] is True
+    assert "caption" not in kept["payload"]
+    web_images.register.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_reference_that_is_not_an_id_is_not_reused():
+    web_images = AsyncMock()
+    metadata = _metadata()
+    metadata["rich_items"][0]["payload"] = {
+        "url": f"{WEB_IMAGE_URL_PREFIX}not-an-id",
+        "mime_type": "image/png",
+    }
+
+    content, externalized = await _service(web_images)._externalize_remote_rich_images(
+        f"Text <!--rich:{IMAGE_ID}-->", metadata, uuid4(), uuid4()
+    )
+
+    assert [item["type"] for item in externalized["rich_items"]] == ["live_widget"]
+    assert f"<!--rich:{IMAGE_ID}-->" not in content

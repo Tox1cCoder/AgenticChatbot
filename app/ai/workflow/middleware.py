@@ -36,6 +36,7 @@ from app.ai.tool_execution import (
     build_rejected_tool_artifacts,
     ensure_agent_tool_map,
     execute_tool_calls,
+    is_server_descriptor_tool,
 )
 from app.ai.utils import apply_hitl_decisions, normalize_tool_call
 from app.ai.web_research.model_context import inject_latest_web_evidence
@@ -535,13 +536,47 @@ class ToolExecutionMiddleware(AgentMiddleware):
         output = outputs[0] if outputs else {}
         status = "error" if _is_error(artifacts) else "success"
         self._scope.worker_event("end", call, status=status)
+        tool_call_id = str(output.get("tool_call_id") or call.get("id") or "")
+        name = str(output.get("name") or call.get("name") or "tool")
         message = ToolMessage(
             content=str(output.get("content") or ""),
-            tool_call_id=str(output.get("tool_call_id") or call.get("id") or ""),
-            name=str(output.get("name") or call.get("name") or "tool"),
+            tool_call_id=tool_call_id,
+            name=name,
             status=status,
+            artifact=_durable_descriptor_artifact(
+                artifacts, tool_map.get(call.get("name")), tool_call_id, name
+            ),
         )
         return message, artifacts
+
+
+def _durable_descriptor_artifact(
+    artifacts: list[dict[str, Any]], tool: Any, tool_call_id: str, name: str
+) -> dict[str, Any] | None:
+    """The descriptor a server-owned visual or figure tool produced, for the message.
+
+    ``self.artifacts`` lives in this middleware's memory, and a run resumed
+    after an approval interrupt gets a new middleware. The message is
+    checkpointed with the subgraph, so a descriptor carried on it is still
+    there for the resumed answer to place. Only this server's own descriptor
+    tools carry one; nothing else is restored from a message.
+    """
+    if not is_server_descriptor_tool(tool):
+        return None
+    descriptors = [
+        candidate
+        for artifact in artifacts
+        if isinstance(artifact, dict)
+        for candidate in artifact.get("_rich_item_candidates") or ()
+        if isinstance(candidate, dict)
+    ]
+    if not descriptors:
+        return None
+    return {
+        "tool_call_id": tool_call_id,
+        "tool_name": name,
+        "_rich_item_candidates": descriptors,
+    }
 
 
 class _MutationRejected(RuntimeError):
