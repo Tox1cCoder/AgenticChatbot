@@ -13,6 +13,7 @@ public ``AIMessage`` and no wrapper reaches ``END`` — ``finalize`` owns both.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -1243,19 +1244,24 @@ def _turn_artifacts(tool_execution: Any, produced: list[Any]) -> list[dict[str, 
     descriptor tools.
     """
     live = list(tool_execution.artifacts)
-    seen = {artifact.get("tool_call_id") for artifact in live if isinstance(artifact, dict)}
+    seen = {
+        str(artifact.get("tool_call_id") or "") for artifact in live if isinstance(artifact, dict)
+    }
     restored = []
     for message in produced:
         artifact = getattr(message, "artifact", None)
+        call_id = str(artifact.get("tool_call_id") or "") if isinstance(artifact, dict) else ""
         if (
             isinstance(message, ToolMessage)
             and message.name in _DESCRIPTOR_TOOL_NAMES
             and isinstance(artifact, dict)
             and artifact.get("_rich_item_candidates")
-            and artifact.get("tool_call_id") not in seen
+            and call_id not in seen
         ):
-            seen.add(artifact.get("tool_call_id"))
-            restored.append(artifact)
+            seen.add(call_id)
+            # A copy: lifting its candidates later must not edit the
+            # checkpointed message.
+            restored.append(copy.deepcopy(artifact))
     return [*live, *restored]
 
 

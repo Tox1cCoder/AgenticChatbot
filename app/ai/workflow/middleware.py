@@ -11,6 +11,7 @@ is itself a contract — see :func:`build_specialist_middleware`.
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
@@ -563,20 +564,13 @@ def _durable_descriptor_artifact(
     """
     if not is_server_descriptor_tool(tool):
         return None
-    descriptors = [
-        candidate
-        for artifact in artifacts
-        if isinstance(artifact, dict)
-        for candidate in artifact.get("_rich_item_candidates") or ()
-        if isinstance(candidate, dict)
-    ]
-    if not descriptors:
-        return None
-    return {
-        "tool_call_id": tool_call_id,
-        "tool_name": name,
-        "_rich_item_candidates": descriptors,
-    }
+    for artifact in artifacts:
+        if isinstance(artifact, dict) and artifact.get("_rich_item_candidates"):
+            # The whole tool card, so a resumed turn records the same card the
+            # live run did. Bounded: the args are the visual's own spec and
+            # the output is the short marker reply.
+            return {**copy.deepcopy(artifact), "tool_call_id": tool_call_id, "tool": name}
+    return None
 
 
 class _MutationRejected(RuntimeError):

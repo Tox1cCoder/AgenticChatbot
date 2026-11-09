@@ -143,6 +143,24 @@ async def test_a_visual_created_before_an_approval_interrupt_reaches_the_resumed
     assert admitted[placed[0]]["type"] == "answer_visual"
     assert admitted[placed[0]]["payload"]["variant"] == "steps"
 
+    # The restored record is a whole tool card, not a nameless shell that
+    # would replace the paused row's card, and it is a copy: lifting its
+    # candidates later must not edit the checkpointed message.
+    [restored] = [
+        artifact
+        for artifact in outcome.response.tool_artifacts or ()
+        if artifact.get("tool_call_id") == "call-visual"
+    ]
+    assert restored["tool"] == CREATE_ANSWER_VISUAL_TOOL_NAME
+    assert restored["status"] == "success"
+    assert restored["args"] == {"visual": _STEPS}
+    [message] = [
+        m
+        for m in outcome.provenance.private_messages
+        if isinstance(m, ToolMessage) and m.tool_call_id == "call-visual"
+    ]
+    assert restored is not message.artifact
+
 
 class _RecordingSession:
     """Records how the specialist closes its web session; holds no evidence."""
