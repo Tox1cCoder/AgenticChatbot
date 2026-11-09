@@ -9,6 +9,7 @@ visual, and the prose-only exceptions that keep it from decorating everything.
 """
 
 from app.ai import prompts
+from app.ai.workflow.routing import ROUTER_SYSTEM_PROMPT
 
 ANSWER_PROMPTS = (
     prompts.CHAT_SYSTEM_PROMPT,
@@ -138,7 +139,7 @@ def test_block_has_no_hardcoded_visual_topic_list():
 
 def test_non_answer_prompts_unchanged():
     for prompt in (
-        prompts.ROUTER_SYSTEM_PROMPT,
+        ROUTER_SYSTEM_PROMPT,
         prompts.TITLE_GENERATION_PROMPT,
         prompts.PLANNING_EXECUTION_PROMPT,
     ):

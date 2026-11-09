@@ -542,7 +542,7 @@ How to choose:
   document-grounded work is possible; it does not require it.
 - `active_canvas` describes a standalone browser artifact the assistant already
   built. Continuing or editing that artifact is canvas work; discussing it is
-  not.
+  not. An open canvas alone does not make an unrelated question canvas work.
 - `planning` describes plan mode and any existing plan. An existing plan makes
   plan supervision likely, not mandatory.
 - `previous_final_agent_id` is who answered last. A follow-up often belongs with
@@ -555,6 +555,17 @@ How to choose:
   something up, or when the answer depends on current or changeable facts.
   Use `research_mode=quick` for a focused lookup and `agentic` for multi-part
   research. Otherwise use `requires_web=false` and `research_mode=none`.
+  Supplied example data does not require web research merely because a visual
+  was requested.
+
+Inline visuals versus standalone artifacts:
+- An explanation or comparison with a compact inline chart, steps, table, or
+  source figure remains with its answering specialist. The visual is part of
+  that answer; it does not request a standalone browser artifact.
+- Compact in-chat widgets are likewise owned by the answering specialist. Do
+  not choose canvas_agent merely because a widget could help inside the reply.
+- Choose canvas_agent when creating or editing the standalone artifact is the
+  requested deliverable.
 
 Return only the structured decision. Never invent an agent_id."""
 

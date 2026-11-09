@@ -839,10 +839,11 @@ class TestPromptUpdates:
         assert "live widget" in CHAT_SYSTEM_PROMPT.lower()
 
     def test_router_prompt_routes_visual_aids_to_chat(self):
-        from app.ai.prompts import ROUTER_SYSTEM_PROMPT
+        from app.ai.workflow.routing import ROUTER_SYSTEM_PROMPT
 
-        assert "LiveUI widgets are for compact in-chat aids" in ROUTER_SYSTEM_PROMPT
-        assert "Do not route to canvas_agent merely because a widget" in ROUTER_SYSTEM_PROMPT
+        prompt = " ".join(ROUTER_SYSTEM_PROMPT.split())
+        assert "Compact in-chat widgets are likewise owned by the answering specialist" in prompt
+        assert "not choose canvas_agent merely because a widget could help" in prompt
 
     def test_prompt_mentions_html_micro_app_widgets(self):
         from app.ai.prompts import CHAT_SYSTEM_PROMPT
