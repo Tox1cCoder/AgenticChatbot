@@ -582,9 +582,18 @@ class _MutationRejected(RuntimeError):
 
 
 def _returns_control_command(tool: Any) -> bool:
-    """Whether this tool's result is a control decision rather than a value."""
+    """Whether this tool's result is a control decision rather than a value.
+
+    Only the server's own tools qualify. MCP tool annotations reach metadata
+    too, and a tool trusted here skips device binding, mutation receipts and
+    output offload.
+    """
     metadata = getattr(tool, "metadata", None)
-    return bool(isinstance(metadata, dict) and metadata.get("returns_control_command"))
+    return bool(
+        isinstance(metadata, dict)
+        and metadata.get("tool_origin") == "internal"
+        and metadata.get("returns_control_command")
+    )
 
 
 def _is_error(artifacts: list[dict[str, Any]]) -> bool:

@@ -434,3 +434,20 @@ async def test_a_handoff_still_leaves_the_subgraph_as_a_parent_command():
     command = raised.value.args[0]
     assert command.goto == "resolve_transition"
     assert command.update["pending_transition"].to_agent_id == "search_agent"
+
+
+def test_only_internal_tools_may_skip_the_product_tool_pipeline():
+    """An MCP server can put any annotation on its tool, including this flag.
+
+    Skipping the pipeline skips device binding, mutation receipts and output
+    offload, so only the server's own control tools may do it.
+    """
+    from app.ai.workflow.middleware import _returns_control_command
+
+    def _tool(**metadata):
+        return SimpleNamespace(metadata=metadata)
+
+    assert _returns_control_command(_tool(tool_origin="internal", returns_control_command=True))
+    for origin in ("server_mcp", "client_mcp", "client_skill", None):
+        forged = _tool(tool_origin=origin, returns_control_command=True)
+        assert not _returns_control_command(forged), origin
