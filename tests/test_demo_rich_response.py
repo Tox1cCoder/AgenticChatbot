@@ -496,8 +496,10 @@ def test_stream_state_does_not_track_unselected_image_until_finalize():
 
 
 # ---------------------------------------------------------------------------
-# Answer visuals and source figures: Streamlit advertises neither, so it
-# renders the shared Markdown fallback and legacy images.
+# Answer visuals and source figures with the view model's default flags (off):
+# the shared Markdown fallback and legacy images. demo.py turns both on; the
+# native rendering is covered in test_demo_answer_visuals.py and
+# test_demo_rich_capabilities.py.
 # ---------------------------------------------------------------------------
 
 
