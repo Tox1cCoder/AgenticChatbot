@@ -357,7 +357,7 @@ async def test_the_persisted_partial_is_marked_partial_and_continuable():
 async def test_the_persisted_partial_keeps_grounded_sources_and_selected_images():
     control = build_control_service()
     service = _service(control)
-    web_images = SimpleNamespace(mark_selected=AsyncMock())
+    web_images = SimpleNamespace(mark_selected=AsyncMock(), is_live=AsyncMock(return_value=True))
     service.web_image_service = web_images
     running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
     reference_id = uuid4()
