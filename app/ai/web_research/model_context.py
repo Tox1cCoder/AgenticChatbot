@@ -26,8 +26,6 @@ def _source_line(source: Any) -> str:
 def inject_latest_web_evidence(
     messages: list[Any],
     session: Any,
-    *,
-    supports_vision: bool,
 ) -> list[Any]:
     """Replace the prior evidence message so retries cannot duplicate it."""
 
@@ -37,7 +35,7 @@ def inject_latest_web_evidence(
         if not bool((getattr(message, "additional_kwargs", None) or {}).get(_EVIDENCE_MARKER))
     ]
     sources = session.source_registry.records
-    image_blocks = session.model_evidence_blocks(supports_vision=supports_vision)
+    image_blocks = session.model_evidence_blocks()
     if not sources and not image_blocks:
         return retained
 
@@ -49,9 +47,13 @@ def inject_latest_web_evidence(
     lines.extend(_source_line(source) for source in sources)
     if image_blocks:
         lines.append(
-            "Inspect each labeled image. Select only relevant visible evidence with "
-            "[[image:I#]]; selecting none is valid. Every answer that selects an image "
-            "must also cite at least one supporting source with [[source:S#]]."
+            "Inspect each labeled image. When a candidate makes the answer clearer, "
+            "include it with [[image:I#]] beside the explanation, even if the user did "
+            "not ask for images. Prefer one clear image; add more for distinct useful "
+            "views. A source-page link alone does not display an image. Select none "
+            "if the candidates do not help or the user requested text only. Every "
+            "answer that selects an image must also cite at least one supporting "
+            "source with [[source:S#]]."
         )
         target = session.latest_image_query or session.latest_image_objective
         if target:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 _SEGMENT = re.compile(
     r"(?P<fence>^ {0,3}(?P<fence_mark>`{3,}|~{3,})[^\n]*\n.*?"
@@ -73,8 +74,11 @@ class GroundingParser:
                     return ""
                 if identifier not in source_ids:
                     source_ids.append(identifier)
-                number = source_ids.index(identifier) + 1
-                return f"[{number}]({source.url})"
+                # Numeric Markdown labels render as bare adjacent digits (e.g.
+                # [1](...)[2](...) looks like "12"). A domain stays meaningful
+                # independently of retrieval order and needs no reference list.
+                domain = (urlsplit(str(source.url)).hostname or "source").removeprefix("www.")
+                return f"([{domain}]({source.url}))"
 
             prepared = self._session.prepared_images.get(identifier)
             if prepared is None:

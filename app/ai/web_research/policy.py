@@ -39,10 +39,12 @@ def enforce_web_requirement(decision: object, message: str):
 
 @dataclass(frozen=True)
 class ResearchLimits:
-    #: Text sources the search provider is asked for and the registry admits.
+    #: Maximum text results requested in one search.
     max_sources: int
     max_page_opens: int
     max_model_images: int
+    #: Stable citation records accumulated across distinct searches.
+    max_total_text_sources: int = 64
 
     @classmethod
     def for_mode(
@@ -56,6 +58,7 @@ class ResearchLimits:
             max_sources=source_capacity(mode, "none"),
             max_page_opens=page_opens,
             max_model_images=image_capacity(mode, visual_intent),
+            max_total_text_sources=0 if mode == "none" else 64,
         )
 
 

@@ -14,7 +14,7 @@ from qdrant_client import QdrantClient
 
 from ..core.config import settings
 from ..core.response_constants import NO_RESPONSE_GENERATED
-from ..core.rich_response import merge_rich_item_candidates
+from ..core.rich_response import RichItemType, merge_rich_item_candidates
 from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
@@ -521,12 +521,29 @@ class MultiAgentWorkflow(
             if not response.metadata:
                 response.metadata = {}
             response.metadata["_inline_rich_response_v1"] = True
-            # Grounding may already have placed selected web images here;
-            # context candidates join them by id rather than replacing them.
-            merged, conflicts = merge_rich_item_candidates(
-                response.metadata.get("_rich_item_candidates") or (),
-                rich_candidates or (),
-            )
+            # Grounding may already have placed selected web images here.
+            # Context candidates join them by id. One that reuses a selected
+            # image's id for different content is ignored -- tool output must
+            # never rebind an image the answer already selected -- while any
+            # other conflict still fails closed in the merge.
+            grounded = response.metadata.get("_rich_item_candidates") or ()
+            grounded_ids = {
+                item.get("id")
+                for item in grounded
+                if isinstance(item, dict)
+                and item.get("type") in {RichItemType.image.value, RichItemType.image_group.value}
+            }
+            context_candidates = []
+            for candidate in rich_candidates or ():
+                if isinstance(candidate, dict) and candidate.get("id") in grounded_ids:
+                    if candidate not in grounded:
+                        logger.warning(
+                            "Ignored rich-item candidate %s conflicting with a grounded one",
+                            candidate.get("id"),
+                        )
+                    continue
+                context_candidates.append(candidate)
+            merged, conflicts = merge_rich_item_candidates(grounded, context_candidates)
             if merged:
                 response.metadata["_rich_item_candidates"] = merged
             else:
@@ -535,7 +552,13 @@ class MultiAgentWorkflow(
                 response.metadata["_rich_item_conflicts"] = conflicts
             presented_image_ids = context.get("_presented_rich_image_ids")
             if isinstance(presented_image_ids, list):
-                response.metadata["_presented_rich_image_ids"] = list(presented_image_ids)
+                grounded_image_ids = response.metadata.get("_presented_rich_image_ids")
+                grounded_image_ids = (
+                    grounded_image_ids if isinstance(grounded_image_ids, list) else []
+                )
+                response.metadata["_presented_rich_image_ids"] = list(
+                    dict.fromkeys([*grounded_image_ids, *presented_image_ids])
+                )
 
     def _attach_final_agent_metadata(
         self,

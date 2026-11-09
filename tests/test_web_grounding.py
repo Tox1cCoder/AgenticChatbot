@@ -45,7 +45,7 @@ def test_resolve_uses_server_urls_and_preserves_authored_image_order() -> None:
 
     assert resolution.source_ids == ("S2",)
     assert resolution.selected_image_ids == ("I2", "I1")
-    assert "[1](https://example.test/two)" in resolution.text
+    assert "([example.test](https://example.test/two))" in resolution.text
     assert resolution.text.count("<!--rich:image:web:i2-->") == 1
     assert [item["id"] for item in resolution.rich_items] == [
         "image:web:i2",

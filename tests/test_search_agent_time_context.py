@@ -76,9 +76,7 @@ def test_search_agent_binding_keeps_all_required_pins_under_default_cap(monkeypa
         all_mcp_tools=all_tools,
     )
 
-    assert {"widget_create", "widget_update", "widget_get_state"} <= {
-        tool.name for tool in tools
-    }
+    assert {"widget_create", "widget_update", "widget_get_state"} <= {tool.name for tool in tools}
 
 
 def test_search_agent_deferred_binding_excludes_the_raw_providers(monkeypatch):
@@ -138,7 +136,7 @@ def test_the_search_prompt_states_the_product_tool_contract():
     assert "Express the user's goal as a concrete objective." in prompt
     assert 'freshness="recent"' in prompt
     assert 'freshness="as_of"' in prompt
-    assert "Search first. Open only the few URLs" in prompt
+    assert "Search first. Open promising URLs" in prompt
     assert "Every web_open call must include the exact question to extract." in prompt
     assert "do not repeat an unchanged query" in prompt
 

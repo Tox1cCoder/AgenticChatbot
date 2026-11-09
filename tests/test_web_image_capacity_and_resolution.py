@@ -515,7 +515,7 @@ async def test_an_unfetchable_original_falls_back_to_the_provider_preview() -> N
 async def test_model_sees_a_downscaled_preview_not_the_full_publication_bytes() -> None:
     session, _bundle = await _run(text_count=5, image_count=1)
 
-    blocks = session.model_evidence_blocks(supports_vision=True)
+    blocks = session.model_evidence_blocks()
     prepared = session.prepared_images["I1"]
 
     assert len(prepared.preview) < len(prepared.content)
@@ -569,7 +569,7 @@ async def test_a_candidate_label_names_its_dimensions_and_domain() -> None:
     )
 
     await _search(session, intent, query="the subject")
-    blocks = session.model_evidence_blocks(supports_vision=True)
+    blocks = session.model_evidence_blocks()
 
     assert blocks[0]["text"].startswith(
         "Image candidate I1; source S1; 1920x1080; domain t1.gg."

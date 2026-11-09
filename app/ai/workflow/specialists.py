@@ -720,7 +720,7 @@ class SpecialistFactory:
                         parsed_sources.append(SourceRecord.model_validate(record))
                     except Exception:
                         logger.warning("Ignored invalid carried web source")
-                web_research_session.source_registry.import_records(parsed_sources)
+                web_research_session.import_sources(parsed_sources)
 
         scope = SpecialistToolScope(
             agent=definition.agent,
@@ -908,6 +908,9 @@ class SpecialistFactory:
             if rich_items:
                 metadata["_rich_item_candidates"] = list(rich_items)
                 metadata["_inline_rich_response_v1"] = True
+                # Web grounding selects from the specialist's private image
+                # evidence, independently of the earlier tool inventory.
+                metadata["_presented_rich_image_ids"] = [item["id"] for item in rich_items]
             if grounding.warnings:
                 metadata["web_grounding_warnings"] = list(grounding.warnings)
         response = AgentResponse(

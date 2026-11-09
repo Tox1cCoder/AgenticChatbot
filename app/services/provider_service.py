@@ -655,9 +655,6 @@ class ProviderService:
     def _normalize_openai_model(self, model_id: str) -> dict[str, Any]:
         model_lower = model_id.lower()
         supports_reasoning = model_lower.startswith(("o1", "o3", "o4", "gpt-5"))
-        supports_vision = any(
-            token in model_lower for token in ("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4")
-        )
 
         # OpenAI's Models API does not expose context-window limits, so the
         # resolver falls through to the conservative built-in registry (or
@@ -668,7 +665,7 @@ class ProviderService:
             "id": model_id,
             "display_name": model_id,
             "provider_type": "openai",
-            "supports_vision": supports_vision,
+            "supports_vision": True,
             "supports_tool_calling": True,
             "supports_streaming": True,
             "supports_reasoning": supports_reasoning,

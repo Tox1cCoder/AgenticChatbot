@@ -128,6 +128,7 @@ class RuntimeBridgeService:
         self._heartbeat_task: asyncio.Task | None = None
         self._stop_requested = False
         self._connected_event = asyncio.Event()
+        self._heartbeat_ack_event = asyncio.Event()
         self._send_lock = asyncio.Lock()
         # Catalog publication is not idempotent: it bumps the mirrored tool
         # catalog version and rebuilds the validation cache. Two overlapping
@@ -242,8 +243,7 @@ class RuntimeBridgeService:
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._heartbeat_task
+            await asyncio.gather(self._heartbeat_task, return_exceptions=True)
             self._heartbeat_task = None
 
         if self._websocket is not None:
@@ -418,7 +418,12 @@ class RuntimeBridgeService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                attempts += 1
+                # Count consecutive failed connections, not disconnects spread
+                # across otherwise healthy sessions over the client's lifetime.
+                if self._state.status == RuntimeStatus.CONNECTED:
+                    attempts = 0
+                else:
+                    attempts += 1
                 if exc.__class__.__name__.startswith("ConnectionClosed"):
                     logger.info("Runtime bridge WebSocket closed: %s", exc)
                 else:
@@ -508,38 +513,46 @@ class RuntimeBridgeService:
         connection = websocket_connect(websocket_url, max_size=RUNTIME_MAX_MESSAGE_BYTES)
         async with connection as websocket:
             self._websocket = websocket
+            connection_tasks: list[asyncio.Task] = []
+            try:
+                raw_message = await asyncio.wait_for(
+                    websocket.recv(),
+                    timeout=client_settings.server_api_timeout_seconds,
+                )
+                message = self._decode_runtime_message(raw_message)
+                if not isinstance(message, RuntimeAckMessage):
+                    raise RuntimeError(
+                        f"Unexpected runtime handshake message: {dump_runtime_message(message)}"
+                    )
 
-            raw_message = await asyncio.wait_for(
-                websocket.recv(),
-                timeout=client_settings.server_api_timeout_seconds,
-            )
-            message = self._decode_runtime_message(raw_message)
-            if not isinstance(message, RuntimeAckMessage):
-                raise RuntimeError(
-                    f"Unexpected runtime handshake message: {dump_runtime_message(message)}"
+                await self._sync_initial_catalogs_and_mark_ready()
+                now = datetime.now(UTC)
+                self._set_state(
+                    status=RuntimeStatus.CONNECTED,
+                    connected_at=now,
+                    last_heartbeat=now,
+                    session_id=self._session_id,
+                    error_message=None,
                 )
 
-            now = datetime.now(UTC)
-            self._set_state(
-                status=RuntimeStatus.CONNECTED,
-                connected_at=now,
-                last_heartbeat=now,
-                session_id=self._session_id,
-                error_message=None,
-            )
-
-            await self._sync_initial_catalogs_and_mark_ready()
-            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-            try:
-                await self._receive_loop()
+                self._heartbeat_ack_event.clear()
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                connection_tasks = [
+                    self._heartbeat_task,
+                    asyncio.create_task(self._receive_loop()),
+                ]
+                # Either direction failing must end the whole connection. A
+                # detached heartbeat task can fail while recv waits forever.
+                done, _ = await asyncio.wait(connection_tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
             finally:
                 self._connected_event.clear()
-                if self._heartbeat_task:
-                    self._heartbeat_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await self._heartbeat_task
-                    self._heartbeat_task = None
                 self._websocket = None
+                for task in connection_tasks:
+                    task.cancel()
+                await asyncio.gather(*connection_tasks, return_exceptions=True)
+                self._heartbeat_task = None
                 # The server has already failed these requests as disconnected,
                 # and their replies have no connection to travel on.
                 await self._cancel_inflight_requests()
@@ -551,8 +564,13 @@ class RuntimeBridgeService:
     async def _heartbeat_loop(self) -> None:
         while not self._stop_requested and self._websocket is not None:
             await asyncio.sleep(client_settings.heartbeat_interval_seconds)
-            await self._send_runtime_message(RuntimeHeartbeatMessage())
-            self._set_state(last_heartbeat=datetime.now(UTC))
+            self._heartbeat_ack_event.clear()
+            try:
+                async with asyncio.timeout(client_settings.heartbeat_interval_seconds):
+                    await self._send_runtime_message(RuntimeHeartbeatMessage())
+                    await self._heartbeat_ack_event.wait()
+            except TimeoutError as exc:
+                raise TimeoutError("Runtime heartbeat was not acknowledged; reconnecting.") from exc
 
     async def _receive_loop(self) -> None:
         while not self._stop_requested and self._websocket is not None:
@@ -574,6 +592,9 @@ class RuntimeBridgeService:
             return
 
         if isinstance(message, RuntimeAckMessage):
+            if message.message_id is None:
+                self._heartbeat_ack_event.set()
+                self._set_state(last_heartbeat=datetime.now(UTC))
             return
 
         if isinstance(message, RuntimeHeartbeatMessage):

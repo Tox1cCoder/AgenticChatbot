@@ -157,7 +157,7 @@ async def _search(session, *, query: str, domains: tuple[str, ...] = ()):
 
 def _injected(session) -> str:
     messages = inject_latest_web_evidence(
-        [HumanMessage(content="question")], session, supports_vision=True
+        [HumanMessage(content="question")], session
     )
     parts: list[str] = []
     for message in messages:

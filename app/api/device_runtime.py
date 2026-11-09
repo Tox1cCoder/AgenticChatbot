@@ -130,7 +130,19 @@ class DeviceRuntimeGateway:
             await self._cleanup()
 
     async def _handle_heartbeat(self, message: dict) -> None:
-        await self.service.update_heartbeat(self.device_id)
+        if not await self.service.update_heartbeat(self.device_id):
+            # A socket can outlive its runtime-store record after sleep, expiry,
+            # or a store restart. An ack would strand the client in a connected
+            # state with no catalogs. Closing starts its registration/sync loop.
+            logger.info(
+                "Device %s runtime session is no longer active; reconnecting", self.device_id
+            )
+            self._running = False
+            await self.websocket.close(
+                code=status.WS_1012_SERVICE_RESTART,
+                reason="Runtime session expired; register and reconnect.",
+            )
+            return
         await self.send_message(WebSocketMessage.ack())
 
     async def _handle_tool_result(self, message: dict) -> None:

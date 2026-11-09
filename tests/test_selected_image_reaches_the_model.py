@@ -11,6 +11,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from app.ai.graph import MultiAgentWorkflow, _build_inline_rich_inventory_for_state
 from app.ai.schemas import AgentType
 from app.ai.web_research.service import WebResearchService
 from app.ai.web_tools import create_web_search_tool
@@ -19,6 +20,8 @@ from app.ai.workflow.specialists import (
     SpecialistFactory,
     SpecialistRequest,
 )
+from app.core.response_constants import build_bot_metadata
+from app.core.rich_placement import finalize_article_content
 from app.services.web_image_service import FetchedWebImage
 
 
@@ -91,12 +94,7 @@ class _GroundingRepairModel(BaseChatModel):
         elif self.call_count == 1:
             result = AIMessage(content="Here is the current interface. [[image:I2]]")
         else:
-            result = AIMessage(
-                content=(
-                    "The blue version is current "
-                    "[[source:S1]]. [[image:I2]]"
-                )
-            )
+            result = AIMessage(content=("The blue version is current [[source:S1]]. [[image:I2]]"))
         self.call_count += 1
         return ChatResult(generations=[ChatGeneration(message=result)])
 
@@ -108,7 +106,15 @@ class _GroundingRepairModel(BaseChatModel):
 
 
 @pytest.mark.asyncio
-async def test_invalid_image_draft_is_repaired_with_the_same_validated_pixels() -> None:
+@pytest.mark.parametrize(
+    "capabilities", [{}, {"supports_vision": False}, {"supports_vision": True}]
+)
+async def test_invalid_image_draft_is_repaired_with_the_same_validated_pixels(
+    monkeypatch, capabilities
+) -> None:
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     text_tool = _ProviderTool(
         "tavily_search",
         {
@@ -152,13 +158,13 @@ async def test_invalid_image_draft_is_repaired_with_the_same_validated_pixels() 
     runtime_config = SimpleNamespace(
         agent_key="chat",
         provider="test",
-        model="vision-model",
+        model="custom-chat-model",
         temperature=0.0,
         api_key="key",
         key_source="test",
         source="test",
         warnings=[],
-        capabilities={"supports_vision": True},
+        capabilities=capabilities,
         fallback_config=None,
     )
     factory = SpecialistFactory(
@@ -191,15 +197,14 @@ async def test_invalid_image_draft_is_repaired_with_the_same_validated_pixels() 
     assert len(model.requests) == 3
     second = model.requests[1]
     evidence = second[-1].content
+    assert len(evidence) == 5  # One evidence-text block and two label/pixel pairs.
     assert evidence[1]["text"].startswith("Image candidate I1")
     assert evidence[2]["image_url"]["url"].endswith("cmVkLXBpeGVscw==")
     assert evidence[3]["text"].startswith("Image candidate I2")
     assert evidence[4]["image_url"]["url"].endswith("Ymx1ZS1waXhlbHM=")
     third = model.requests[2]
     correction = " ".join(
-        str(message.content)
-        for message in third
-        if isinstance(message, HumanMessage)
+        str(message.content) for message in third if isinstance(message, HumanMessage)
     )
     assert "Rewrite the complete answer" in correction
     assert model.tool_counts[-1] == 0
@@ -214,3 +219,40 @@ async def test_invalid_image_draft_is_repaired_with_the_same_validated_pixels() 
     assert "<!--rich:image:web:" in outcome.response.message.content
     assert "[[image:" not in outcome.response.message.content
     assert len(outcome.provenance.rich_items) == 1
+
+    # Continue can carry a tool-only inventory built before this search. Its
+    # empty image allowlist must not discard images inspected by the specialist.
+    context = {
+        "inline_rich_response_v1": True,
+        "rich_item_candidates": [
+            {
+                "id": "tool:previous-epoch",
+                "type": "tool_render",
+                "display_policy": "inline_or_append",
+                "payload": {"render": {"version": 1, "type": "json", "data": {"value": 1}}},
+            }
+        ],
+    }
+    _build_inline_rich_inventory_for_state(context)
+    assert context["_presented_rich_image_ids"] == []
+    context["rich_item_candidates"].append(
+        {
+            "id": "image:tool:uninspected",
+            "type": "image",
+            "display_policy": "inline_only",
+            "alt_text": "Uninspected tool image",
+            "payload": {"url": "https://images.test/uninspected.png", "mime_type": "image/png"},
+        }
+    )
+    response = outcome.response
+    response.message.content += "\n\n<!--rich:image:tool:uninspected-->"
+    MultiAgentWorkflow.__new__(MultiAgentWorkflow)._merge_tool_artifacts(
+        {"context": context}, response
+    )
+    content = finalize_article_content(response, response.message.content)
+    metadata = build_bot_metadata(response)
+
+    assert "<!--rich:image:web:" in content
+    assert "image:tool:uninspected" not in content
+    assert [item["type"] for item in metadata["rich_items"]] == ["image", "tool_render"]
+    assert metadata["rich_reference_warnings"] == []

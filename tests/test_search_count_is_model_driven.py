@@ -213,7 +213,7 @@ def test_the_policy_tells_the_model_it_is_the_one_deciding():
 
     text = WEB_RESEARCH_SNIPPET.lower()
     assert "searches_used" in WEB_RESEARCH_SNIPPET, "the model needs its running count named"
-    assert "nothing limits how many times you may search" in text
+    assert "specific requested fact is still missing" in text
     assert "web_open" in WEB_RESEARCH_SNIPPET, "opening a found source must beat re-searching"
 
 

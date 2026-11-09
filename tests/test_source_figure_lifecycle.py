@@ -180,21 +180,9 @@ async def test_composition_requires_images_shown_to_a_vision_model():
 
 
 @pytest.mark.asyncio
-async def test_composition_after_falling_back_to_a_non_vision_model_is_refused():
-    session, _service = await _session([_urls("a", 2, 640)])
-    session.model_evidence_blocks(supports_vision=True)
-    session.model_evidence_blocks(supports_vision=False)
-
-    result = await _compose(session, _cells("I1", "I2"))
-
-    assert result["output"]["status"] == "error"
-    assert "cannot see images" in result["output"]["message"]
-
-
-@pytest.mark.asyncio
 async def test_unknown_candidate_is_refused():
     session, _service = await _session([_urls("a", 2, 640)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
 
     result = await _compose(session, _cells("I1", "I9"))
 
@@ -205,7 +193,7 @@ async def test_unknown_candidate_is_refused():
 @pytest.mark.asyncio
 async def test_composed_figure_cells_carry_their_own_sources_and_protected_media():
     session, _service = await _session([_urls("a", 2, 640)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
 
     result = await _compose(session, _cells("I1", "I2"), caption="Shadows on and off.")
 
@@ -228,7 +216,7 @@ async def test_composed_figure_cells_carry_their_own_sources_and_protected_media
 @pytest.mark.asyncio
 async def test_a_later_search_cannot_release_a_figure_dependency():
     session, service = await _session([_urls("small", 2, 320), _urls("big", 4, 1280)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
     figure = _figure(await _compose(session, _cells("I1", "I2")))
     pinned = {_ref(session, "I1"), _ref(session, "I2")}
 
@@ -244,7 +232,7 @@ async def test_a_later_search_cannot_release_a_figure_dependency():
 @pytest.mark.asyncio
 async def test_a_figure_selected_by_its_marker_alone_keeps_its_media():
     session, service = await _session([_urls("a", 3, 640)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
     figure = _figure(await _compose(session, _cells("I1", "I2")))
 
     closeout = await session.finish((), selected_figure_ids=(figure["id"],))
@@ -256,7 +244,7 @@ async def test_a_figure_selected_by_its_marker_alone_keeps_its_media():
 @pytest.mark.asyncio
 async def test_an_unused_figure_releases_its_media():
     session, service = await _session([_urls("a", 2, 640)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
     await _compose(session, _cells("I1", "I2"))
 
     await session.finish(())
@@ -267,7 +255,7 @@ async def test_an_unused_figure_releases_its_media():
 @pytest.mark.asyncio
 async def test_a_reference_shared_by_a_used_and_an_unused_figure_is_kept_once():
     session, service = await _session([_urls("a", 3, 640)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
     used = _figure(await _compose(session, _cells("I1", "I2")))
     await _compose(session, _cells("I1", "I3"))
 
@@ -280,7 +268,7 @@ async def test_a_reference_shared_by_a_used_and_an_unused_figure_is_kept_once():
 @pytest.mark.asyncio
 async def test_direct_selection_and_figures_union():
     session, service = await _session([_urls("a", 3, 640)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
     figure = _figure(await _compose(session, _cells("I2")))
 
     closeout = await session.finish(("I1",), selected_figure_ids=(figure["id"],))
@@ -292,7 +280,7 @@ async def test_direct_selection_and_figures_union():
 @pytest.mark.asyncio
 async def test_an_invented_figure_id_selects_nothing():
     session, service = await _session([_urls("a", 2, 640)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
     await _compose(session, _cells("I1", "I2"))
 
     closeout = await session.finish((), selected_figure_ids=("figure:invented",))
@@ -304,7 +292,7 @@ async def test_an_invented_figure_id_selects_nothing():
 @pytest.mark.asyncio
 async def test_finish_leaves_selected_media_pending_for_persistence_to_mark():
     session, service = await _session([_urls("a", 2, 640)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
     figure = _figure(await _compose(session, _cells("I1", "I2")))
 
     await session.finish((), selected_figure_ids=(figure["id"],))
@@ -317,7 +305,7 @@ async def test_finish_leaves_selected_media_pending_for_persistence_to_mark():
 @pytest.mark.asyncio
 async def test_cancellation_releases_pinned_dependencies_too():
     session, service = await _session([_urls("small", 2, 320), _urls("big", 4, 1280)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
     await _compose(session, _cells("I1", "I2"))
     pinned = {_ref(session, "I1"), _ref(session, "I2")}
     await _search(session, "shadow quality screenshots")
@@ -331,7 +319,7 @@ async def test_cancellation_releases_pinned_dependencies_too():
 @pytest.mark.asyncio
 async def test_a_retired_candidate_id_is_never_rebound():
     session, _service = await _session([_urls("small", 2, 320), _urls("big", 4, 1280)])
-    session.model_evidence_blocks(supports_vision=True)
+    session.model_evidence_blocks()
     await _compose(session, _cells("I1"))
 
     await _search(session, "shadow quality screenshots")

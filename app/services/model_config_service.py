@@ -527,10 +527,7 @@ class ModelConfigService(IRuntimeModelResolver):
         model_lower = model_id.lower()
         if provider == "openai":
             return {
-                "supports_vision": any(
-                    token in model_lower
-                    for token in ("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4")
-                ),
+                "supports_vision": True,
                 "supports_tool_calling": True,
                 "supports_streaming": True,
                 "supports_reasoning": model_lower.startswith(("o1", "o3", "o4", "gpt-5")),

@@ -258,7 +258,7 @@ def test_specialists_publish_the_narrowed_view_not_the_whole_registry() -> None:
     assert "source_registry.records" not in specialists
     assert specialists.count("web_research_session.answer_sources") == 1
     assert specialists.count("web_research_session.published_sources(") == 2
-    assert specialists.count("web_research_session.source_registry.import_records") == 1
+    assert specialists.count("web_research_session.import_sources") == 1
 
 
 @pytest.mark.asyncio

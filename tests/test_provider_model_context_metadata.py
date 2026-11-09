@@ -80,6 +80,7 @@ def test_normalize_openai_unknown_model_returns_unknown_window(
     assert entry["context_window_tokens"] is None
     assert entry["max_input_tokens"] is None
     assert entry["max_output_tokens"] is None
+    assert entry["supports_vision"] is True
 
 
 def test_normalize_openai_always_emits_new_keys(service: ProviderService) -> None:
