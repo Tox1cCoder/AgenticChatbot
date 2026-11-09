@@ -61,9 +61,9 @@ contract. `inline_rich_response_v1` is an accepted alias.
 
 Each newer item family has its own flag, sent alongside `inlineRichResponseV1`
 on chat, resume, Continue, and history requests (`?answerVisualsV1=true` on
-history). A flag counts only with the base capability and the server's rollout
-gate; both default off. Flags are independent: supporting one family says
-nothing about another.
+history). A flag counts only with the base capability, and only while the
+server's inline rich-response kill switch is on; each flag defaults to false.
+Flags are independent: supporting one family says nothing about another.
 
 | Flag | Item family | Without the flag |
 |---|---|---|

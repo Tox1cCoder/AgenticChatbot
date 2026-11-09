@@ -1,8 +1,9 @@
 # Answer visuals and source figures: frontend contract
 
 Audience: the developer of the AI SDK v6 (`useChat`) frontend.
-Backend branch: `feat/rich-answer-visuals`. Both features are switched off on the
-server until the frontend below is built and checked.
+Backend branch: `feat/rich-answer-visuals`. The server has no separate switch for
+these features: a client receives them only after it advertises the flags below,
+so keep the flags off until the frontend passes section 8.
 
 This document adds two item families to the existing rich-item contract
 (`plans/AI_SDK_FE_RICH_ITEM_CONTRACT.md`). Everything in that contract still
@@ -35,8 +36,8 @@ a reload without the flags shows the fallback text, not the component.
 
 Only advertise a flag once the matching components pass the fixtures in
 section 8. The server only lets the model create a visual or figure for a turn
-whose client advertised the flag, and only while the server's rollout switch is
-on.
+whose client advertised the flag along with `inlineRichResponseV1`, and only
+while the server's inline rich-response kill switch is on.
 
 ## 2. What each client receives
 
@@ -420,12 +421,15 @@ Please send back:
 
 ## 9. Known limitations
 
-- A figure created before a turn paused for tool approval or for its budget does
-  not carry its images over to the resumed turn. Until this is fixed, such a
-  figure can show broken images after Continue. The server's figure switch stays
-  off until this is resolved.
+- A visual or figure created before an approval pause is kept and can be placed
+  by the resumed answer. A figure's images are held for the pending-image TTL
+  (15 minutes by default); if the approval comes later than that, the images
+  are gone and the figure degrades as in "Comparison unavailable" (or is
+  removed with its marker when no image survives).
+- A figure composed during one budget epoch but placed only after Continue is
+  removed with its marker; the prose stays.
 - While a web-answer draft is shown as a preview overlay, a marker split across
   two chunks can briefly appear as raw text. The reconciled final text is
   correct.
-- The `data-interrupt` message payload is not projected for these flags yet.
-  Ignore any `visual:` or `figure:` markers you see there.
+- `data-interrupt` carries the paused message projected for the request's
+  flags, the same way a completed message is.
