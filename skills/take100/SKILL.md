@@ -36,12 +36,14 @@ If a command reports missing Python packages, relay the install command it print
 Any step can run alone — the user may only want one of them.
 
 ## Step A — Attendance (read-only)
-```json
-{"argv": ["scripts/attendance.py"], "cwd": "skill"}
-```
-Extra argv: `"--from", "2026-09-21", "--to", "2026-10-20"` (only when the user asks for another period), `"--employee", "VT0123"` (someone else; no application comparison), `"--base-url", "https://xxxx.ngrok-free.app"`.
+Current time-checking page: [VT Check Attendance](https://2ad6-120-72-106-114.ngrok-free.app/admin/attendance).
 
-The panel is behind an **ngrok tunnel whose URL changes**; the command remembers the last one that worked. If it reports the tunnel offline or unreachable, ask the user for the current URL and re-run with `--base-url` (a pasted `.../login` URL is fine). The Mã NV is read from take100 automatically — do not ask for it unless the command says so.
+```json
+{"argv": ["scripts/attendance.py", "--base-url", "https://2ad6-120-72-106-114.ngrok-free.app"], "cwd": "skill"}
+```
+Extra argv: `"--from", "2026-09-21", "--to", "2026-10-20"` (only when the user asks for another period), `"--employee", "VT0123"` (someone else; no application comparison).
+
+The panel is behind an **ngrok tunnel whose URL changes**; use the URL above unless the user supplies a newer one. The command remembers the last one that worked. If it reports the tunnel offline or unreachable, ask the user for the current URL and re-run with `--base-url` (a pasted `.../login` or `.../admin/attendance` URL is fine). The Mã NV is read from take100 automatically — do not ask for it unless the command says so.
 
 Output: `days`, `missing_workdays`, `suggested_applications`, `totals`, `warnings`. Per day:
 | Field | Meaning |
