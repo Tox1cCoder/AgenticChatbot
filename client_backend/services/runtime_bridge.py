@@ -18,8 +18,10 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidMessage
 
 from app.schemas.runtime_protocol import (
     RUNTIME_ERROR_EXECUTION_TIMEOUT,
@@ -61,7 +63,12 @@ from client_backend.services.local_skills_registry import (
     get_skills_registry,
     initialize_skills_registry,
 )
-from client_backend.services.server_api import ServerAPIClient, get_server_client
+from client_backend.services.server_api import (
+    ServerAPIClient,
+    ServerAPIError,
+    ServerConnectionError,
+    get_server_client,
+)
 from client_backend.services.skill_runtime.execution import SkillExecutionEngine
 from client_backend.services.skill_runtime.manager import SkillRuntimeManager
 from client_backend.services.skill_runtime.resources import (
@@ -109,6 +116,36 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
 
     with suppress(asyncio.CancelledError):
         task.exception()
+
+
+def _is_transient_connection_error(exc: Exception) -> bool:
+    """An unavailable server or network must not permanently stop the bridge."""
+    if isinstance(exc, (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError)):
+        return False
+    if isinstance(
+        exc,
+        (
+            OSError,
+            EOFError,
+            httpx.NetworkError,
+            httpx.TimeoutException,
+            httpx.RemoteProtocolError,
+            httpx.ProxyError,
+            ServerConnectionError,
+            ConnectionClosed,
+        ),
+    ):
+        return True
+    if isinstance(exc, InvalidMessage) and isinstance(exc.__cause__, (EOFError, OSError)):
+        # Both legacy and modern websockets wrap an incomplete HTTP upgrade.
+        return _is_transient_connection_error(exc.__cause__)
+    if isinstance(exc, (ServerAPIError, InvalidHandshake)):
+        # websockets >= 14 exposes the HTTP response; older versions expose
+        # status_code directly on InvalidStatusCode.
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None) or getattr(exc, "status_code", None)
+        return status_code in {408, 429} or (status_code is not None and 500 <= status_code < 600)
+    return False
 
 
 class RuntimeBridgeService:
@@ -418,9 +455,12 @@ class RuntimeBridgeService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # Count consecutive failed connections, not disconnects spread
-                # across otherwise healthy sessions over the client's lifetime.
-                if self._state.status == RuntimeStatus.CONNECTED:
+                # Sleep and server/network recovery can outlast any finite
+                # retry budget. Keep retrying those failures until stopped;
+                # reserve the limit for persistent auth/configuration errors.
+                if self._state.status == RuntimeStatus.CONNECTED or _is_transient_connection_error(
+                    exc
+                ):
                     attempts = 0
                 else:
                     attempts += 1

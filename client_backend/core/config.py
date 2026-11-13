@@ -198,7 +198,10 @@ class ClientSettings(BaseSettings):
     )
     max_reconnect_attempts: int = Field(
         default=10,
-        description="Maximum reconnection attempts before giving up.",
+        description=(
+            "Maximum consecutive non-transient runtime failures before giving up. "
+            "Network outages and temporary server errors keep retrying until stopped."
+        ),
     )
 
     # Skill Archive Uploads

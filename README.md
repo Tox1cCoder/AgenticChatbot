@@ -1222,7 +1222,12 @@ heartbeat it could not renew. The sidecar also reconnects when heartbeat sends
 fail or an acknowledgment does not arrive within one heartbeat interval. It
 registers a fresh session and republishes both tool and skill catalogs before
 reporting connected, using the existing login credentials. Reconnect limits
-count consecutive failed connections; healthy sessions reset that count.
+apply to consecutive authentication or configuration failures; healthy sessions
+reset that count. Network failures, timeouts, and temporary HTTP errors (`408`,
+`429`, or `5xx`) keep retrying at `CLIENT_RECONNECT_DELAY_SECONDS` until the
+bridge is stopped, so a long wake-up or server outage cannot exhaust recovery.
+A temporary token-refresh failure keeps its original network/server error
+instead of being reported as an authentication rejection.
 
 **Device identity** — each installation has a random identifier generated on
 first run and persisted as `device_identity.json` in the profile directory

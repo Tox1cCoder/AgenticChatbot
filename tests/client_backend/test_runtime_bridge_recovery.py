@@ -2,14 +2,18 @@
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
+import httpx
 import pytest
 import websockets
 from fastapi import WebSocketDisconnect
+from websockets.exceptions import ConnectionClosedError, InvalidStatus
+from websockets.http11 import Response
 
 from app.ai.client_runtime_tools import get_active_client_runtime_session
 from app.api.device_runtime import DeviceRuntimeGateway
@@ -17,10 +21,15 @@ from app.core.config import settings
 from app.schemas.runtime_protocol import RuntimeAckMessage
 from app.services import client_runtime_store as store_module
 from app.services.client_device_service import ClientDeviceService
-from app.services.client_runtime_store import InMemoryClientRuntimeStore
+from app.services.client_runtime_store import InMemoryClientRuntimeStore, RedisClientRuntimeStore
 from client_backend.schemas.runtime import CatalogSyncResult, RuntimeStatus
 from client_backend.services import runtime_bridge as bridge_module
 from client_backend.services.runtime_bridge import RuntimeBridgeService
+from client_backend.services.server_api import (
+    AuthenticationError,
+    ServerAPIError,
+    ServerConnectionError,
+)
 
 
 class _Socket:
@@ -93,7 +102,21 @@ async def test_only_heartbeat_acknowledgments_update_heartbeat_time():
     assert bridge.get_runtime_state().last_heartbeat > old_heartbeat
 
 
-async def test_consecutive_failed_connections_still_respect_retry_limit(monkeypatch):
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("Invalid runtime configuration"),
+        AuthenticationError("Refresh token rejected", status_code=401),
+        ServerAPIError("Invalid registration", status_code=400),
+        InvalidStatus(Response(401, "Unauthorized", websockets.Headers())),
+        httpx.UnsupportedProtocol("Server URL is missing http:// or https://"),
+        httpx.LocalProtocolError("Invalid client request headers"),
+        FileNotFoundError("Local runtime configuration is missing"),
+        PermissionError("Local runtime configuration is not readable"),
+    ],
+    ids=["configuration", "auth", "400", "upgrade-401", "url", "headers", "file", "permission"],
+)
+async def test_non_transient_failures_still_respect_retry_limit(monkeypatch, error):
     bridge = RuntimeBridgeService(server_client=SimpleNamespace(base_url="http://server.test"))
     monkeypatch.setattr(bridge_module.client_settings, "reconnect_delay_seconds", 0)
     monkeypatch.setattr(bridge_module.client_settings, "max_reconnect_attempts", 2)
@@ -105,7 +128,9 @@ async def test_consecutive_failed_connections_still_respect_retry_limit(monkeypa
     async def register_device():
         nonlocal registrations
         registrations += 1
-        raise ConnectionError("Server unavailable")
+        if registrations > 5:
+            pytest.fail("A permanent failure bypassed the reconnect limit")
+        raise error.with_traceback(None)
 
     monkeypatch.setattr(bridge, "_initialize_local_runtime", initialize_local_runtime)
     monkeypatch.setattr(bridge, "_register_device", register_device)
@@ -115,6 +140,111 @@ async def test_consecutive_failed_connections_still_respect_retry_limit(monkeypa
     assert registrations == 2
     assert bridge.get_runtime_state().status == RuntimeStatus.ERROR
     assert not bridge.is_connected()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("Opening handshake timed out"),
+        ConnectionClosedError(None, None),
+        InvalidStatus(Response(503, "Server recovering", websockets.Headers())),
+    ],
+    ids=["timeout", "closed-socket", "upgrade-503"],
+)
+async def test_transient_websocket_failures_keep_retrying_until_stopped(monkeypatch, error):
+    bridge = RuntimeBridgeService(server_client=SimpleNamespace(base_url="http://server.test"))
+    monkeypatch.setattr(bridge_module.client_settings, "reconnect_delay_seconds", 0)
+    monkeypatch.setattr(bridge_module.client_settings, "max_reconnect_attempts", 2)
+    retries_exceeded = asyncio.Event()
+    attempts = 0
+
+    async def initialize_local_runtime():
+        pass
+
+    async def register_device():
+        return SimpleNamespace(device_id="device-a", session_id="session-a")
+
+    async def connect_and_serve():
+        nonlocal attempts
+        attempts += 1
+        if attempts > 5:
+            retries_exceeded.set()
+            await asyncio.Future()
+        raise error
+
+    monkeypatch.setattr(bridge, "_initialize_local_runtime", initialize_local_runtime)
+    monkeypatch.setattr(bridge, "_register_device", register_device)
+    monkeypatch.setattr(bridge, "_connect_and_serve", connect_and_serve)
+    bridge._runtime_task = asyncio.create_task(bridge._run_forever())
+    try:
+        async with asyncio.timeout(1):
+            await retries_exceeded.wait()
+        assert not bridge._runtime_task.done()
+    finally:
+        # Skip the upstream disconnect check: no socket was ever established.
+        bridge._device_id = None
+        await bridge.stop()
+    assert bridge._runtime_task is None
+    assert bridge.get_runtime_state().status == RuntimeStatus.DISCONNECTED
+
+
+async def test_websocket_handshake_eof_keeps_retrying(monkeypatch):
+    """A resuming server/proxy may accept TCP but close before the HTTP upgrade."""
+    bridge = RuntimeBridgeService(server_client=SimpleNamespace(base_url="http://server.test"))
+    monkeypatch.setattr(bridge_module.client_settings, "reconnect_delay_seconds", 0)
+    monkeypatch.setattr(bridge_module.client_settings, "max_reconnect_attempts", 2)
+    retries_exceeded = asyncio.Event()
+    connections = 0
+
+    async def close_during_handshake(reader, writer):
+        nonlocal connections
+        try:
+            await reader.read(4096)
+            connections += 1
+            if connections > 5:
+                retries_exceeded.set()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def initialize_local_runtime():
+        pass
+
+    async def register_device():
+        return SimpleNamespace(device_id="device-a", session_id="session-a")
+
+    monkeypatch.setattr(bridge, "_initialize_local_runtime", initialize_local_runtime)
+    monkeypatch.setattr(bridge, "_register_device", register_device)
+    async with await asyncio.start_server(close_during_handshake, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        bridge._websocket_base_url = f"ws://127.0.0.1:{port}"
+        bridge._runtime_task = asyncio.create_task(bridge._run_forever())
+        try:
+            async with asyncio.timeout(2):
+                await retries_exceeded.wait()
+            assert not bridge._runtime_task.done()
+        finally:
+            bridge._device_id = None
+            await bridge.stop()
+
+
+@pytest.fixture(params=["memory", "redis"])
+async def runtime_store(request, monkeypatch):
+    if request.param == "memory":
+        store = InMemoryClientRuntimeStore()
+    else:
+        url = os.getenv("TEST_REDIS_URL") or store_module._runtime_redis_url()
+        if not url:
+            pytest.skip("No test Redis available")
+        try:
+            store = RedisClientRuntimeStore(url)
+        except Exception as exc:
+            pytest.skip(f"Redis unavailable: {exc}")
+    monkeypatch.setattr(store_module, "_store", store)
+    try:
+        yield store
+    finally:
+        await store.close()
 
 
 class _GatewaySocket:
@@ -137,14 +267,25 @@ class _GatewaySocket:
 
 
 @pytest.mark.parametrize("session_loss", ["expired", "missing"])
+@pytest.mark.parametrize(
+    "outage_error",
+    [
+        None,
+        ServerConnectionError("Network unavailable after wake"),
+        ServerAPIError("Server recovering", status_code=503),
+        ServerAPIError("Server busy", status_code=429),
+        httpx.RemoteProtocolError("Server disconnected without sending a response"),
+        ConnectionResetError("Connection reset after wake"),
+    ],
+    ids=["no-outage", "network", "503", "429", "http-transport", "socket"],
+)
 async def test_reconnect_restores_both_catalogs_after_repeated_session_loss(
-    monkeypatch, session_loss
+    monkeypatch, runtime_store, session_loss, outage_error
 ):
-    """Healthy connections must reset retries across separate idle/sleep cycles."""
+    """Recover usable catalogs even when wake-up outlasts the old retry budget."""
     from websockets.asyncio.server import serve
 
-    store = InMemoryClientRuntimeStore()
-    monkeypatch.setattr(store_module, "_store", store)
+    store = runtime_store
     monkeypatch.setattr(settings, "enable_client_runtime_bridge", True)
     monkeypatch.setattr(bridge_module, "is_process_elevated", lambda: False)
     monkeypatch.setattr(bridge_module.client_settings, "heartbeat_interval_seconds", 0.05)
@@ -152,6 +293,7 @@ async def test_reconnect_restores_both_catalogs_after_repeated_session_loss(
     monkeypatch.setattr(bridge_module.client_settings, "max_reconnect_attempts", 2)
 
     user_id, device_id = uuid4(), uuid4()
+    failed_registrations_remaining = 0
     service = ClientDeviceService.__new__(ClientDeviceService)
     service.repository = SimpleNamespace(
         update_status=lambda *_args: SimpleNamespace(user_id=user_id)
@@ -164,6 +306,10 @@ async def test_reconnect_restores_both_catalogs_after_repeated_session_loss(
             return True
 
         async def register_device(self, **kwargs):
+            nonlocal failed_registrations_remaining
+            if failed_registrations_remaining:
+                failed_registrations_remaining -= 1
+                raise outage_error
             session_id = str(uuid4())
             await service.issue_runtime_session_id(device_id, session_id)
             return SimpleNamespace(device_id=str(device_id), session_id=session_id)
@@ -214,15 +360,22 @@ async def test_reconnect_restores_both_catalogs_after_repeated_session_loss(
         async def build_tool_catalog():
             return {"tools": [{"name": "read_file", "qualified_id": "demo::read_file"}]}
 
+        async def execute_tool_request(request):
+            return {"content": [{"type": "text", "text": "Tool available after reconnect"}]}
+
         monkeypatch.setattr(bridge, "_initialize_local_runtime", initialize_local_runtime)
         monkeypatch.setattr(bridge, "_build_tool_catalog", build_tool_catalog)
+        monkeypatch.setattr(bridge, "_execute_tool_request", execute_tool_request)
         try:
             assert await bridge.start(timeout_seconds=2)
             for _ in range(3):
                 old_session_id = bridge.get_runtime_state().session_id
+                if outage_error is not None:
+                    failed_registrations_remaining = 5
                 if session_loss == "expired":
                     session = store.get_session(device_id)
                     session.last_heartbeat = datetime.now(UTC) - timedelta(days=1)
+                    await store.put_session(session)
                 else:
                     await store.delete_session(device_id)
 
@@ -250,5 +403,20 @@ async def test_reconnect_restores_both_catalogs_after_repeated_session_loss(
                 assert session.skill_catalog["skills"][0]["name"] == "demo"
                 assert session.tool_catalog_version == 1
                 assert session.skill_catalog_version == 1
+                assert failed_registrations_remaining == 0
+                result = await service.dispatch_tool_call(
+                    user_id=str(user_id),
+                    device_id=str(device_id),
+                    tool_name="read_file",
+                    qualified_tool_id="demo::read_file",
+                    arguments={},
+                    execution_timeout_seconds=1,
+                    response_timeout_seconds=2,
+                    bound_session_id=session.session_id,
+                    bound_catalog_version=session.tool_catalog_version,
+                )
+                assert result["success"] is True
+                assert "Tool available after reconnect" in str(result["result"])
         finally:
             await bridge.stop()
+            await store.delete_session(device_id)

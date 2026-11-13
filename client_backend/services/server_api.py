@@ -346,8 +346,10 @@ class ServerAPIClient:
         ):
             try:
                 await self.refresh_token()
-            except (AuthenticationError, ServerAPIError):
-                # Refresh genuinely failed — surface the original 401.
+            except AuthenticationError:
+                # Only a rejected refresh proves the credentials are invalid.
+                # Preserve transport/5xx failures so callers can recover after
+                # an outage instead of treating an expired access token as logout.
                 return await self._handle_response(response)
             # Replay once with the refreshed token; never retry a second time.
             return await self.request(method, path, _retry_on_auth=False, **kwargs)

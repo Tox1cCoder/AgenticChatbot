@@ -337,6 +337,35 @@ async def test_request_surfaces_401_when_refresh_fails(monkeypatch):
         await client.request("GET", "/messages/")
 
 
+@pytest.mark.parametrize("failure", ["network", "503"])
+async def test_request_preserves_transient_token_refresh_failure(failure):
+    from client_backend.services.server_api import ServerConnectionError
+
+    client = ServerAPIClient(base_url="http://example.test", timeout=5)
+    tokens = TokenPair(access_token="expired", refresh_token="still-valid")
+    client.set_tokens(tokens)
+    paths = []
+
+    def respond(request):
+        paths.append(request.url.path)
+        if request.url.path == "/auth/refresh":
+            if failure == "network":
+                raise httpx.ConnectError("Network is resuming", request=request)
+            return httpx.Response(503, json={"detail": "Server is resuming"})
+        return httpx.Response(401, json={"detail": "Access token expired"})
+
+    async with httpx.AsyncClient(
+        base_url=client.base_url, transport=httpx.MockTransport(respond)
+    ) as transport:
+        client._client = transport
+        expected_error = ServerConnectionError if failure == "network" else ServerAPIError
+        with pytest.raises(expected_error) as exc_info:
+            await client.get("/client-devices/")
+        assert not isinstance(exc_info.value, AuthenticationError)
+        assert client.get_tokens() is tokens
+        assert paths == ["/client-devices/", "/auth/refresh"]
+
+
 @pytest.mark.asyncio
 async def test_request_does_not_retry_the_auth_refresh_path(monkeypatch):
     client = ServerAPIClient(base_url="http://example.test", timeout=5)
