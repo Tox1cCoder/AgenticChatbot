@@ -1,5 +1,9 @@
 # AI SDK Frontend Contract
 
+For compact `tool_search` outputs, optional fields, catalog-failure rendering, and
+saved-history compatibility, use
+[tool-search-contract.md](../docs/frontend/tool-search-contract.md).
+
 For the focused Continue integration, use
 [CONTINUE_AI_SDK_FE_CONTRACT.md](CONTINUE_AI_SDK_FE_CONTRACT.md).
 
